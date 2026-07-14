@@ -611,3 +611,192 @@ it("returns Skill script files as inert text when the model reads them", async (
   });
   expect(session.audit().files).toEqual(["scripts/component_lint.py"]);
 });
+
+describe("completeScoped", () => {
+  it("reuses an injected Skill baseline without accumulating scoped turns", async () => {
+    const client = new ScriptedChatClient([
+      completed({ content: "FIRST_OUTPUT_SENTINEL" }),
+      completed({ content: "SECOND_OUTPUT" })
+    ]);
+    const session = makeSession(client, { tools: false });
+
+    await expect(
+      session.completeScoped("FIRST_PROMPT_SENTINEL", signal())
+    ).resolves.toBe("FIRST_OUTPUT_SENTINEL");
+    await expect(
+      session.completeScoped("SECOND_PROMPT", signal())
+    ).resolves.toBe("SECOND_OUTPUT");
+
+    expect(client.requests).toHaveLength(2);
+    const secondText = client.requests[1]!.messages
+      .map(({ content }) => content)
+      .join("\n");
+    expect(secondText).toContain("SECOND_PROMPT");
+    expect(secondText).toContain('<skill-file path="SKILL.md">');
+    expect(secondText).toContain(
+      '<skill-file path="references/theme-index.md">'
+    );
+    expect(secondText).not.toContain("FIRST_PROMPT_SENTINEL");
+    expect(secondText).not.toContain("FIRST_OUTPUT_SENTINEL");
+    expect(session.audit()).toMatchObject({
+      loadMode: "injected",
+      files: ["SKILL.md", "references/theme-index.md"]
+    });
+  });
+
+  it("reuses a tool-first load transcript without accumulating scoped turns", async () => {
+    const client = new ScriptedChatClient([
+      read("root", "SKILL.md"),
+      read("themes", "references/theme-index.md"),
+      completed({ content: "bootstrap complete" }),
+      completed({ content: "FIRST_OUTPUT_SENTINEL" }),
+      completed({ content: "SECOND_OUTPUT" })
+    ]);
+    const session = makeSession(client);
+
+    await session.bootstrap(signal());
+    await session.completeScoped("FIRST_PROMPT_SENTINEL", signal());
+    await session.completeScoped("SECOND_PROMPT", signal());
+
+    const secondScoped = client.requests[4]!;
+    expect(secondScoped.tools).toEqual([READ_SKILL_FILE_TOOL]);
+    expect(secondScoped.messages).toContainEqual({
+      role: "tool",
+      toolCallId: "root",
+      content: "Complete workflow instructions."
+    });
+    expect(secondScoped.messages).toContainEqual({
+      role: "tool",
+      toolCallId: "themes",
+      content: "Complete theme index."
+    });
+    const secondText = secondScoped.messages
+      .map(({ content }) => content)
+      .join("\n");
+    expect(secondText).toContain("SECOND_PROMPT");
+    expect(secondText).not.toContain("FIRST_PROMPT_SENTINEL");
+    expect(secondText).not.toContain("FIRST_OUTPUT_SENTINEL");
+    expect(session.audit()).toMatchObject({
+      loadMode: "tool-calls",
+      files: ["SKILL.md", "references/theme-index.md"]
+    });
+  });
+
+  it("treats provider tool-call ids as request-scoped across independent calls", async () => {
+    const client = new ScriptedChatClient([
+      read("root", "SKILL.md"),
+      read("themes", "references/theme-index.md"),
+      completed({ content: "bootstrap complete" }),
+      read("provider-reused-id", "scripts/component_lint.py"),
+      completed({ content: "FIRST_OUTPUT" }),
+      read("provider-reused-id", "scripts/component_lint.py"),
+      completed({ content: "SECOND_OUTPUT" })
+    ]);
+    const session = makeSession(client);
+
+    await session.bootstrap(signal());
+    await expect(
+      session.completeScoped("FIRST_PROMPT", signal())
+    ).resolves.toBe("FIRST_OUTPUT");
+    await expect(
+      session.completeScoped("SECOND_PROMPT", signal())
+    ).resolves.toBe("SECOND_OUTPUT");
+
+    expect(client.remainingSteps()).toBe(0);
+    expect(session.audit().files).toEqual([
+      "SKILL.md",
+      "references/theme-index.md",
+      "scripts/component_lint.py"
+    ]);
+  });
+
+  it("makes a scoped voluntary read visible to later regular complete calls", async () => {
+    const client = new ScriptedChatClient([
+      read("root", "SKILL.md"),
+      read("themes", "references/theme-index.md"),
+      completed({ content: "bootstrap complete" }),
+      read("scoped-script", "scripts/component_lint.py"),
+      completed({ content: "SCOPED_OUTPUT_SENTINEL" }),
+      completed({ content: "REGULAR_OUTPUT" })
+    ]);
+    const session = makeSession(client);
+
+    await session.bootstrap(signal());
+    await session.completeScoped("SCOPED_PROMPT_SENTINEL", signal());
+    await expect(
+      session.complete("REGULAR_PROMPT", signal())
+    ).resolves.toBe("REGULAR_OUTPUT");
+
+    const regularText = client.requests.at(-1)!.messages
+      .map(({ content }) => content)
+      .join("\n");
+    expect(regularText).toContain("REGULAR_PROMPT");
+    expect(regularText).toContain("raise RuntimeError('must never execute')");
+    expect(regularText).not.toContain("SCOPED_PROMPT_SENTINEL");
+    expect(regularText).not.toContain("SCOPED_OUTPUT_SENTINEL");
+  });
+
+  it("keeps regular complete conversation accumulation unchanged", async () => {
+    const client = new ScriptedChatClient([
+      completed({ content: "FIRST_REGULAR_OUTPUT" }),
+      completed({ content: "SECOND_REGULAR_OUTPUT" })
+    ]);
+    const session = makeSession(client, { tools: false });
+
+    await session.complete("FIRST_REGULAR_PROMPT", signal());
+    await session.complete("SECOND_REGULAR_PROMPT", signal());
+
+    const secondText = client.requests[1]!.messages
+      .map(({ content }) => content)
+      .join("\n");
+    expect(secondText).toContain("FIRST_REGULAR_PROMPT");
+    expect(secondText).toContain("FIRST_REGULAR_OUTPUT");
+    expect(secondText).toContain("SECOND_REGULAR_PROMPT");
+  });
+
+  it("preserves scoped downgrade fallback, invalid-response, and abort behavior", async () => {
+    const downgradeClient = new ScriptedChatClient([
+      read("root", "SKILL.md"),
+      read("themes", "references/theme-index.md"),
+      completed({ content: "bootstrap complete" }),
+      new AiError("tools_unsupported"),
+      completed({ content: "fallback answer" })
+    ]);
+    const downgraded = makeSession(downgradeClient);
+    await downgraded.bootstrap(signal());
+    await expect(
+      downgraded.completeScoped("SCOPED_PROMPT", signal())
+    ).resolves.toBe("fallback answer");
+    expect(downgradeClient.requests.at(-1)?.tools).toBeUndefined();
+    expect(downgradeClient.requests.at(-1)?.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ content: "SCOPED_PROMPT" }),
+        expect.objectContaining({
+          content: expect.stringContaining('<skill-file path="SKILL.md">')
+        })
+      ])
+    );
+    expect(downgraded.audit().loadMode).toBe("mixed");
+
+    const invalidClient = new ScriptedChatClient([
+      completed({ content: "invalid", finishReason: "tool_calls" })
+    ]);
+    await expect(
+      makeSession(invalidClient, { tools: false }).completeScoped(
+        "prompt",
+        signal()
+      )
+    ).rejects.toMatchObject({ code: "invalid_response" });
+
+    const aborted = new AbortController();
+    aborted.abort();
+    const unusedClient = new ScriptedChatClient([]);
+    await expect(
+      makeSession(unusedClient, { tools: false }).completeScoped(
+        "prompt",
+        aborted.signal
+      )
+    ).rejects.toMatchObject({ code: "aborted" });
+    expect(unusedClient.requests).toEqual([]);
+  });
+});

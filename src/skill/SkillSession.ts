@@ -66,6 +66,8 @@ export class SkillSession {
   readonly #vfs: SkillVirtualFileSystem;
   readonly #packageHash: string;
   readonly #messages: ChatRequest["messages"] = [];
+  readonly #loadMessages: ChatRequest["messages"] = [];
+  readonly #baselineFiles = new Set<string>();
   readonly #requiredFiles = new Set<string>();
   readonly #loadedFiles = new Set<string>();
   readonly #auditFiles: string[] = [];
@@ -112,7 +114,7 @@ export class SkillSession {
     while (true) {
       missing = required.filter((path) => !this.#loadedFiles.has(path));
       if (missing.length > 0) {
-        this.#messages.push({
+        this.#appendLoadMessage({
           role: "system",
           content:
             "Before replying, call read_skill_file once for every missing required Skill path: " +
@@ -135,7 +137,7 @@ export class SkillSession {
         return;
       }
 
-      this.#appendAssistant(result);
+      this.#appendAssistant(result, [this.#messages, this.#loadMessages]);
       if (result.toolCalls.length === 0) {
         this.#acceptFinalContent(result);
         if (missing.length === 0) {
@@ -156,7 +158,10 @@ export class SkillSession {
         throw new AiError("tool_round_limit");
       }
       const missingBeforeRound = new Set(missing);
-      const reads = this.#processToolCalls(result.toolCalls);
+      const reads = this.#processToolCalls(result.toolCalls, [
+        this.#messages,
+        this.#loadMessages
+      ]);
       if (reads.some((read) => missingBeforeRound.has(read.path))) {
         ignoredRounds = 0;
       } else if (missing.length > 0) {
@@ -208,7 +213,58 @@ export class SkillSession {
       if (toolRounds > MAX_TOOL_ROUNDS) {
         throw new AiError("tool_round_limit");
       }
-      this.#processToolCalls(result.toolCalls);
+      const reads = this.#processToolCalls(result.toolCalls);
+      this.#persistReads(reads);
+    }
+  }
+
+  async completeScoped(prompt: string, signal: AbortSignal): Promise<string> {
+    await this.bootstrap(signal);
+    await this.ensureFiles([...this.#requiredFiles], signal);
+    this.#throwIfAborted(signal);
+
+    let messages = this.#cloneMessages(this.#loadMessages);
+    messages.push({ role: "user", content: prompt });
+    const seenToolCallIds = this.#toolCallIds(messages);
+    if (!this.#capabilities.tools) {
+      const result = await this.#request(false, signal, messages);
+      this.#appendAssistant(result, [messages]);
+      return this.#acceptFinalContent(result);
+    }
+
+    let toolRounds = 0;
+    while (true) {
+      let result: ChatTurnResult;
+      try {
+        result = await this.#request(true, signal, messages);
+      } catch (error) {
+        if (!this.#isToolsUnsupported(error)) {
+          throw error;
+        }
+        this.#capabilities.tools = false;
+        this.#injectFiles([...this.#requiredFiles], true);
+        messages = this.#cloneMessages(this.#loadMessages);
+        messages.push({ role: "user", content: prompt });
+        const retry = await this.#request(false, signal, messages);
+        this.#appendAssistant(retry, [messages]);
+        return this.#acceptFinalContent(retry);
+      }
+
+      this.#appendAssistant(result, [messages]);
+      if (result.toolCalls.length === 0) {
+        return this.#acceptFinalContent(result);
+      }
+
+      toolRounds += 1;
+      if (toolRounds > MAX_TOOL_ROUNDS) {
+        throw new AiError("tool_round_limit");
+      }
+      const reads = this.#processToolCalls(
+        result.toolCalls,
+        [messages],
+        seenToolCallIds
+      );
+      this.#persistReads(reads, [this.#messages, this.#loadMessages]);
     }
   }
 
@@ -239,35 +295,47 @@ export class SkillSession {
     return [...unique];
   }
 
-  #processToolCalls(toolCalls: readonly ChatToolCall[]): ValidatedRead[] {
-    const validated = this.#validateToolCalls(toolCalls);
+  #processToolCalls(
+    toolCalls: readonly ChatToolCall[],
+    targets: readonly ChatRequest["messages"][] = [this.#messages],
+    seenToolCallIds: Set<string> = this.#seenToolCallIds
+  ): ValidatedRead[] {
+    const validated = this.#validateToolCalls(toolCalls, seenToolCallIds);
     const contents = validated.map((read) => this.#vfs.read(read.path));
     for (const read of validated) {
-      this.#seenToolCallIds.add(read.id);
+      seenToolCallIds.add(read.id);
     }
     validated.forEach((read, index) => {
       const content = contents[index];
       if (content === undefined) {
         throw invalidToolResponse();
       }
-      this.#messages.push({
-        role: "tool",
-        toolCallId: read.id,
-        content
-      });
+      for (const target of targets) {
+        target.push({
+          role: "tool",
+          toolCallId: read.id,
+          content
+        });
+      }
       this.#recordLoad(read.path, "tool-calls");
+      if (targets.includes(this.#loadMessages)) {
+        this.#baselineFiles.add(read.path);
+      }
     });
     return validated;
   }
 
-  #validateToolCalls(toolCalls: readonly ChatToolCall[]): ValidatedRead[] {
+  #validateToolCalls(
+    toolCalls: readonly ChatToolCall[],
+    seenToolCallIds: ReadonlySet<string>
+  ): ValidatedRead[] {
     const ids = new Set<string>();
     return toolCalls.map((call) => {
       if (
         typeof call.id !== "string" ||
         call.id.length === 0 ||
         ids.has(call.id) ||
-        this.#seenToolCallIds.has(call.id) ||
+        seenToolCallIds.has(call.id) ||
         call.name !== READ_SKILL_FILE_TOOL.name ||
         typeof call.argumentsJson !== "string"
       ) {
@@ -326,11 +394,14 @@ export class SkillSession {
         continue;
       }
       const content = this.#vfs.read(path);
-      this.#messages.push({
+      const message = {
         role: "system",
         content: `<skill-file path="${escapeAttribute(path)}">\n${content}\n</skill-file>`
-      });
+      } as const;
+      this.#messages.push(message);
+      this.#loadMessages.push({ ...message });
       this.#recordLoad(path, "injected");
+      this.#baselineFiles.add(path);
     }
   }
 
@@ -355,25 +426,97 @@ export class SkillSession {
 
   async #request(
     withTools: boolean,
-    signal: AbortSignal
+    signal: AbortSignal,
+    messages: ChatRequest["messages"] = this.#messages
   ): Promise<ChatTurnResult> {
     this.#throwIfAborted(signal);
     const request: ChatRequest = {
       ...this.#target,
-      messages: this.#messages,
+      messages,
       ...(withTools ? { tools: [READ_SKILL_FILE_TOOL] } : {})
     };
     return this.#client.complete(request, signal);
   }
 
-  #appendAssistant(result: ChatTurnResult): void {
-    this.#messages.push({
-      role: "assistant",
-      content: result.content,
-      ...(result.toolCalls.length === 0
-        ? {}
-        : { toolCalls: result.toolCalls.map((call) => ({ ...call })) })
-    });
+  #appendAssistant(
+    result: ChatTurnResult,
+    targets: readonly ChatRequest["messages"][] = [this.#messages]
+  ): void {
+    for (const target of targets) {
+      target.push({
+        role: "assistant",
+        content: result.content,
+        ...(result.toolCalls.length === 0
+          ? {}
+          : { toolCalls: result.toolCalls.map((call) => ({ ...call })) })
+      });
+    }
+  }
+
+  #appendLoadMessage(message: ChatRequest["messages"][number]): void {
+    this.#messages.push(message);
+    this.#loadMessages.push(
+      message.role === "tool"
+        ? { ...message }
+        : {
+            ...message,
+            ...(message.toolCalls === undefined
+              ? {}
+              : {
+                  toolCalls: message.toolCalls.map((call) => ({ ...call }))
+                })
+          }
+    );
+  }
+
+  #persistReads(
+    reads: readonly ValidatedRead[],
+    targets: readonly ChatRequest["messages"][] = [this.#loadMessages]
+  ): void {
+    for (const { path } of reads) {
+      if (this.#baselineFiles.has(path)) {
+        continue;
+      }
+      const content = this.#vfs.read(path);
+      for (const target of targets) {
+        target.push({
+          role: "system",
+          content: `<skill-file path="${escapeAttribute(path)}">\n${content}\n</skill-file>`
+        });
+      }
+      this.#baselineFiles.add(path);
+    }
+  }
+
+  #toolCallIds(messages: ChatRequest["messages"]): Set<string> {
+    const ids = new Set<string>();
+    for (const message of messages) {
+      if (message.role === "tool") {
+        ids.add(message.toolCallId);
+      } else {
+        for (const call of message.toolCalls ?? []) {
+          ids.add(call.id);
+        }
+      }
+    }
+    return ids;
+  }
+
+  #cloneMessages(
+    messages: ChatRequest["messages"]
+  ): ChatRequest["messages"] {
+    return messages.map((message) =>
+      message.role === "tool"
+        ? { ...message }
+        : {
+            ...message,
+            ...(message.toolCalls === undefined
+              ? {}
+              : {
+                  toolCalls: message.toolCalls.map((call) => ({ ...call }))
+                })
+          }
+    );
   }
 
   #throwIfAborted(signal: AbortSignal): void {
