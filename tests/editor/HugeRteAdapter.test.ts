@@ -250,6 +250,105 @@ describe("HugeRteAdapter event bridge", () => {
 });
 
 describe("HugeRteAdapter lifecycle", () => {
+  it("keeps the last setHtml while the runtime loader is pending without emitting changes", async () => {
+    const runtime = new FakeRuntime();
+    const onChange = vi.fn();
+    let releaseRuntime: ((runtime: HugeRteRuntime) => void) | undefined;
+    const runtimePending = new Promise<HugeRteRuntime>((resolve) => {
+      releaseRuntime = resolve;
+    });
+    const adapter = new HugeRteAdapter(() => runtimePending);
+    const mounting = adapter.mount(
+      document.createElement("div"),
+      "<p>old</p>",
+      mountOptions({ onChange })
+    );
+
+    adapter.setHtml("<p>newer</p>");
+    adapter.setHtml("<p>newest</p>");
+    expect(adapter.getHtml()).toBe("<p>newest</p>");
+    releaseRuntime?.(runtime);
+    await mounting;
+
+    expect(runtime.editors[0]?.html).toBe("<p>newest</p>");
+    expect(adapter.getHtml()).toBe("<p>newest</p>");
+    expect(onChange).not.toHaveBeenCalled();
+    adapter.destroy();
+  });
+
+  it("keeps pending setHtml in the real bundled runtime without emitting changes", async () => {
+    vi.stubGlobal("matchMedia", vi.fn((media: string) => ({
+      matches: false,
+      media,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(() => true)
+    })));
+    const warmup = new HugeRteAdapter();
+    const warmupHost = document.createElement("div");
+    document.body.append(warmupHost);
+    await warmup.mount(warmupHost, "<p>warmup</p>", mountOptions());
+    warmup.destroy();
+
+    const realRuntime = (await import("hugerte")).default as unknown as HugeRteRuntime;
+    let realEditor: HugeRteEditor | undefined;
+    const observedRuntime: HugeRteRuntime = {
+      async init(options): Promise<unknown> {
+        const result = await realRuntime.init(options);
+        realEditor = Array.isArray(result) ? result[0] as HugeRteEditor : undefined;
+        return result;
+      }
+    };
+    let releaseRuntime: ((runtime: HugeRteRuntime) => void) | undefined;
+    const runtimePending = new Promise<HugeRteRuntime>((resolve) => {
+      releaseRuntime = resolve;
+    });
+    const onChange = vi.fn();
+    const adapter = new HugeRteAdapter(() => runtimePending);
+    const host = document.createElement("div");
+    document.body.append(host);
+
+    try {
+      const mounting = adapter.mount(host, "<p>old</p>", mountOptions({ onChange }));
+      adapter.setHtml("<p>new</p>");
+      releaseRuntime?.(observedRuntime);
+      await mounting;
+
+      expect(realEditor?.getContent()).toBe("<p>new</p>");
+      expect(adapter.getHtml()).toBe("<p>new</p>");
+      expect(onChange).not.toHaveBeenCalled();
+    } finally {
+      adapter.destroy();
+    }
+  });
+
+  it("syncs the last setHtml after init has consumed the target without emitting changes", async () => {
+    const runtime = new FakeRuntime();
+    runtime.mode = "deferred";
+    const onChange = vi.fn();
+    const adapter = makeAdapter(runtime);
+    const mounting = adapter.mount(
+      document.createElement("div"),
+      "<p>old</p>",
+      mountOptions({ onChange })
+    );
+
+    await vi.waitFor(() => expect(runtime.options).toBeDefined());
+    expect(runtime.editors[0]?.html).toBe("<p>old</p>");
+    adapter.setHtml("<p>newer</p>");
+    adapter.setHtml("<p>newest</p>");
+    runtime.resolve();
+    await mounting;
+
+    expect(runtime.editors[0]?.html).toBe("<p>newest</p>");
+    expect(adapter.getHtml()).toBe("<p>newest</p>");
+    expect(onChange).not.toHaveBeenCalled();
+    adapter.destroy();
+  });
+
   it("rejects zero, multiple, unexpected, and rejected init results and cleans partial state", async () => {
     for (const mode of ["zero", "multiple", "mixed", "unexpected", "reject"] as const) {
       const runtime = new FakeRuntime();
@@ -271,14 +370,19 @@ describe("HugeRteAdapter lifecycle", () => {
     const runtime = new FakeRuntime();
     runtime.mode = "deferred";
     const host = document.createElement("div");
+    const onChange = vi.fn();
     const adapter = makeAdapter(runtime);
-    const mounting = adapter.mount(host, "<p>one</p>", mountOptions());
+    const mounting = adapter.mount(host, "<p>one</p>", mountOptions({ onChange }));
 
     await vi.waitFor(() => expect(runtime.options).toBeDefined());
+    adapter.setHtml("<p>pending</p>");
     adapter.destroy();
+    adapter.setHtml("<p>after destroy</p>");
     runtime.resolve();
 
     await expect(mounting).rejects.toMatchObject({ code: "editor_mount_cancelled" });
+    expect(adapter.getHtml()).toBe("<p>after destroy</p>");
+    expect(onChange).not.toHaveBeenCalled();
     expect(runtime.editors[0]?.removeCount).toBe(1);
     expect(host.querySelector("textarea")).toBeNull();
     expect(document.head.querySelector("style[data-galley-hugerte-skin]")).toBeNull();

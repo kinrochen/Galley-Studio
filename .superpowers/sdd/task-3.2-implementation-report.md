@@ -16,9 +16,14 @@ remains a separate textarea adapter.
 - Additional focused RED/GREEN cycles covered malformed mixed init results,
   arbitrary `data-*` attributes surviving the real HugeRTE parser, and event
   listener cleanup at destroy.
-- Final focused gate: 5 files, 22 tests passed.
+- R1 remediation RED/GREEN covered one and multiple `setHtml()` calls while the
+  runtime loader or `runtime.init()` was pending, the real bundled runtime, and
+  destroy-before-resolve interleavings. Both RED failures rolled `newest` back
+  to `old`; the final implementation preserves the last write without emitting
+  `onChange`.
+- Final focused gate: 5 files, 25 tests passed.
 - Final type gate: `npm run test:typecheck` passed.
-- Final full gate: 38 files, 837 tests passed.
+- Final full gate: 38 files, 840 tests passed.
 - Final production gate: `npm run build` passed, including deterministic asset
   regeneration, TypeScript, and production esbuild.
 
@@ -37,6 +42,9 @@ that temporary `window.hugerte` / `window.hugeRTE` registration does not leak.
   malformed, cancelled, duplicate, and destroyed lifecycles fail closed.
 - Programmatic initialization and `setHtml` suppress change callbacks; user
   input/change/undo/redo events bridge to the adapter callback.
+- While mounting is asynchronous, `setHtml` updates both the expected body and
+  owned target. Once the exact editor is accepted, the latest expected body is
+  synchronized under event suppression before the adapter becomes mounted.
 - Selection is accepted only from the editor content document. Shared UI skin
   CSS is installed once per document and reference-counted across instances.
 - The production esbuild entry receives an uncalled dynamic editor boundary so
@@ -78,9 +86,9 @@ font stacks with the Galley Inter / Noto Sans SC stack, and emits deterministic
 TypeScript constants. Two consecutive generator runs were byte-identical.
 
 - Upstream UI CSS: 82,696 bytes, SHA-256
-  `760e17a2c6f3e58db028a3ba47e67370f744d4f5cc3d15751d897aa5b36ec939`.
+  `760e17c80fe088482734bb790c7f39eec790f208b13b8f82aa1df117a3cbf2bc`.
 - Upstream content CSS: 1,220 bytes, SHA-256
-  `f9d04a0dc98d608fb889442245ca24ed4cd6150b03cc63d4ad3ea4c9525b5e8f`.
+  `f9d04a2d443fdbb00f57cecc825d939993c77578b8d70bae75a1d71c2c5efd07`.
 - Normalized UI CSS: 82,184 bytes, SHA-256
   `8b6f044f2d4d3a03c9adbd07e3327fb53685afa77b17d8db45e199bd30f46690`.
 - Normalized content CSS: 1,149 bytes, SHA-256
@@ -90,8 +98,8 @@ TypeScript constants. Two consecutive generator runs were byte-identical.
 
 ## Build and release evidence
 
-- `main.js`: 2,322,623 bytes, SHA-256
-  `fe40c8d44cfa73308563d147fa7a8b39db72e1088e893c2995dd41c7fa2f2ee3`.
+- `main.js`: 2,322,823 bytes, SHA-256
+  `30b55507bbce7567b389b0e8efcd7de39cfea942a9ecea370bae06e492f4032a`.
 - `styles.css`: 1 byte, SHA-256
   `01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b`.
 - Bundle inspection found the exact plugin list, generated skin marker, and

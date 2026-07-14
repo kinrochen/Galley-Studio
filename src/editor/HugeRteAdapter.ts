@@ -116,6 +116,7 @@ export class HugeRteAdapter implements HtmlEditorAdapter {
   private changeListener: (() => void) | undefined;
   private selectionListener: (() => void) | undefined;
   private suppressChanges = true;
+  private pendingHtmlWrite = false;
   private readonly removedEditors = new WeakSet<object>();
 
   constructor(private readonly runtimeLoader: HugeRteRuntimeLoader = loadBundledRuntime) {}
@@ -135,6 +136,7 @@ export class HugeRteAdapter implements HtmlEditorAdapter {
     this.phase = "mounting";
     this.html = bodyHtml;
     this.suppressChanges = true;
+    this.pendingHtmlWrite = false;
     const token: MountToken = { cancelled: false };
     this.mountToken = token;
     const target = container.ownerDocument.createElement("textarea");
@@ -173,7 +175,12 @@ export class HugeRteAdapter implements HtmlEditorAdapter {
       }
 
       this.editor = editor;
+      if (this.pendingHtmlWrite) {
+        editor.setContent(this.html);
+        this.throwIfCancelled(token);
+      }
       this.html = editor.getContent();
+      this.pendingHtmlWrite = false;
       this.phase = "mounted";
       this.suppressChanges = false;
     } catch (error) {
@@ -202,7 +209,10 @@ export class HugeRteAdapter implements HtmlEditorAdapter {
   setHtml(html: string): void {
     this.html = html;
     if (this.phase !== "mounted" || !this.editor) {
-      if (this.phase === "idle" && this.target) this.target.value = html;
+      if (this.phase === "mounting") {
+        this.pendingHtmlWrite = true;
+        if (this.target) this.target.value = html;
+      }
       return;
     }
     this.suppressChanges = true;
@@ -291,6 +301,7 @@ export class HugeRteAdapter implements HtmlEditorAdapter {
     this.policyListener = undefined;
     this.changeListener = undefined;
     this.selectionListener = undefined;
+    this.pendingHtmlWrite = false;
     this.mountToken = undefined;
     this.releaseSkin?.();
     this.releaseSkin = undefined;
