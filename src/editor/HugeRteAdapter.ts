@@ -155,7 +155,7 @@ export class HugeRteAdapter implements HtmlEditorAdapter {
       const runtime = await this.runtimeLoader();
       this.throwIfCancelled(token);
       initResult = await runtime.init(createInitOptions(target, options, (editor) => {
-        this.bindEditor(editor, options);
+        this.bindEditor(editor, options, token);
       }));
       this.throwIfCancelled(token);
 
@@ -254,7 +254,19 @@ export class HugeRteAdapter implements HtmlEditorAdapter {
     this.phase = "destroyed";
   }
 
-  private bindEditor(editor: HugeRteEditor, options: HtmlEditorMountOptions): void {
+  private bindEditor(
+    editor: HugeRteEditor,
+    options: HtmlEditorMountOptions,
+    token: MountToken
+  ): void {
+    if (
+      token.cancelled ||
+      this.mountToken !== token ||
+      this.phase !== "mounting"
+    ) {
+      this.removeEditor(editor);
+      return;
+    }
     const existing = this.editorBindings.get(editor);
     if (existing) {
       existing.setupCount += 1;

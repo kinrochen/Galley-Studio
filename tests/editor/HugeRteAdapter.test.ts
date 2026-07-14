@@ -152,7 +152,34 @@ class FakeRuntime implements HugeRteRuntime {
   }
 }
 
-function makeAdapter(runtime: FakeRuntime): HugeRteAdapter {
+class CapturedSetupRuntime implements HugeRteRuntime {
+  options: HugeRteInitOptions | undefined;
+  private readonly pending: Promise<unknown>;
+  private resolvePending: ((value: unknown) => void) | undefined;
+  private rejectPending: ((reason: unknown) => void) | undefined;
+
+  constructor() {
+    this.pending = new Promise((resolve, reject) => {
+      this.resolvePending = resolve;
+      this.rejectPending = reject;
+    });
+  }
+
+  init(options: HugeRteInitOptions): Promise<unknown> {
+    this.options = options;
+    return this.pending;
+  }
+
+  resolve(value: unknown): void {
+    this.resolvePending?.(value);
+  }
+
+  reject(reason: unknown): void {
+    this.rejectPending?.(reason);
+  }
+}
+
+function makeAdapter(runtime: HugeRteRuntime): HugeRteAdapter {
   return new HugeRteAdapter(async () => runtime);
 }
 
@@ -449,6 +476,80 @@ describe("HugeRteAdapter lifecycle", () => {
     await expect(mounting).rejects.toMatchObject({ code: "editor_mount_cancelled" });
     expect(runtime.editors.map((editor) => editor.listenerCount())).toEqual([0, 0]);
     expect(runtime.editors.map((editor) => editor.removeCount)).toEqual([1, 1]);
+  });
+
+  it("removes single, multiple, and repeated late setup editors without waiting for init", async () => {
+    const runtime = new CapturedSetupRuntime();
+    const host = document.createElement("div");
+    const adapter = makeAdapter(runtime);
+    const mounting = adapter.mount(host, "<p>one</p>", mountOptions());
+
+    await vi.waitFor(() => expect(runtime.options).toBeDefined());
+    adapter.destroy();
+    const first = new FakeEditor(runtime.options!.target, "<p>late one</p>");
+    runtime.options!.setup(first);
+    expect(first.listenerCount()).toBe(0);
+    expect(first.removeCount).toBe(1);
+
+    const second = new FakeEditor(runtime.options!.target, "<p>late two</p>");
+    runtime.options!.setup(second);
+    runtime.options!.setup(first);
+
+    expect([first.listenerCount(), second.listenerCount()]).toEqual([0, 0]);
+    expect([first.removeCount, second.removeCount]).toEqual([1, 1]);
+    expect(host.querySelector("textarea")).toBeNull();
+    expect(document.head.querySelector("style[data-galley-hugerte-skin]")).toBeNull();
+    void mounting;
+  });
+
+  it("rejects repeated and new late setup after destroying an already-bound editor", async () => {
+    const runtime = new CapturedSetupRuntime();
+    const adapter = makeAdapter(runtime);
+    const mounting = adapter.mount(
+      document.createElement("div"),
+      "<p>one</p>",
+      mountOptions()
+    );
+
+    await vi.waitFor(() => expect(runtime.options).toBeDefined());
+    const bound = new FakeEditor(runtime.options!.target, "<p>bound</p>");
+    runtime.options!.setup(bound);
+    expect(bound.listenerCount()).toBe(7);
+
+    adapter.destroy();
+    runtime.options!.setup(bound);
+    const late = new FakeEditor(runtime.options!.target, "<p>late</p>");
+    runtime.options!.setup(late);
+
+    expect([bound.listenerCount(), late.listenerCount()]).toEqual([0, 0]);
+    expect([bound.removeCount, late.removeCount]).toEqual([1, 1]);
+    void mounting;
+  });
+
+  it("keeps late setup cleanup idempotent when cancelled init later resolves or rejects", async () => {
+    for (const outcome of ["resolve", "reject"] as const) {
+      const runtime = new CapturedSetupRuntime();
+      const onChange = vi.fn();
+      const adapter = makeAdapter(runtime);
+      const mounting = adapter.mount(
+        document.createElement("div"),
+        "<p>one</p>",
+        mountOptions({ onChange })
+      );
+
+      await vi.waitFor(() => expect(runtime.options).toBeDefined());
+      adapter.destroy();
+      const late = new FakeEditor(runtime.options!.target, "<p>late</p>");
+      runtime.options!.setup(late);
+      if (outcome === "resolve") runtime.resolve([late]);
+      else runtime.reject(new Error("late init rejection"));
+
+      await expect(mounting).rejects.toMatchObject({ code: "editor_mount_cancelled" });
+      late.emit("input");
+      expect(late.listenerCount()).toBe(0);
+      expect(late.removeCount).toBe(1);
+      expect(onChange).not.toHaveBeenCalled();
+    }
   });
 
   it("cancels and cleans an exact editor when destroyed during asynchronous mount", async () => {
