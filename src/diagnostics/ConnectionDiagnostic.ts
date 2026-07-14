@@ -8,7 +8,10 @@ import {
 import { OpenAiCompatibleClient } from "../ai/OpenAiCompatibleClient";
 import { BUNDLED_SKILL } from "../generated/bundledSkill";
 import type { SecretStore } from "../secrets/SecretStore";
-import type { GalleySettings } from "../settings/GalleySettings";
+import {
+  type GalleySettings,
+  normalizeSettings
+} from "../settings/GalleySettings";
 import {
   BundledSkillLoader,
   PINNED_GZH_DESIGN_VERSION
@@ -43,7 +46,8 @@ export async function runConnectionDiagnostic(
   deps: ConnectionDiagnosticDeps,
   signal: AbortSignal
 ): Promise<ConnectionDiagnosticResult> {
-  const model = deps.settings.model;
+  const settings = normalizeSettings(deps.settings);
+  const model = settings.model;
   let capabilities: ConnectionDiagnosticResult["capabilities"] = {
     ...EMPTY_CAPABILITIES
   };
@@ -56,14 +60,14 @@ export async function runConnectionDiagnostic(
       return failureResult(model, "missing_model", capabilities);
     }
     try {
-      validateBaseUrl(deps.settings.baseUrl);
+      validateBaseUrl(settings.baseUrl);
     } catch {
       return failureResult(model, "invalid_base_url", capabilities);
     }
 
     let hasSecret = false;
     try {
-      hasSecret = Boolean(deps.secretStore.get(deps.settings.secretId));
+      hasSecret = Boolean(deps.secretStore.get(settings.secretId));
     } catch {
       return failureResult(model, "missing_secret", capabilities);
     }
@@ -73,7 +77,7 @@ export async function runConnectionDiagnostic(
 
     const providerClient = OpenAiCompatibleClient.fromSettings(
       deps.transport,
-      deps.settings,
+      settings,
       deps.secretStore
     );
     let connected = false;
@@ -91,7 +95,7 @@ export async function runConnectionDiagnostic(
       }
     };
     const observed = await new CapabilityProbe(client).probe(
-      { baseUrl: deps.settings.baseUrl, model },
+      { baseUrl: settings.baseUrl, model },
       signal,
       { streaming: true, vision: true }
     );
@@ -103,7 +107,7 @@ export async function runConnectionDiagnostic(
     const skillPackage = await new BundledSkillLoader().load();
     const session = new SkillSession({
       client,
-      target: { baseUrl: deps.settings.baseUrl, model },
+      target: { baseUrl: settings.baseUrl, model },
       capabilities: observed,
       skillPackage,
       vfs: new SkillVirtualFileSystem(skillPackage.files),

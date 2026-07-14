@@ -3,6 +3,7 @@ import { expect, it, vi } from "vitest";
 import type { HttpTransport } from "../../src/ai/AiProtocol";
 import { runConnectionDiagnostic } from "../../src/diagnostics/ConnectionDiagnostic";
 import { MemorySecretStore } from "../../src/secrets/SecretStore";
+import type { GalleySettings } from "../../src/settings/GalleySettings";
 import { PINNED_GZH_DESIGN_VERSION } from "../../src/skill/BundledSkillLoader";
 import { makeDiagnosticDeps } from "../support/phase1Factories";
 
@@ -101,4 +102,57 @@ it("does not report a connection success when every real probe is rejected", asy
   expect(JSON.stringify(result)).not.toContain(secret);
   expect(JSON.stringify(result)).not.toContain("Authorization");
   expect(JSON.stringify(result)).not.toContain("rawRequest");
+});
+
+it("uses one normalized settings snapshot across every awaited request", async () => {
+  const scripted = makeDiagnosticDeps();
+  const mutableSettings: GalleySettings = {
+    ...scripted.settings,
+    baseUrl: "https://api-a.example/v1///",
+    model: "model-a",
+    secretId: "key-a"
+  };
+  const requests: Array<{
+    url: string;
+    headers: Record<string, string>;
+    body: unknown;
+  }> = [];
+  const transport: HttpTransport = {
+    post: async (url, headers, body, requestSignal) => {
+      requests.push({ url, headers: { ...headers }, body: structuredClone(body) });
+      if (requests.length === 1) {
+        mutableSettings.baseUrl = "https://api-b.example/v1";
+        mutableSettings.model = "model-b";
+        mutableSettings.secretId = "key-b";
+      }
+      return scripted.transport.post(url, headers, body, requestSignal);
+    }
+  };
+
+  const result = await runConnectionDiagnostic(
+    {
+      settings: mutableSettings,
+      secretStore: new MemorySecretStore(
+        new Map([
+          ["key-a", "secret-a"],
+          ["key-b", "secret-b"]
+        ])
+      ),
+      transport
+    },
+    signal()
+  );
+
+  expect(result.ok).toBe(true);
+  expect(result.model).toBe("model-a");
+  expect(requests).toHaveLength(5);
+  expect(requests.map(({ url }) => url)).toEqual(
+    Array(5).fill("https://api-a.example/v1/chat/completions")
+  );
+  expect(requests.map(({ headers }) => headers.Authorization)).toEqual(
+    Array(5).fill("Bearer secret-a")
+  );
+  expect(
+    requests.map(({ body }) => (body as { model?: unknown }).model)
+  ).toEqual(Array(5).fill("model-a"));
 });
