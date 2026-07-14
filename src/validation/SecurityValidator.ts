@@ -62,10 +62,6 @@ function appendRemovalIssues(
 ): void {
   for (const removal of removals) {
     const name = removal.name.trim().toLowerCase() || "unknown";
-    if (isBenignRemoval(removal.kind, name)) {
-      continue;
-    }
-
     const key = `${removal.kind}:${name}`;
     if (seen.has(key)) {
       continue;
@@ -77,15 +73,6 @@ function appendRemovalIssues(
       message: removalMessage(removal.kind, name, state)
     });
   }
-}
-
-function isBenignRemoval(
-  kind: SanitizerRemoval["kind"],
-  name: string
-): boolean {
-  // AuthoringSanitizer logs unsupported link targets under this identity.
-  // Its _blank noopener/noreferrer hardening is not logged.
-  return kind === "attribute" && name === "target";
 }
 
 function removalMessage(

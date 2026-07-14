@@ -36,7 +36,7 @@ describe("validateSecurity", () => {
     ]);
   });
 
-  it("turns every non-benign sanitizer removal into an actionable de-duplicated error", () => {
+  it("turns every sanitizer removal into an actionable de-duplicated error", () => {
     const issues = validateSecurity([
       { kind: "element", name: "script" },
       { kind: "element", name: "script" },
@@ -48,7 +48,7 @@ describe("validateSecurity", () => {
       { kind: "attribute", name: "data-secret" }
     ]);
 
-    expect(issues).toHaveLength(6);
+    expect(issues).toHaveLength(7);
     expect(issues.every(({ code }) => code === "unsafe_content_removed")).toBe(
       true
     );
@@ -58,14 +58,94 @@ describe("validateSecurity", () => {
       expect.stringContaining("onclick"),
       expect.stringContaining("href"),
       expect.stringContaining("background-image"),
+      expect.stringContaining("target"),
       expect.stringContaining("data-secret")
     ]);
   });
 
-  it("treats only the sanitizer's invalid-target removal as benign", () => {
+  it.each([
+    [
+      "an invalid link target",
+      '<a href="#x" target="_top">invalid target</a>'
+    ],
+    ["a disallowed non-link attribute", '<p target="x">target</p>'],
+    [
+      "a rejected executable CSS declaration",
+      '<p style="target: expression(alert(1))">target</p>'
+    ]
+  ])("requires repair when target removal comes from %s", (_label, fragment) => {
+    const document = sanitizeAuthoringDocument(
+      validHtml().replace("</article>", `${fragment}</article>`)
+    );
+
+    expect(document.removed).toContainEqual({
+      kind: "attribute",
+      name: "target"
+    });
     expect(
-      validateSecurity([{ kind: "attribute", name: "target" }])
+      validateAuthoringDocument({
+        source: validSource(),
+        document
+      })
+    ).toEqual({
+      valid: false,
+      issues: [
+        expect.objectContaining({
+          code: "unsafe_content_removed",
+          severity: "error",
+          message: expect.stringContaining("target")
+        })
+      ]
+    });
+  });
+
+  it("accepts _blank hardening because it is not logged as a removal", () => {
+    const document = sanitizeAuthoringDocument(
+      validHtml().replace(
+        "</article>",
+        '<a href="#x" target="_blank">blank</a></article>'
+      )
+    );
+    const parsed = new DOMParser().parseFromString(document.html, "text/html");
+    const link = parsed.querySelector('a[target="_blank"]');
+
+    expect(
+      document.removed.filter(
+        ({ kind, name }) => kind === "attribute" && name === "target"
+      )
     ).toEqual([]);
+    expect(link?.getAttribute("rel")?.split(" ")).toEqual(
+      expect.arrayContaining(["noopener", "noreferrer"])
+    );
+    expect(
+      validateAuthoringDocument({ source: validSource(), document })
+    ).toEqual({ valid: true, issues: [] });
+  });
+
+  it("de-duplicates target collisions and preserves security, contract, then coverage order", () => {
+    const targetSources =
+      '<a href="#x" target="_top">invalid target</a><p target="x">target</p><p style="target: expression(alert(1))">target</p>';
+    const document = sanitizeAuthoringDocument(
+      validHtml()
+        .replace("<title>Article</title>", "<title> </title>")
+        .replace(' data-galley-source="paragraph-001"', "")
+        .replace("</article>", `${targetSources}</article>`)
+    );
+    const targetRemovals = document.removed.filter(
+      ({ kind, name }) => kind === "attribute" && name === "target"
+    );
+    const input = { source: validSource(), document };
+
+    expect(targetRemovals).toHaveLength(3);
+    const first = validateAuthoringDocument(input);
+    const second = validateAuthoringDocument(input);
+    expect(first.issues.map(({ code }) => code)).toEqual([
+      "unsafe_content_removed",
+      "document_title",
+      "source_missing",
+      "source_order"
+    ]);
+    expect(JSON.stringify(second)).toBe(JSON.stringify(first));
   });
 
   it("covers actual sanitizer removals without drifting from its element, URL, or CSS policy", () => {
@@ -78,10 +158,6 @@ describe("validateSecurity", () => {
     const repairKeys = [
       ...new Set(
         document.removed
-          .filter(
-            ({ kind, name }) =>
-              !(kind === "attribute" && name === "target")
-          )
           .map(({ kind, name }) => `${kind}:${name}`)
       )
     ];
