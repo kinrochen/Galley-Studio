@@ -2,7 +2,7 @@
 
 ## Status
 
-DONE — independent-review R1, R2, and R3 remediation included
+DONE — independent-review R1, R2, R3, and R4 remediation included
 
 - Required base: `d3c65d5bc9f7f3f2201e3abc8ca99cce29a22d48`
 - Base HEAD verified before edits: exact match
@@ -199,7 +199,8 @@ HTML/sidecar SHA-256 values, ordered exact history-plan hashes, and its
 canonical checksum. It must also match the record's durable pair scope.
 Receipt creation reopens the aggregate before mutation and after any possible
 creation. Verification closes over stable receipt bytes and the aggregate
-again before return.
+again before return. Cancellation in any read-only verification window
+propagates as `AbortError` and never writes quarantine.
 
 ## Exact-read, ambiguity, and abort semantics
 
@@ -241,14 +242,17 @@ Permanent tests prove fail-closed behavior for:
   aggregate CAS after a same-byte blob identity replacement;
 - durable aggregate drift inside receipt creation, after receipt creation, and
   while receipt verification is reading its own durable record;
-- cleanup preflight against externally replaced blob identity/bytes;
+- cleanup preflight against externally replaced blob identity/bytes and
+  malformed, noncanonical, wrong-transaction, or wrong-scope optional metadata;
+- post-mutation folder membership changes and final-list failure/cancellation;
 - one malformed scope becoming quarantined without blocking deterministic
   listing of an unrelated valid scope.
 
 Untrusted manifest paths never drive reads or cleanup. Blob reads are derived
 from `TRANSACTION_ROOT + canonical transaction ID + role filename`; receipt,
 manifest and quarantine paths are likewise closed and derived.
-Unexpected files make cleanup conflict. Quarantine writes only canonical
+Unexpected files make cleanup conflict before mutation and ambiguity after a
+successful removal. Quarantine writes only canonical
 checksummed metadata inside that derived transaction folder and never reads,
 renames, or deletes a target pair/history path.
 
@@ -258,13 +262,13 @@ Final post-report command results are recorded below after the last full gate:
 
 ```text
 npm test -- tests/documents/ObsidianVaultFileStore.test.ts tests/documents/ObsidianTransactionStore.test.ts
-2 files passed; 83 tests passed; exit 0
+2 files passed; 95 tests passed; exit 0
 
 npm run test:typecheck
 exit 0
 
 npm test
-40 files passed; 935 tests passed; exit 0
+40 files passed; 947 tests passed; exit 0
 
 npm run build
 exit 0
@@ -460,7 +464,8 @@ retained-directory cleanup result.
   serializer output exactly: recursively sorted object keys, no insignificant
   whitespace, preserved validated array order, and one trailing newline.
   Quarantine metadata is produced through the same canonical serializer and is
-  never accepted as authority by a parser.
+  strictly parsed only for exact-owned cleanup; it never authorizes target
+  mutation or recovery proof.
 
 ### Directory identity safety
 
@@ -537,6 +542,91 @@ exit 0
 npm test
 Test Files  40 passed (40)
 Tests       935 passed (935)
+exit 0
+
+npm run build
+exit 0
+```
+
+## Independent-review R4 remediation
+
+The independent R4 review at reviewed HEAD
+`0f19ab3b283281957a87c0baec0f244ac1896580` found four remaining groups:
+read-only receipt-verification cancellation was mislabeled and quarantined,
+arbitrary bytes at optional receipt/quarantine paths were adopted for cleanup,
+and cleanup did not close retained-folder membership after deletion.
+
+Permanent regressions were added first for all three receipt-verification
+windows, pre-existing receipt/quarantine replacements, valid optional metadata
+(including a receipt written at `committed` before `completed`), post-start
+file/folder insertion, final-list throw/abort, and pre-mutation controls. The
+formal R4 RED was:
+
+```text
+npm test -- tests/documents/ObsidianVaultFileStore.test.ts tests/documents/ObsidianTransactionStore.test.ts
+Test Files  1 failed | 1 passed (2)
+Tests       9 failed | 86 passed (95)
+exit 1
+```
+
+### Read-only receipt verification
+
+- A genuine `AbortError` is rethrown unchanged. If the supplied signal is
+  observed aborted after an otherwise successful await, verification throws
+  `AbortError` before any quarantine attempt.
+- Cancellation after the first receipt observation, inside the closing
+  aggregate read, or after the second receipt observation leaves the valid
+  receipt untouched and does not create `quarantine.json`.
+- Only classified structural, canonical, checksum, exact-plan, aggregate
+  binding, or stable-drift failures produce scope-local `receipt-invalid`
+  quarantine. Unclassified adapter failures propagate without falsely labeling
+  durable proof as corrupt.
+
+### Optional metadata ownership preflight
+
+- Before the first delete, cleanup strictly parses every present optional
+  record with a 64 KiB limit. Receipt parsing enforces exact keys/version,
+  canonical transaction ID, canonical raw serialization, self-checksum,
+  manifest/aggregate digest formats, canonical pair paths and SHA-256 values,
+  and bounded ordered history hashes. Its pair paths must match the current
+  durable scope.
+- Cleanup deliberately does not require an optional receipt's stored manifest
+  checksum/aggregate digest to equal the later `completed` manifest: a valid
+  receipt may have been written at `committed` and then carried through the
+  final phase transition.
+- Quarantine parsing enforces exact keys/version, canonical transaction ID,
+  closed `record-invalid | receipt-invalid` reason, canonical timestamp/raw
+  serialization, and its self-checksum.
+- Malformed, noncanonical, wrong-transaction, or wrong-scope optional metadata
+  returns pre-mutation `{ status: "conflict" }` and preserves every byte.
+  Successfully parsed observations are still removed only through
+  `removeOwned`, so a later identity/byte replacement follows the R3 mutation
+  boundary.
+
+### Retained-folder closure
+
+- After every verified member is deleted, cleanup lists the canonical UUID
+  folder again. Only an exactly empty final listing returns
+  `{ status: "cleaned", directory: "retained" }`.
+- A concurrently inserted file/subfolder, manifest replacement, final-list
+  throw, or final-list cancellation occurs after mutation and therefore
+  returns `{ status: "ambiguous" }` while preserving the peer entry.
+- The empty directory remains retained and no path-only `rmdir` call is made.
+
+### R4 regression GREEN
+
+```text
+npm test -- tests/documents/ObsidianVaultFileStore.test.ts tests/documents/ObsidianTransactionStore.test.ts
+Test Files  2 passed (2)
+Tests       95 passed (95)
+exit 0
+
+npm run test:typecheck
+exit 0
+
+npm test
+Test Files  40 passed (40)
+Tests       947 passed (947)
 exit 0
 
 npm run build

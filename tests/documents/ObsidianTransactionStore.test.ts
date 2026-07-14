@@ -331,6 +331,26 @@ describe("ObsidianTransactionStore", () => {
     });
   });
 
+  it.each(["first-receipt", "closing-aggregate", "second-receipt"] as const)(
+    "propagates cancellation during the %s verification window without quarantine",
+    async (stage) => {
+      const backing = new PersistentObsidianBacking();
+      const files = new ObsidianVaultFileStore(persistentObsidianVault(backing));
+      const store = makeStoreWithFiles(files, [ID_A]);
+      const record = await store.prepare({ kind: "pair-history", scope: SCOPE, blobs: BLOBS });
+      const plan = receiptPlan();
+      await store.writeReceipt(record, plan);
+      const controller = new AbortController();
+      abortReceiptVerificationAt(files, controller, stage);
+
+      await expect(store.verifyReceipt(record, plan, controller.signal)).rejects.toMatchObject({
+        name: "AbortError"
+      });
+      expect(backing.read(`.galley/transactions/${ID_A}/receipt.json`)).not.toBeNull();
+      expect(backing.read(`.galley/transactions/${ID_A}/quarantine.json`)).toBeNull();
+    }
+  );
+
   it("rejects semantically valid but noncanonical manifest JSON bytes", async () => {
     const backing = new PersistentObsidianBacking();
     const store = makeStore(backing, [ID_A]);
@@ -535,6 +555,156 @@ describe("ObsidianTransactionStore", () => {
     await expect(second.transition(applying, "committed")).resolves.toMatchObject({
       phase: "committed"
     });
+  });
+
+  it("rejects a peer replacement at the optional receipt path before cleanup mutation", async () => {
+    const backing = new PersistentObsidianBacking();
+    const store = makeStore(backing, [ID_A]);
+    let record = await store.prepare({ kind: "owned-cleanup", scope: SCOPE, blobs: BLOBS });
+    await store.writeReceipt(record, receiptPlan());
+    record = await advanceToCompleted(store, record);
+    const receiptPath = `.galley/transactions/${ID_A}/receipt.json`;
+    backing.replace(receiptPath, "peer-receipt");
+
+    await expect(store.cleanup(record)).resolves.toEqual({ status: "conflict" });
+    expect(backing.read(receiptPath)).toBe("peer-receipt");
+    expect(backing.read(record.blobs[0]!.path)).not.toBeNull();
+    expect(backing.read(`.galley/transactions/${ID_A}/manifest.json`)).not.toBeNull();
+  });
+
+  it("rejects a peer replacement at the optional quarantine path before cleanup mutation", async () => {
+    const backing = new PersistentObsidianBacking();
+    const store = makeStore(backing, [ID_A]);
+    let record = await store.prepare({ kind: "owned-cleanup", scope: SCOPE, blobs: BLOBS });
+    const plan = receiptPlan();
+    await store.writeReceipt(record, plan);
+    await expect(
+      store.verifyReceipt(record, {
+        ...plan,
+        historyHashes: ["e".repeat(64)]
+      })
+    ).rejects.toMatchObject({ code: "transaction_receipt_invalid" });
+    record = await advanceToCompleted(store, record);
+    const quarantinePath = `.galley/transactions/${ID_A}/quarantine.json`;
+    backing.replace(quarantinePath, "peer-quarantine");
+
+    await expect(store.cleanup(record)).resolves.toEqual({ status: "conflict" });
+    expect(backing.read(quarantinePath)).toBe("peer-quarantine");
+    expect(backing.read(record.blobs[0]!.path)).not.toBeNull();
+    expect(backing.read(`.galley/transactions/${ID_A}/manifest.json`)).not.toBeNull();
+  });
+
+  it("cleans a valid receipt written at committed phase after transition to completed", async () => {
+    const backing = new PersistentObsidianBacking();
+    const store = makeStore(backing, [ID_A]);
+    let record = await store.prepare({ kind: "owned-cleanup", scope: SCOPE, blobs: BLOBS });
+    record = await store.transition(record, "applying");
+    record = await store.transition(record, "committed");
+    await store.writeReceipt(record, receiptPlan());
+    record = await store.transition(record, "completed");
+
+    await expect(store.cleanup(record)).resolves.toEqual({
+      status: "cleaned",
+      directory: "retained"
+    });
+    expect(backing.read(`.galley/transactions/${ID_A}/receipt.json`)).toBeNull();
+  });
+
+  it("strictly accepts and cleans valid receipt plus quarantine metadata", async () => {
+    const backing = new PersistentObsidianBacking();
+    const store = makeStore(backing, [ID_A]);
+    let record = await store.prepare({ kind: "owned-cleanup", scope: SCOPE, blobs: BLOBS });
+    const plan = receiptPlan();
+    await store.writeReceipt(record, plan);
+    await expect(
+      store.verifyReceipt(record, {
+        ...plan,
+        pair: { ...plan.pair, sidecarHash: "f".repeat(64) }
+      })
+    ).rejects.toMatchObject({ code: "transaction_receipt_invalid" });
+    record = await advanceToCompleted(store, record);
+
+    await expect(store.cleanup(record)).resolves.toEqual({
+      status: "cleaned",
+      directory: "retained"
+    });
+    expect(backing.read(`.galley/transactions/${ID_A}/receipt.json`)).toBeNull();
+    expect(backing.read(`.galley/transactions/${ID_A}/quarantine.json`)).toBeNull();
+  });
+
+  it.each(["file", "folder"] as const)(
+    "reports ambiguous when a peer %s appears after cleanup starts",
+    async (kind) => {
+      const backing = new PersistentObsidianBacking();
+      const folderPath = `.galley/transactions/${ID_A}`;
+      let firstPath = "";
+      const files = new ObsidianVaultFileStore(
+        persistentObsidianVault(backing, {
+          afterDelete(path) {
+            if (path !== firstPath) return;
+            if (kind === "file") backing.replace(`${folderPath}/peer.txt`, "peer");
+            else backing.ensureFolders(`${folderPath}/peer-folder`);
+          }
+        })
+      );
+      const store = makeStoreWithFiles(files, [ID_A]);
+      let record = await store.prepare({ kind: "owned-cleanup", scope: SCOPE, blobs: BLOBS });
+      record = await advanceToCompleted(store, record);
+      firstPath = record.blobs[0]!.path;
+
+      await expect(store.cleanup(record)).resolves.toEqual({ status: "ambiguous" });
+      if (kind === "file") expect(backing.read(`${folderPath}/peer.txt`)).toBe("peer");
+      else expect(backing.nodes.get(`${folderPath}/peer-folder`)?.kind).toBe("folder");
+      expect(backing.rmdirPaths).toEqual([]);
+    }
+  );
+
+  it.each(["throw", "abort"] as const)(
+    "reports ambiguous when the final empty-folder list ends with %s",
+    async (mode) => {
+      const backing = new PersistentObsidianBacking();
+      const files = new ObsidianVaultFileStore(persistentObsidianVault(backing));
+      const store = makeStoreWithFiles(files, [ID_A]);
+      let record = await store.prepare({ kind: "owned-cleanup", scope: SCOPE, blobs: BLOBS });
+      record = await advanceToCompleted(store, record);
+      const folderPath = `.galley/transactions/${ID_A}`;
+      const list = files.list.bind(files);
+      const controller = new AbortController();
+      let folderLists = 0;
+      files.list = async (path, signal) => {
+        if (path === folderPath) {
+          folderLists += 1;
+          if (folderLists === 2) {
+            if (mode === "throw") throw new Error("injected final list failure");
+            controller.abort();
+          }
+        }
+        return list(path, signal);
+      };
+
+      await expect(store.cleanup(record, controller.signal)).resolves.toEqual({
+        status: "ambiguous"
+      });
+    }
+  );
+
+  it("rethrows a folder-list failure before cleanup mutates any member", async () => {
+    const backing = new PersistentObsidianBacking();
+    const files = new ObsidianVaultFileStore(persistentObsidianVault(backing));
+    const store = makeStoreWithFiles(files, [ID_A]);
+    let record = await store.prepare({ kind: "owned-cleanup", scope: SCOPE, blobs: BLOBS });
+    record = await advanceToCompleted(store, record);
+    const folderPath = `.galley/transactions/${ID_A}`;
+    const list = files.list.bind(files);
+    const injected = new Error("injected preflight list failure");
+    files.list = async (path, signal) => {
+      if (path === folderPath) throw injected;
+      return list(path, signal);
+    };
+
+    await expect(store.cleanup(record)).rejects.toBe(injected);
+    expect(backing.read(record.blobs[0]!.path)).not.toBeNull();
+    expect(backing.read(`.galley/transactions/${ID_A}/manifest.json`)).not.toBeNull();
   });
 
   it("reports ambiguous when a later blob conflicts after the first blob was removed", async () => {
@@ -795,6 +965,39 @@ function failManifestReopenAfterModify(files: ObsidianVaultFileStore): void {
       throw new Error("injected strict reopen failure");
     }
     return read(path, signal);
+  };
+}
+
+function abortReceiptVerificationAt(
+  files: ObsidianVaultFileStore,
+  controller: AbortController,
+  stage: "first-receipt" | "closing-aggregate" | "second-receipt"
+): void {
+  const read = files.readTextStable.bind(files);
+  let receiptReads = 0;
+  let aborted = false;
+  files.readTextStable = async (path, signal) => {
+    const result = await read(path, signal);
+    if (path.endsWith("/receipt.json")) {
+      receiptReads += 1;
+      if (
+        !aborted &&
+        ((stage === "first-receipt" && receiptReads === 1) ||
+          (stage === "second-receipt" && receiptReads === 2))
+      ) {
+        aborted = true;
+        controller.abort();
+      }
+    } else if (
+      !aborted &&
+      stage === "closing-aggregate" &&
+      receiptReads === 1 &&
+      path.endsWith("/manifest.json")
+    ) {
+      aborted = true;
+      controller.abort();
+    }
+    return result;
   };
 }
 

@@ -190,6 +190,16 @@ interface ReceiptData extends TransactionReceiptPlan {
   checksum: string;
 }
 
+type QuarantineReason = "record-invalid" | "receipt-invalid";
+
+interface QuarantineData {
+  schemaVersion: 1;
+  transactionId: string;
+  reason: QuarantineReason;
+  quarantinedAt: string;
+  checksum: string;
+}
+
 interface OwnedStoredTransactionBlob extends StoredTransactionBlob {
   readonly ownership: VaultOwnedFile;
 }
@@ -224,6 +234,10 @@ const BLOB_FILENAMES: Readonly<Record<TransactionBlobRole, string>> = {
 const MANIFEST_NAME = "manifest.json";
 const RECEIPT_NAME = "receipt.json";
 const QUARANTINE_NAME = "quarantine.json";
+const QUARANTINE_REASONS: readonly QuarantineReason[] = [
+  "record-invalid",
+  "receipt-invalid"
+];
 const MAX_MANIFEST_BYTES = 64 * 1024;
 const MAX_BLOB_BYTES = 8 * 1024 * 1024;
 const MAX_TOTAL_BLOB_BYTES = 32 * 1024 * 1024;
@@ -602,6 +616,9 @@ export class ObsidianTransactionStore {
       }
       return freezeReceipt(parsed);
     } catch (error) {
+      if (isAbortError(error)) throw error;
+      if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+      if (!isReceiptValidationFailure(error)) throw error;
       await this.#quarantineBestEffort(current.record.id, "receipt-invalid");
       if (error instanceof TransactionReceiptInvalidError) throw error;
       throw new TransactionReceiptInvalidError();
@@ -654,7 +671,33 @@ export class ObsidianTransactionStore {
     const optional: VaultOwnedFile[] = [];
     for (const name of [RECEIPT_NAME, QUARANTINE_NAME]) {
       const owned = await this.files.readTextStable(`${folderPath}/${name}`, signal);
-      if (owned) optional.push(owned);
+      if (!owned) continue;
+      if (owned.byteLength > MAX_MANIFEST_BYTES) return { status: "conflict" };
+      try {
+        if (name === RECEIPT_NAME) {
+          const receipt = await parseReceiptEnvelope(
+            owned.text,
+            currentRecord.record.id
+          );
+          if (
+            receipt.pair.htmlPath !== currentRecord.record.scope.pair.html ||
+            receipt.pair.sidecarPath !== currentRecord.record.scope.pair.sidecar
+          ) {
+            return { status: "conflict" };
+          }
+        } else {
+          await parseQuarantine(owned.text, currentRecord.record.id);
+        }
+      } catch (error) {
+        if (
+          error instanceof TransactionReceiptInvalidError ||
+          error instanceof TransactionRecordInvalidError
+        ) {
+          return { status: "conflict" };
+        }
+        throw error;
+      }
+      optional.push(owned);
     }
     try {
       const beforeDelete = await this.#currentFor(record, signal);
@@ -687,6 +730,14 @@ export class ObsidianTransactionStore {
       }
       if (result.status === "ambiguous") return { status: "ambiguous" };
       mutated = true;
+    }
+    try {
+      if ((await this.files.list(folderPath, signal)).length > 0) {
+        return { status: "ambiguous" };
+      }
+    } catch (error) {
+      if (mutated) return { status: "ambiguous" };
+      throw error;
     }
     return { status: "cleaned", directory: "retained" };
   }
@@ -892,7 +943,7 @@ export class ObsidianTransactionStore {
     return record;
   }
 
-  async #quarantineBestEffort(id: string, reason: string): Promise<void> {
+  async #quarantineBestEffort(id: string, reason: QuarantineReason): Promise<void> {
     const folder = transactionFolder(id);
     const entries = await this.files.list(TRANSACTION_ROOT).catch(() => []);
     if (!entries.some(({ path, kind }) => path === folder && kind === "folder")) return;
@@ -1028,48 +1079,110 @@ async function parseReceipt(
   transaction: OpenedTransaction,
   expected: TransactionReceiptPlan
 ): Promise<ReceiptData> {
-  const value = parseObject(text);
-  exactKeys(value, [
-    "schemaVersion",
-    "transactionId",
-    "manifestChecksum",
-    "aggregateDigest",
-    "pair",
-    "historyHashes",
-    "checksum"
-  ]);
-  if (value.schemaVersion !== 1 || value.transactionId !== transaction.record.id) {
-    throw new TransactionReceiptInvalidError();
-  }
-  const plan = validReceiptPlan({
-    pair: value.pair as TransactionReceiptPlan["pair"],
-    historyHashes: value.historyHashes as string[]
-  });
-  const manifestChecksum = stringValue(value.manifestChecksum);
-  const aggregateDigest = stringValue(value.aggregateDigest);
-  const checksum = stringValue(value.checksum);
-  const unsigned = {
-    schemaVersion: 1 as const,
-    transactionId: transaction.record.id,
-    manifestChecksum,
-    aggregateDigest,
-    pair: plan.pair,
-    historyHashes: [...plan.historyHashes]
-  };
-  const receipt = { ...unsigned, checksum };
+  const receipt = await parseReceiptEnvelope(text, transaction.record.id);
   if (
-    !SHA256.test(manifestChecksum) ||
-    !SHA256.test(aggregateDigest) ||
-    !SHA256.test(checksum) ||
-    manifestChecksum !== transaction.record.checksum ||
-    aggregateDigest !== transaction.aggregateDigest ||
-    checksum !== (await sha256Text(canonicalJson(unsigned))) ||
-    canonicalJson(plan) !== canonicalJson(expected) ||
-    text !== serializeCanonical(receipt)
+    receipt.manifestChecksum !== transaction.record.checksum ||
+    receipt.aggregateDigest !== transaction.aggregateDigest ||
+    canonicalJson({ pair: receipt.pair, historyHashes: receipt.historyHashes }) !==
+      canonicalJson(expected)
   ) {
     throw new TransactionReceiptInvalidError();
   }
   return receipt;
+}
+
+async function parseReceiptEnvelope(
+  text: string,
+  expectedId: string
+): Promise<ReceiptData> {
+  try {
+    const value = parseObject(text);
+    exactKeys(value, [
+      "schemaVersion",
+      "transactionId",
+      "manifestChecksum",
+      "aggregateDigest",
+      "pair",
+      "historyHashes",
+      "checksum"
+    ]);
+    if (value.schemaVersion !== 1 || value.transactionId !== expectedId) {
+      throw new TransactionReceiptInvalidError();
+    }
+    const plan = validReceiptPlan({
+      pair: value.pair as TransactionReceiptPlan["pair"],
+      historyHashes: value.historyHashes as string[]
+    });
+    const manifestChecksum = stringValue(value.manifestChecksum);
+    const aggregateDigest = stringValue(value.aggregateDigest);
+    const checksum = stringValue(value.checksum);
+    const unsigned = {
+      schemaVersion: 1 as const,
+      transactionId: expectedId,
+      manifestChecksum,
+      aggregateDigest,
+      pair: plan.pair,
+      historyHashes: [...plan.historyHashes]
+    };
+    const receipt = { ...unsigned, checksum };
+    if (
+      !SHA256.test(manifestChecksum) ||
+      !SHA256.test(aggregateDigest) ||
+      !SHA256.test(checksum) ||
+      checksum !== (await sha256Text(canonicalJson(unsigned))) ||
+      text !== serializeCanonical(receipt)
+    ) {
+      throw new TransactionReceiptInvalidError();
+    }
+    return receipt;
+  } catch (error) {
+    if (error instanceof TransactionReceiptInvalidError) throw error;
+    throw new TransactionReceiptInvalidError();
+  }
+}
+
+async function parseQuarantine(
+  text: string,
+  expectedId: string
+): Promise<QuarantineData> {
+  try {
+    const value = parseObject(text);
+    exactKeys(value, [
+      "schemaVersion",
+      "transactionId",
+      "reason",
+      "quarantinedAt",
+      "checksum"
+    ]);
+    const reason = stringValue(value.reason);
+    if (
+      value.schemaVersion !== 1 ||
+      value.transactionId !== expectedId ||
+      !QUARANTINE_REASONS.includes(reason as QuarantineReason)
+    ) {
+      throw new TransactionRecordInvalidError();
+    }
+    const quarantinedAt = validIsoString(value.quarantinedAt);
+    const checksum = stringValue(value.checksum);
+    const unsigned = {
+      schemaVersion: 1 as const,
+      transactionId: expectedId,
+      reason: reason as QuarantineReason,
+      quarantinedAt
+    };
+    const metadata = { ...unsigned, checksum };
+    if (
+      !SHA256.test(checksum) ||
+      checksum !== (await sha256Text(canonicalJson(unsigned))) ||
+      text !== serializeCanonical(metadata)
+    ) {
+      throw new TransactionRecordInvalidError();
+    }
+    return metadata;
+  } catch (error) {
+    if (error instanceof TransactionRecordInvalidError) throw error;
+    throw new TransactionRecordInvalidError();
+  }
 }
 
 function validScope(scope: TransactionScope): TransactionScope {
@@ -1340,6 +1453,35 @@ function isVaultReadUnstable(error: unknown): boolean {
     error !== null &&
     "code" in error &&
     (error as { code?: unknown }).code === "vault_file_read_unstable"
+  );
+}
+
+function isAbortError(error: unknown): error is Error {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "name" in error &&
+    (error as { name?: unknown }).name === "AbortError"
+  );
+}
+
+function isReceiptValidationFailure(error: unknown): boolean {
+  if (
+    error instanceof TransactionReceiptInvalidError ||
+    error instanceof TransactionRecordInvalidError ||
+    error instanceof TransactionRecordUnstableError ||
+    error instanceof TransactionWriteConflictError
+  ) {
+    return true;
+  }
+  if (typeof error !== "object" || error === null || !("code" in error)) {
+    return false;
+  }
+  const code = (error as { code?: unknown }).code;
+  return (
+    code === "vault_file_read_unstable" ||
+    code === "vault_folder_conflict" ||
+    code === "vault_path_invalid"
   );
 }
 
