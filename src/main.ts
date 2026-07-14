@@ -21,6 +21,7 @@ export default class GalleyPlugin extends Plugin {
   }
 
   async saveSettings(): Promise<void> {
+    this.settings = normalizeSettings(this.settings);
     await this.saveData(this.settings);
   }
 }

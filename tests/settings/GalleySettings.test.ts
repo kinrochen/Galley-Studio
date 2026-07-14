@@ -16,6 +16,18 @@ it("normalizes provider settings without an apiKey field", () => {
   expect(DEFAULT_SETTINGS.contextWindow).toBe(128_000);
 });
 
+it("uses field defaults for non-finite numeric settings", () => {
+  const settings = normalizeSettings({
+    temperature: "not-a-number",
+    timeoutMs: Number.POSITIVE_INFINITY,
+    contextWindow: Number.NaN
+  });
+
+  expect(settings.temperature).toBe(DEFAULT_SETTINGS.temperature);
+  expect(settings.timeoutMs).toBe(DEFAULT_SETTINGS.timeoutMs);
+  expect(settings.contextWindow).toBe(DEFAULT_SETTINGS.contextWindow);
+});
+
 it("loads normalized settings and saves only the normalized settings object", async () => {
   const plugin = new GalleyPlugin({} as App, {} as PluginManifest);
   const harness = plugin as unknown as {

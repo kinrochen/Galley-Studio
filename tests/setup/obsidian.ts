@@ -28,7 +28,7 @@ export class Plugin {
   }
 
   async saveData(data: unknown): Promise<void> {
-    this.savedData = data;
+    this.savedData = structuredClone(data);
   }
 }
 
