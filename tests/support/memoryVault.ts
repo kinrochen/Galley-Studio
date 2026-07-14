@@ -93,6 +93,12 @@ export class MemoryVault {
     return this.#files.has(normalizeVaultPath(path));
   }
 
+  paths(): string[] {
+    const paths = [...this.#files.keys()].sort();
+    Object.freeze(paths);
+    return paths;
+  }
+
   snapshot(): Readonly<Record<string, MemoryVaultFile>> {
     return Object.fromEntries(
       [...this.#files].map(([path, contents]) => [path, copyContents(contents)])

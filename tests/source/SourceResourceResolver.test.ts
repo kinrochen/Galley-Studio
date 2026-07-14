@@ -41,6 +41,34 @@ describe("resolveSourceResources", () => {
     );
   });
 
+  it("uses the first normalized definition for a Markdown image reference", async () => {
+    const vault = resourceVault([
+      "notes/assets/first.png",
+      "notes/assets/second.png"
+    ]);
+    const markdown = [
+      "![Launch art][hero]",
+      "",
+      "[HERO]: assets/first.png",
+      "[hero]: assets/second.png"
+    ].join("\n");
+
+    const resources = await resolveSourceResources(
+      markdown,
+      "notes/article.md",
+      vault
+    );
+
+    expect(resources).toEqual([
+      {
+        vaultPath: "notes/assets/first.png",
+        alt: "Launch art",
+        mediaType: "image/png"
+      }
+    ]);
+    expect(vault.exists).not.toHaveBeenCalledWith("notes/assets/second.png");
+  });
+
   it("recognizes Obsidian embeds and honors explicit embed dimensions", async () => {
     const vault = resourceVault([
       "notes/media/cover.webp",
@@ -78,6 +106,36 @@ describe("resolveSourceResources", () => {
     );
   });
 
+  it("ignores odd-backslash escaped embeds but keeps even-backslash embeds", async () => {
+    const vault = resourceVault([
+      "notes/escaped.png",
+      "notes/even.png"
+    ]);
+    const markdown = [
+      "\\![[escaped.png]]",
+      "\\\\![[even.png]]"
+    ].join("\n\n");
+
+    const resources = await resolveSourceResources(
+      markdown,
+      "notes/article.md",
+      vault
+    );
+
+    expect(resources).toEqual([
+      {
+        vaultPath: "notes/even.png",
+        alt: "",
+        mediaType: "image/png"
+      }
+    ]);
+    expect(vault.exists).not.toHaveBeenCalledWith("notes/escaped.png");
+    expect(vault.readRasterDimensions).not.toHaveBeenCalledWith(
+      "notes/escaped.png",
+      "image/png"
+    );
+  });
+
   it("rejects network, absolute-system, and vault-escaping paths", async () => {
     const vault = resourceVault([]);
     const markdown = [
@@ -95,6 +153,31 @@ describe("resolveSourceResources", () => {
     expect(markdown).not.toContain("file://");
   });
 
+  it("decodes encoded reserved filename characters after stripping literal suffixes", async () => {
+    const vault = resourceVault([
+      "notes/image#v1.png",
+      "notes/image?v1.png",
+      "notes/image.png"
+    ]);
+    const markdown = [
+      "![hash](image%23v1.png)",
+      "![question](image%3Fv1.png)",
+      "![suffix](image.png?cache=1#preview)"
+    ].join("\n\n");
+
+    const resources = await resolveSourceResources(
+      markdown,
+      "notes/article.md",
+      vault
+    );
+
+    expect(resources.map(({ vaultPath }) => vaultPath)).toEqual([
+      "notes/image#v1.png",
+      "notes/image?v1.png",
+      "notes/image.png"
+    ]);
+  });
+
   it("rejects a source path that is not normalized inside the vault", async () => {
     const vault = resourceVault(["image.png"]);
 
@@ -106,6 +189,22 @@ describe("resolveSourceResources", () => {
       )
     ).rejects.toThrow(/source path.*vault-relative/i);
     expect(vault.exists).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "notes\\article.md",
+    "notes%2Farticle.md",
+    "notes/article.md?query",
+    "notes/article.md#fragment",
+    "<notes/article.md>"
+  ])("rejects non-canonical source path %j before vault access", async (sourcePath) => {
+    const vault = resourceVault(["notes/image.png"]);
+
+    await expect(
+      resolveSourceResources("![image](image.png)", sourcePath, vault)
+    ).rejects.toThrow(/source path.*canonical vault-relative/i);
+    expect(vault.exists).not.toHaveBeenCalled();
+    expect(vault.readRasterDimensions).not.toHaveBeenCalled();
   });
 
   it("does not treat image syntax inside code as a source resource", async () => {

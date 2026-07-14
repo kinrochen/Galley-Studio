@@ -118,7 +118,10 @@ function collectDefinitions(root: PositionedNode): Map<string, string> {
   const definitions = new Map<string, string>();
   visit(root, (node) => {
     if (node.type === "definition" && node.identifier && node.url) {
-      definitions.set(normalizeIdentifier(node.identifier), node.url);
+      const identifier = normalizeIdentifier(node.identifier);
+      if (!definitions.has(identifier)) {
+        definitions.set(identifier, node.url);
+      }
     }
   });
   return definitions;
@@ -171,6 +174,7 @@ function collectObsidianEmbeds(
     if (
       offset === undefined ||
       !content ||
+      isEscapedAt(markdown, offset) ||
       protectedRanges.some(({ start, end }) => offset >= start && offset < end)
     ) {
       continue;
@@ -200,19 +204,38 @@ function collectObsidianEmbeds(
   }
 }
 
-function normalizeSourceDirectory(sourcePath: string): string[] {
-  const normalized = normalizeLocalReference(sourcePath);
-  if (!normalized) {
-    throw new Error("Source path must be vault-relative");
+function isEscapedAt(markdown: string, offset: number): boolean {
+  let backslashes = 0;
+  for (
+    let index = offset - 1;
+    index >= 0 && markdown[index] === "\\";
+    index -= 1
+  ) {
+    backslashes += 1;
   }
+  return backslashes % 2 === 1;
+}
 
-  const segments = normalized.split("/");
+function normalizeSourceDirectory(sourcePath: string): string[] {
+  const segments = sourcePath.split("/");
   if (
+    !sourcePath ||
+    sourcePath !== sourcePath.trim() ||
+    sourcePath.includes("\\") ||
+    sourcePath.includes("?") ||
+    sourcePath.includes("#") ||
+    sourcePath.includes("\0") ||
+    /%[0-9a-f]{2}/i.test(sourcePath) ||
+    sourcePath.startsWith("/") ||
+    sourcePath.startsWith("~/") ||
+    (sourcePath.startsWith("<") && sourcePath.endsWith(">")) ||
+    /^[a-z]:/i.test(sourcePath) ||
+    /^[a-z][a-z0-9+.-]*:/i.test(sourcePath) ||
     segments.some(
       (segment) => !segment || segment === "." || segment === ".."
     )
   ) {
-    throw new Error("Source path must be normalized and vault-relative");
+    throw new Error("Source path must be canonical vault-relative form");
   }
   segments.pop();
   return segments;
@@ -253,6 +276,7 @@ function normalizeLocalReference(input: string): string | undefined {
   if (value.startsWith("<") && value.endsWith(">")) {
     value = value.slice(1, -1).trim();
   }
+  value = value.split(/[?#]/, 1)[0] ?? "";
   try {
     value = decodeURIComponent(value);
   } catch {
@@ -271,7 +295,7 @@ function normalizeLocalReference(input: string): string | undefined {
     return undefined;
   }
 
-  return value.split(/[?#]/, 1)[0];
+  return value;
 }
 
 function normalizeIdentifier(identifier: string): string {
