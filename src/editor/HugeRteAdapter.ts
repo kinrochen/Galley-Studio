@@ -101,6 +101,9 @@ interface EditorBinding {
   policyListener: () => void;
   changeListener: () => void;
   selectionListener: () => void;
+  policyDetached: boolean;
+  changeDetached: boolean;
+  selectionDetached: boolean;
 }
 
 interface SharedSkin {
@@ -121,6 +124,7 @@ export class HugeRteAdapter implements HtmlEditorAdapter {
   private suppressChanges = true;
   private pendingHtmlWrite = false;
   private readonly editorBindings = new Map<HugeRteEditor, EditorBinding>();
+  private readonly pendingCleanupEditors = new Set<HugeRteEditor>();
   private readonly removedEditors = new WeakSet<object>();
 
   constructor(private readonly runtimeLoader: HugeRteRuntimeLoader = loadBundledRuntime) {}
@@ -190,12 +194,13 @@ export class HugeRteAdapter implements HtmlEditorAdapter {
       this.suppressChanges = false;
     } catch (error) {
       const cancelled = token.cancelled;
+      token.cancelled = true;
+      this.phase = "destroyed";
       this.removeEditors([
         ...editorCandidates(initResult),
         ...this.editorBindings.keys()
       ]);
       this.cleanupOwnedMount();
-      this.phase = "destroyed";
       if (cancelled) {
         throw new EditorLifecycleError(
           "editor_mount_cancelled",
@@ -237,21 +242,24 @@ export class HugeRteAdapter implements HtmlEditorAdapter {
   }
 
   destroy(): void {
-    if (this.phase === "destroyed") {
-      return;
-    }
-    if (this.phase === "mounted" && this.editor) {
-      this.html = this.editor.getContent();
-    }
+    const mountedEditor = this.phase === "mounted" ? this.editor : undefined;
     if (this.mountToken) {
       this.mountToken.cancelled = true;
     }
+    this.phase = "destroyed";
+    if (mountedEditor) {
+      try {
+        this.html = mountedEditor.getContent();
+      } catch {
+        // Teardown must not be blocked by an optional final content snapshot.
+      }
+    }
     this.removeEditors([
       ...(this.editor ? [this.editor] : []),
-      ...this.editorBindings.keys()
+      ...this.editorBindings.keys(),
+      ...this.pendingCleanupEditors
     ]);
     this.cleanupOwnedMount();
-    this.phase = "destroyed";
   }
 
   private bindEditor(
@@ -264,7 +272,7 @@ export class HugeRteAdapter implements HtmlEditorAdapter {
       this.mountToken !== token ||
       this.phase !== "mounting"
     ) {
-      this.removeEditor(editor);
+      this.removeEditors([editor]);
       return;
     }
     const existing = this.editorBindings.get(editor);
@@ -301,7 +309,10 @@ export class HugeRteAdapter implements HtmlEditorAdapter {
       setupCount: 1,
       policyListener,
       changeListener,
-      selectionListener
+      selectionListener,
+      policyDetached: false,
+      changeDetached: false,
+      selectionDetached: false
     });
     editor.on("PreInit", policyListener);
     editor.on(CHANGE_EVENTS, changeListener);
@@ -310,34 +321,84 @@ export class HugeRteAdapter implements HtmlEditorAdapter {
 
   private removeEditors(editors: Iterable<HugeRteEditor>): void {
     for (const editor of new Set(editors)) {
+      this.pendingCleanupEditors.add(editor);
       this.removeEditor(editor);
     }
   }
 
   private removeEditor(editor: HugeRteEditor): void {
-    if (this.removedEditors.has(editor)) {
-      return;
-    }
-    this.removedEditors.add(editor);
     const binding = this.editorBindings.get(editor);
     if (binding) {
-      editor.off("PreInit", binding.policyListener);
-      editor.off(CHANGE_EVENTS, binding.changeListener);
-      editor.off(SELECTION_EVENTS, binding.selectionListener);
-      this.editorBindings.delete(editor);
+      if (!binding.policyDetached) {
+        try {
+          editor.off("PreInit", binding.policyListener);
+          binding.policyDetached = true;
+        } catch {
+          // Retry only this unconfirmed listener detachment on a later destroy.
+        }
+      }
+      if (!binding.changeDetached) {
+        try {
+          editor.off(CHANGE_EVENTS, binding.changeListener);
+          binding.changeDetached = true;
+        } catch {
+          // Retry only this unconfirmed listener detachment on a later destroy.
+        }
+      }
+      if (!binding.selectionDetached) {
+        try {
+          editor.off(SELECTION_EVENTS, binding.selectionListener);
+          binding.selectionDetached = true;
+        } catch {
+          // Retry only this unconfirmed listener detachment on a later destroy.
+        }
+      }
+      if (
+        binding.policyDetached &&
+        binding.changeDetached &&
+        binding.selectionDetached
+      ) {
+        this.editorBindings.delete(editor);
+      }
     }
-    editor.remove();
+    if (!this.removedEditors.has(editor)) {
+      try {
+        editor.remove();
+        this.removedEditors.add(editor);
+      } catch {
+        // An unconfirmed removal remains pending for a later destroy/setup call.
+      }
+    }
+    if (
+      this.removedEditors.has(editor) &&
+      !this.editorBindings.has(editor)
+    ) {
+      this.pendingCleanupEditors.delete(editor);
+    }
   }
 
   private cleanupOwnedMount(): void {
-    this.target?.remove();
-    this.target = undefined;
+    const target = this.target;
+    if (target) {
+      try {
+        target.remove();
+        if (this.target === target) this.target = undefined;
+      } catch {
+        // Keep the target reference so a later destroy can retry its removal.
+      }
+    }
     this.editor = undefined;
-    this.editorBindings.clear();
     this.pendingHtmlWrite = false;
     this.mountToken = undefined;
-    this.releaseSkin?.();
-    this.releaseSkin = undefined;
+    const releaseSkin = this.releaseSkin;
+    if (releaseSkin) {
+      try {
+        releaseSkin();
+        if (this.releaseSkin === releaseSkin) this.releaseSkin = undefined;
+      } catch {
+        // Keep the release callback so a later destroy can retry it.
+      }
+    }
   }
 
   private throwIfCancelled(token: MountToken): void {
@@ -451,14 +512,20 @@ function acquireSharedSkin(document: Document): () => void {
   let released = false;
   return () => {
     if (released) return;
-    released = true;
     const current = sharedSkins.get(document);
-    if (current !== shared) return;
-    current.count -= 1;
-    if (current.count === 0) {
-      current.style.remove();
-      sharedSkins.delete(document);
+    if (current !== shared) {
+      released = true;
+      return;
     }
+    if (current.count > 1) {
+      current.count -= 1;
+      released = true;
+      return;
+    }
+    current.style.remove();
+    current.count = 0;
+    sharedSkins.delete(document);
+    released = true;
   };
 }
 

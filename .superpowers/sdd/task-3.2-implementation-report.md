@@ -31,9 +31,14 @@ remains a separate textarea adapter.
   previously bound, eventual resolve, and eventual reject paths. RED registered
   seven listeners without removal; GREEN synchronously registers none and
   removes each late editor exactly once.
-- Final focused gate: 5 files, 31 tests passed.
+- R4 remediation RED/GREEN injected failures into individual `off`, `remove`,
+  mounted `getContent`, owned-target removal, and shared-skin release steps.
+  Teardown now attempts every independent step, preserves original mount and
+  cancellation errors, never throws from `destroy`, and retries only cleanup
+  steps whose success was not confirmed.
+- Final focused gate: 5 files, 37 tests passed.
 - Final type gate: `npm run test:typecheck` passed.
-- Final full gate: 38 files, 846 tests passed.
+- Final full gate: 38 files, 852 tests passed.
 - Final production gate: `npm run build` passed, including deterministic asset
   regeneration, TypeScript, and production esbuild.
 
@@ -57,6 +62,10 @@ that temporary `window.hugerte` / `window.hugeRTE` registration does not leak.
 - Each setup callback is scoped to its mount token. A cancelled, stale, or
   non-mounting callback removes its editor immediately without registering any
   Galley listener, independent of whether the runtime init promise ever settles.
+- Per-editor listener detachment and removal have independent completion state.
+  Failures remain in a pending cleanup set for idempotent retry, while confirmed
+  steps are not repeated. Token cancellation precedes optional content reads;
+  target and reference-counted skin release are likewise isolated and retryable.
 - Programmatic initialization and `setHtml` suppress change callbacks; user
   input/change/undo/redo events bridge to the adapter callback.
 - While mounting is asynchronous, `setHtml` updates both the expected body and
@@ -115,8 +124,8 @@ TypeScript constants. Two consecutive generator runs were byte-identical.
 
 ## Build and release evidence
 
-- `main.js`: 2,322,885 bytes, SHA-256
-  `cb9303738d068d35816998a207dcda4fdcb9312d27e2d1b91c58d4cb4183830c`.
+- `main.js`: 2,323,455 bytes, SHA-256
+  `a2ca7e4ac593c46bec211968e7d75e5cfad2667179cadf388979793c0d662134`.
 - `styles.css`: 1 byte, SHA-256
   `01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b`.
 - Bundle inspection found the exact plugin list, generated skin marker, and

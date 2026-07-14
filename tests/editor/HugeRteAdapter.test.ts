@@ -22,6 +22,10 @@ class FakeEditor implements HugeRteEditor {
   html: string;
   focusCount = 0;
   removeCount = 0;
+  getContentFailures = 0;
+  removeFailures = 0;
+  readonly offFailures = new Map<string, number>();
+  readonly offAttempts: string[] = [];
 
   constructor(readonly targetElm: HTMLElement, initialHtml: string) {
     this.html = initialHtml;
@@ -29,6 +33,10 @@ class FakeEditor implements HugeRteEditor {
   }
 
   getContent(): string {
+    if (this.getContentFailures > 0) {
+      this.getContentFailures -= 1;
+      throw new Error("getContent failed");
+    }
     return this.html;
   }
 
@@ -49,6 +57,10 @@ class FakeEditor implements HugeRteEditor {
 
   remove(): void {
     this.removeCount += 1;
+    if (this.removeFailures > 0) {
+      this.removeFailures -= 1;
+      throw new Error("remove failed");
+    }
   }
 
   on(events: string, listener: Listener): void {
@@ -60,6 +72,12 @@ class FakeEditor implements HugeRteEditor {
   }
 
   off(events: string, listener: Listener): void {
+    this.offAttempts.push(events);
+    const failures = this.offFailures.get(events) ?? 0;
+    if (failures > 0) {
+      this.offFailures.set(events, failures - 1);
+      throw new Error(`off failed: ${events}`);
+    }
     for (const event of events.split(/\s+/u)) {
       this.listeners.get(event)?.delete(listener);
     }
@@ -550,6 +568,149 @@ describe("HugeRteAdapter lifecycle", () => {
       expect(late.removeCount).toBe(1);
       expect(onChange).not.toHaveBeenCalled();
     }
+  });
+
+  it("continues teardown after off errors and retries only unconfirmed detachments", async () => {
+    const runtime = new FakeRuntime();
+    runtime.mode = "deferred-multi-setup";
+    const host = document.createElement("div");
+    const adapter = makeAdapter(runtime);
+    const mounting = adapter.mount(host, "<p>one</p>", mountOptions());
+
+    await vi.waitFor(() => expect(runtime.editors).toHaveLength(2));
+    runtime.editors[0]!.offFailures.set("PreInit", 1);
+    runtime.resolve();
+
+    await expect(mounting).rejects.toMatchObject({ code: "editor_init_invalid" });
+    expect(runtime.editors.map((editor) => editor.listenerCount())).toEqual([1, 0]);
+    expect(runtime.editors.map((editor) => editor.removeCount)).toEqual([1, 1]);
+    expect(runtime.editors[0]!.offAttempts).toEqual([
+      "PreInit",
+      "input change Undo Redo",
+      "NodeChange SelectionChange"
+    ]);
+    expect(host.querySelector("textarea")).toBeNull();
+    expect(document.head.querySelector("style[data-galley-hugerte-skin]")).toBeNull();
+
+    adapter.destroy();
+    expect(runtime.editors.map((editor) => editor.listenerCount())).toEqual([0, 0]);
+    expect(runtime.editors.map((editor) => editor.removeCount)).toEqual([1, 1]);
+    expect(runtime.editors[0]!.offAttempts).toEqual([
+      "PreInit",
+      "input change Undo Redo",
+      "NodeChange SelectionChange",
+      "PreInit"
+    ]);
+  });
+
+  it("continues teardown after remove errors and retries only the failed editor", async () => {
+    const runtime = new FakeRuntime();
+    runtime.mode = "deferred-multi-setup";
+    const host = document.createElement("div");
+    const adapter = makeAdapter(runtime);
+    const mounting = adapter.mount(host, "<p>one</p>", mountOptions());
+
+    await vi.waitFor(() => expect(runtime.editors).toHaveLength(2));
+    runtime.editors[0]!.removeFailures = 1;
+    runtime.resolve();
+
+    await expect(mounting).rejects.toMatchObject({ code: "editor_init_invalid" });
+    expect(runtime.editors.map((editor) => editor.listenerCount())).toEqual([0, 0]);
+    expect(runtime.editors.map((editor) => editor.removeCount)).toEqual([1, 1]);
+    expect(host.querySelector("textarea")).toBeNull();
+    expect(document.head.querySelector("style[data-galley-hugerte-skin]")).toBeNull();
+
+    adapter.destroy();
+    expect(runtime.editors.map((editor) => editor.removeCount)).toEqual([2, 1]);
+  });
+
+  it("cancels and tears down even when mounted getContent throws", async () => {
+    const runtime = new FakeRuntime();
+    const host = document.createElement("div");
+    const adapter = makeAdapter(runtime);
+    await adapter.mount(host, "<p>one</p>", mountOptions());
+    runtime.editors[0]!.getContentFailures = 1;
+
+    expect(() => adapter.destroy()).not.toThrow();
+    expect(runtime.editors[0]!.listenerCount()).toBe(0);
+    expect(runtime.editors[0]!.removeCount).toBe(1);
+    expect(host.querySelector("textarea")).toBeNull();
+    expect(document.head.querySelector("style[data-galley-hugerte-skin]")).toBeNull();
+    adapter.destroy();
+    expect(runtime.editors[0]!.removeCount).toBe(1);
+  });
+
+  it("isolates target and skin release errors and retries the failed owned step", async () => {
+    for (const failingStep of ["target", "skin"] as const) {
+      const runtime = new FakeRuntime();
+      const host = document.createElement("div");
+      const adapter = makeAdapter(runtime);
+      await adapter.mount(host, "<p>one</p>", mountOptions());
+      const target = host.querySelector("textarea")!;
+      const skin = document.head.querySelector<HTMLStyleElement>(
+        "style[data-galley-hugerte-skin]"
+      )!;
+      const failedNode = failingStep === "target" ? target : skin;
+      vi.spyOn(failedNode, "remove").mockImplementationOnce(() => {
+        throw new Error(`${failingStep} remove failed`);
+      });
+
+      expect(() => adapter.destroy()).not.toThrow();
+      expect(runtime.editors[0]!.listenerCount()).toBe(0);
+      expect(runtime.editors[0]!.removeCount).toBe(1);
+      expect(host.contains(target)).toBe(failingStep === "target");
+      expect(skin.isConnected).toBe(failingStep === "skin");
+
+      adapter.destroy();
+      expect(host.contains(target)).toBe(false);
+      expect(skin.isConnected).toBe(false);
+      expect(runtime.editors[0]!.removeCount).toBe(1);
+    }
+  });
+
+  it("preserves cancellation while teardown errors remain retryable", async () => {
+    const runtime = new FakeRuntime();
+    runtime.mode = "deferred-multi-setup";
+    const adapter = makeAdapter(runtime);
+    const mounting = adapter.mount(
+      document.createElement("div"),
+      "<p>one</p>",
+      mountOptions()
+    );
+
+    await vi.waitFor(() => expect(runtime.editors).toHaveLength(2));
+    runtime.editors[0]!.offFailures.set("PreInit", 2);
+    adapter.destroy();
+    runtime.resolve();
+
+    await expect(mounting).rejects.toMatchObject({ code: "editor_mount_cancelled" });
+    expect(runtime.editors.map((editor) => editor.removeCount)).toEqual([1, 1]);
+    expect(runtime.editors.map((editor) => editor.listenerCount())).toEqual([1, 0]);
+    adapter.destroy();
+    expect(runtime.editors.map((editor) => editor.listenerCount())).toEqual([0, 0]);
+    expect(runtime.editors.map((editor) => editor.removeCount)).toEqual([1, 1]);
+  });
+
+  it("does not bind late setup when its first cleanup attempt throws", async () => {
+    const runtime = new CapturedSetupRuntime();
+    const adapter = makeAdapter(runtime);
+    const mounting = adapter.mount(
+      document.createElement("div"),
+      "<p>one</p>",
+      mountOptions()
+    );
+
+    await vi.waitFor(() => expect(runtime.options).toBeDefined());
+    adapter.destroy();
+    const late = new FakeEditor(runtime.options!.target, "<p>late</p>");
+    late.removeFailures = 1;
+    expect(() => runtime.options!.setup(late)).not.toThrow();
+    expect(late.listenerCount()).toBe(0);
+    expect(late.removeCount).toBe(1);
+    runtime.options!.setup(late);
+    expect(late.listenerCount()).toBe(0);
+    expect(late.removeCount).toBe(2);
+    void mounting;
   });
 
   it("cancels and cleans an exact editor when destroyed during asynchronous mount", async () => {
