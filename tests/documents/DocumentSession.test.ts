@@ -260,7 +260,7 @@ describe("DocumentSession", () => {
         await expect(repository.readPair(TEST_PATHS)).rejects.toMatchObject({
           code: "transaction_recovery_conflict"
         });
-        expect(fixture.backing.journalCount()).toBe(0);
+        expect(fixture.backing.journalCount()).toBe(1);
         expect(fixture.backing.recoveryConflicts.size).toBe(1);
         expect(fixture.backing.rawRead(TEST_PATHS.html)).toBe(rawHtml);
         expect(fixture.backing.rawRead(TEST_PATHS.sidecar)).toBe(rawSidecar);
@@ -788,12 +788,24 @@ describe("DocumentSession", () => {
         new Date(1_700_000_000_000 + index)
       );
     }
+    const committedHistory = await fixture.history.list(
+      fixture.sidecar.documentId
+    );
     const session = await DocumentSession.open(fixture.dependencies);
     session.updateBody("<article><p>ambiguous combined target</p></article>");
+    const targetHtml = session.html();
+    const externalSidecarJson = `${JSON.stringify(
+      {
+        ...fixture.sidecar,
+        htmlHash: await sha256Text(targetHtml)
+      },
+      null,
+      2
+    )}\n`;
     hooks.beforeHistoryRemove = () => {
       fixture.vault.writeExternally(
         TEST_PATHS.sidecar,
-        "external sidecar during combined recovery"
+        externalSidecarJson
       );
       throw new Error("combined ownership interruption");
     };
@@ -808,13 +820,135 @@ describe("DocumentSession", () => {
       typeof failure === "object" && failure !== null && "committed" in failure
     ).toBe(false);
     expect(fixture.backing.historyReceipts.size).toBe(0);
-    expect(fixture.backing.journalCount()).toBe(0);
+    expect(fixture.backing.journalCount()).toBe(1);
     expect(fixture.backing.recoveryConflicts.size).toBe(1);
+    expect(
+      fixture.backing.rawPaths().filter((path) => path.endsWith(".pending"))
+    ).toHaveLength(1);
+    expect(
+      fixture.backing
+        .rawPaths()
+        .filter(
+          (path) =>
+            path.startsWith(".galley/history/") && path.endsWith(".html")
+        )
+    ).toHaveLength(20);
     expect(session.state()).toMatchObject({
       dirty: true,
       conflict: true,
       saving: false
     });
+
+    fixture.vault.destroy();
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const reopened = MemoryWorkbenchVault.reopen(fixture.backing);
+      const repository = new GalleyDocumentRepository(reopened);
+      await expect(
+        repository.readText(fixture.sidecar.sourcePath)
+      ).resolves.toBe("# Original source\n");
+      await expect(repository.readPair(TEST_PATHS)).rejects.toMatchObject({
+        code: "transaction_recovery_conflict"
+      });
+      await expect(
+        new HistoryRepository(reopened).list(fixture.sidecar.documentId)
+      ).rejects.toMatchObject({ code: "transaction_recovery_conflict" });
+      expect(fixture.backing.journalCount()).toBe(1);
+      expect(
+        fixture.backing.rawPaths().filter((path) => path.endsWith(".pending"))
+      ).toHaveLength(1);
+      expect(
+        fixture.backing
+          .rawPaths()
+          .filter(
+            (path) =>
+              path.startsWith(".galley/history/") && path.endsWith(".html")
+          )
+      ).toHaveLength(20);
+      reopened.destroy();
+    }
+
+    const resolver = MemoryWorkbenchVault.reopen(fixture.backing);
+    await resolver.acceptCurrentPairAndAbandonQuarantinedTransaction(
+      TEST_PATHS,
+      { html: targetHtml, sidecarJson: externalSidecarJson }
+    );
+    expect(fixture.backing.rawRead(TEST_PATHS.sidecar)).toBe(
+      externalSidecarJson
+    );
+    expect(fixture.backing.journalCount()).toBe(0);
+    expect(fixture.backing.recoveryConflicts.size).toBe(0);
+    expect(
+      fixture.backing.rawPaths().some((path) => path.endsWith(".pending"))
+    ).toBe(false);
+    await expectMatchingPair(resolver, TEST_PATHS);
+    expect(
+      await new HistoryRepository(resolver).list(fixture.sidecar.documentId)
+    ).toEqual(committedHistory);
+  });
+
+  it("retains the full quarantine unchanged when history rollback loses ownership", async () => {
+    const hooks: MemoryWorkbenchHooks = {};
+    const fixture = await makeSessionDeps({ hooks });
+    for (let index = 0; index < 20; index += 1) {
+      await fixture.history.store(
+        fixture.sidecar.documentId,
+        `retained-${index}`,
+        new Date(1_700_000_000_000 + index)
+      );
+    }
+    const session = await DocumentSession.open(fixture.dependencies);
+    session.updateBody("<article><p>unsafe history rollback</p></article>");
+    let promotedPath = "";
+    hooks.beforeHistoryRemove = () => {
+      const active = [...fixture.backing.pairJournals.values()][0];
+      promotedPath =
+        active?.history?.promoted.path ??
+        failTest("missing combined history journal");
+      fixture.vault.writeExternally(
+        promotedPath,
+        "external promoted-history replacement"
+      );
+      fixture.vault.writeExternally(
+        TEST_PATHS.sidecar,
+        "external pair sidecar replacement"
+      );
+      throw new Error("unsafe rollback interruption");
+    };
+
+    await expect(session.save("explicit")).rejects.toMatchObject({
+      code: "document_commit_ambiguous"
+    });
+
+    expect(fixture.backing.rawRead(promotedPath)).toBe(
+      "external promoted-history replacement"
+    );
+    expect(fixture.backing.journalCount()).toBe(1);
+    expect(fixture.backing.recoveryConflicts.size).toBe(1);
+    expect(fixture.backing.historyReceipts.size).toBe(0);
+    expect(
+      fixture.backing.rawPaths().some((path) => path.endsWith(".pending"))
+    ).toBe(false);
+    expect(
+      fixture.backing
+        .rawPaths()
+        .filter(
+          (path) =>
+            path.startsWith(".galley/history/") && path.endsWith(".html")
+        )
+    ).toHaveLength(21);
+
+    fixture.vault.destroy();
+    const reopened = MemoryWorkbenchVault.reopen(fixture.backing);
+    await expect(
+      new GalleyDocumentRepository(reopened).readPair(TEST_PATHS)
+    ).rejects.toMatchObject({ code: "transaction_recovery_conflict" });
+    await expect(
+      new HistoryRepository(reopened).list(fixture.sidecar.documentId)
+    ).rejects.toMatchObject({ code: "transaction_recovery_conflict" });
+    expect(fixture.backing.rawRead(promotedPath)).toBe(
+      "external promoted-history replacement"
+    );
+    expect(fixture.backing.journalCount()).toBe(1);
   });
 
   it("reload discards local content only after a valid reread and refreshes source status", async () => {

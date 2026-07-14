@@ -78,6 +78,8 @@ interface MemoryRecoveryConflict {
   readonly paths: ArtifactPaths;
   readonly historyFolder: string | null;
   readonly reason: string;
+  readonly journal: MemoryPairJournal;
+  historyRolledBack: boolean;
 }
 
 export interface MemoryPairObservation {
@@ -202,11 +204,16 @@ export class MemoryWorkbenchBacking {
   }
 
   journalCount(): number {
+    const activePairJournals = new Set(this.pairJournals.values());
+    const quarantinedOnly = [...this.recoveryConflicts.values()].filter(
+      ({ journal }) => !activePairJournals.has(journal)
+    ).length;
     return (
       this.pairJournals.size +
       this.ownershipCleanupJournals.size +
       this.historyJournals.size +
-      this.pendingCleanupJournals.size
+      this.pendingCleanupJournals.size +
+      quarantinedOnly
     );
   }
 }
@@ -734,6 +741,52 @@ export class MemoryWorkbenchVault
     this.backing.historyReceipts.delete(provisional.observation.entry);
   }
 
+  async acceptCurrentPairAndAbandonQuarantinedTransaction(
+    paths: ArtifactPaths,
+    accepted: { html: string; sidecarJson: string }
+  ): Promise<void> {
+    this.#assertLive();
+    const conflict = this.backing.recoveryConflicts.get(paths.html);
+    if (!conflict || conflict.paths.sidecar !== paths.sidecar) {
+      throw new Error("No quarantined Galley transaction exists for this pair.");
+    }
+    const journal = conflict.journal;
+    const currentHtml = this.backing.files.get(paths.html);
+    const currentSidecar = this.backing.files.get(paths.sidecar);
+    if (
+      !currentHtml ||
+      !currentSidecar ||
+      currentHtml.contents !== accepted.html ||
+      currentSidecar.contents !== accepted.sidecarJson
+    ) {
+      throw new MemoryTransactionRecoveryConflictError(conflict);
+    }
+    if (
+      journal.history &&
+      !conflict.historyRolledBack &&
+      !this.#rollbackCombinedHistoryForQuarantine(journal.history)
+    ) {
+      throw new MemoryTransactionRecoveryConflictError(conflict);
+    }
+    if (journal.history) {
+      conflict.historyRolledBack = true;
+      const pending = this.backing.files.get(journal.history.provisional.path);
+      if (
+        pending !== undefined &&
+        pending !== journal.history.provisional.observation.entry
+      ) {
+        throw new MemoryTransactionRecoveryConflictError(conflict);
+      }
+      if (pending === journal.history.provisional.observation.entry) {
+        this.backing.files.delete(journal.history.provisional.path);
+      }
+    }
+    if (this.backing.pairJournals.get(paths.html) === journal) {
+      this.backing.pairJournals.delete(paths.html);
+    }
+    this.backing.recoveryConflicts.delete(paths.html);
+  }
+
   writeExternally(path: string, contents: string): void {
     this.backing.files.set(path, makeEntry(contents));
   }
@@ -990,15 +1043,19 @@ export class MemoryWorkbenchVault
 
     const reason = this.#pairRecoveryConflictReason(journal);
     if (reason) {
+      const historyRolledBack = journal.history
+        ? this.#rollbackCombinedHistoryForQuarantine(journal.history)
+        : true;
       const conflict: MemoryRecoveryConflict = {
         paths: journal.paths,
         historyFolder: journal.history
           ? folderOf(journal.history.promoted.path)
           : null,
-        reason
+        reason,
+        journal,
+        historyRolledBack
       };
       this.backing.recoveryConflicts.set(journal.paths.html, conflict);
-      this.backing.pairJournals.delete(journal.paths.html);
       throw new MemoryTransactionRecoveryConflictError(conflict);
     }
 
@@ -1075,6 +1132,46 @@ export class MemoryWorkbenchVault
   #setEntry(path: string, entry: MemoryEntry | null): void {
     if (entry) this.backing.files.set(path, entry);
     else this.backing.files.delete(path);
+  }
+
+  #rollbackCombinedHistoryForQuarantine(
+    journal: MemoryHistoryJournal
+  ): boolean {
+    if (this.backing.historyReceipts.has(journal.provisional.observation.entry)) {
+      return false;
+    }
+    const promoted = this.backing.files.get(journal.promoted.path) ?? null;
+    const provisional =
+      this.backing.files.get(journal.provisional.path) ?? null;
+    if (
+      (promoted !== null && promoted !== journal.promoted.observation.entry) ||
+      (provisional !== null &&
+        provisional !== journal.provisional.observation.entry)
+    ) {
+      return false;
+    }
+    for (const file of journal.removals.slice(0, journal.removedCount)) {
+      const current = this.backing.files.get(file.path) ?? null;
+      if (current !== null && current !== file.observation.entry) return false;
+    }
+
+    if (promoted === journal.promoted.observation.entry) {
+      this.backing.files.delete(journal.promoted.path);
+    }
+    for (const file of journal.removals.slice(0, journal.removedCount)) {
+      if (!this.backing.files.has(file.path)) {
+        this.backing.files.set(file.path, file.observation.entry);
+      }
+    }
+    if (provisional === null) {
+      this.backing.files.set(
+        journal.provisional.path,
+        journal.provisional.observation.entry
+      );
+    }
+    journal.removedCount = 0;
+    journal.rollback = true;
+    return true;
   }
 
   #rollForwardHistoryJournal(journal: MemoryHistoryJournal): void {

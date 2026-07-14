@@ -13,6 +13,8 @@ DONE
   `79daf6cc35f1b570c11aa5facc2eccdb2407b451`
 - Independent-review R4 remediation base:
   `2a5f28b5e695af972435a388a96c7b85efc7497c`
+- Independent-review R5 remediation base:
+  `acf09ea1b3e5c16b891605cc0bfab1c49056f927`
 - Task commit: the commit containing this report; its exact SHA is recorded in
   the implementation handoff because a Git commit cannot contain its own hash.
 - Progress ledger: not edited
@@ -93,11 +95,12 @@ HTML/sidecar pairs:
   Crash conformance tests abandon the upper call stack at the vault boundary
   rather than relying on test-only production error recognition.
 - Recovery is resource-scoped. Pair replay preflights the complete pair/history
-  ownership set before its first mutation. Identity loss durably removes the
-  active journal into a typed `transaction_recovery_conflict` quarantine for
-  only that pair and history transaction; unrelated pairs, source files, and
-  history folders remain usable across fresh adapters. Repeated reads of the
-  affected pair fail deterministically without changing raw bytes.
+  ownership set before its first mutation. Identity loss retains the complete
+  pair/history journal and opaque handles inside a typed,
+  `transaction_recovery_conflict` quarantine for only that transaction.
+  Recoverable history mutation is failure-atomically rolled back to one owned
+  pending preparation; unsafe rollback leaves the full payload and raw history
+  unchanged. Unrelated pairs, source files, and history folders remain usable.
 - Create-journal recovery uses cleanup semantics rather than replacement
   quarantine semantics: it observes both members before mutation, preserves
   every external identity, conditionally deletes every member still equal to
@@ -282,7 +285,8 @@ Tests       5 failed | 108 skipped (113)
 - Recovery entry points now select journals by affected pair, member path, or
   history folder instead of sweeping the entire backing. All pair and history
   ownership is preflighted before replay writes. Ownership loss creates a
-  durable typed quarantine and removes the retrying active journal.
+  durable typed quarantine; R5 subsequently retains its full active payload
+  while blocking automatic retry.
 - The isolation test repeats affected reads across fresh adapters while proving
   an unrelated text file, another valid pair, and another document's history
   all remain readable and the affected raw bytes remain unchanged.
@@ -340,12 +344,61 @@ Tests       4 failed | 84 skipped (88)
   replacements, clears the journal, and never creates a cleanup-only
   quarantine. Repeated fresh adapters and unrelated reads remain usable.
 
+### Independent review R5 remediation RED
+
+The exact 20-history ambiguous-retention scenario was strengthened permanently
+before changing recovery. Its targeted RED failed on the first durable-state
+invariant:
+
+```text
+npm test -- tests/documents/DocumentSession.test.ts \
+  -t "keeps a quarantined combined outcome"
+Test Files  1 failed (1)
+Tests       1 failed | 88 skipped (89)
+expected journalCount 1; received 0
+```
+
+The reason-only tombstone had discarded the complete pair/history journal. It
+also left zero pending preparations and 21 recognized history snapshots after
+starting from exactly 20, with no receipt or resolution path.
+
+### Independent review R5 remediation
+
+- `MemoryRecoveryConflict` now retains the complete `MemoryPairJournal`,
+  including old/new pair identities, provisional/promoted history handles,
+  observed folder, complete removal set, mutation progress, and transaction
+  phase. The same journal remains in durable pair recovery storage, and
+  `journalCount()` counts a quarantined full transaction exactly once.
+- Before quarantine, the adapter preflights every history location it would
+  mutate. If safe, it removes only the still-owned promoted snapshot, restores
+  every already-removed owned candidate, restores the exact provisional handle,
+  and marks the retained history payload rolled back. The permanent 20-entry
+  case therefore has exactly 20 recognized snapshots, one `.pending`, zero
+  receipts, one counted journal, and one scoped conflict across fresh adapters.
+- The rollback is failure-atomic. If the promoted, provisional, or restorable
+  removal path has an external identity, no rollback mutation occurs. A second
+  permanent test replaces the promoted history entry and proves its bytes,
+  21-entry raw history, missing pending state, full journal, and quarantine all
+  remain unchanged across reopen.
+- The reference adapter exposes explicit
+  `acceptCurrentPairAndAbandonQuarantinedTransaction`. Resolution requires both
+  current pair members to exactly match caller-supplied accepted bytes, retries
+  deferred history rollback only when it has become ownership-safe, removes
+  only the exact owned pending handle, and then clears the journal/conflict.
+  The permanent resolution test accepts a strict hash-matching external
+  sidecar, preserves both accepted pair members byte-for-byte, restores normal
+  pair/history access, and leaves the exact original 20 history snapshots with
+  no pending state.
+- Existing replacement quarantine remains resource-scoped and now retains its
+  full counted transaction; create-mode cleanup remains independently
+  decidable and never enters quarantine.
+
 ### Final focused GREEN
 
 ```text
 npm test -- tests/documents/HistoryRepository.test.ts tests/documents/DocumentSession.test.ts
 Test Files  2 passed (2)
-Tests       118 passed (118)
+Tests       119 passed (119)
 exit 0
 
 npm run test:typecheck
@@ -359,7 +412,8 @@ exit 0
   exact-20 convergence from 19/20/21, failure-atomic multi-delete replay,
   sidecar-compatible UUID canonicalization, malformed/unrelated preservation,
   traversal rejection, promotion/rollback/recovery failure, ABA pruning
-  conflict, queued abort, and restart.
+  conflict, queued abort, restart, recoverable ambiguous rollback to pending,
+  unsafe rollback preflight, and explicit quarantine resolution.
 - Open: valid shell, malformed/strict sidecar failures, hash mismatch, invalid
   shell, contradictory pair paths, exact source hash, and missing source.
 - Editing: body-only changes, exact shell preservation, whole-document
@@ -406,7 +460,10 @@ exit 0
 | Ordinary throw after combined save marker | repository reconciles the recovered new pair; session remains dirty/conflicted and history is finalized |
 | Pre-CAS throw after an external winner | no combined receipt exists; external pair remains, pending history rolls back, and no snapshot is promoted |
 | Unknown/quarantined combined outcome | typed non-committed ambiguity remains dirty/conflicted and cannot call standalone history commit/rollback |
-| Pair/history ownership loss before replay | all members are preflighted; affected transaction is typed/quarantined without raw mutation or unrelated-resource denial |
+| Pair/history ownership loss before replay | all members are preflighted; complete journal remains counted and resource-scoped without unrelated-resource denial |
+| Safe history rollback before quarantine | promoted history is removed, owned removals are restored, and exact prior HTML returns to one pending preparation beside exactly 20 recognized snapshots |
+| Unsafe history rollback before quarantine | preflight performs no mutation; external history bytes and complete transaction payload remain quarantined for later resolution |
+| Explicit external-pair acceptance | caller-selected exact pair bytes are preserved; owned pending state and full quarantine clear; exact history becomes accessible |
 | Recovery failure | read rejects and journal remains; later clean reopen completes replay |
 | Post-commit verification failure | new HTML and new matching sidecar remain; session dirty |
 | Overwrite after external HTML-only edit | exact latest external HTML stored in history; new matching local pair committed |
@@ -437,7 +494,7 @@ before exposing persistent state.
 ```text
 npm test -- tests/documents/HistoryRepository.test.ts tests/documents/DocumentSession.test.ts
 Test Files  2 passed (2)
-Tests       118 passed (118)
+Tests       119 passed (119)
 exit 0
 
 npm run test:typecheck
@@ -445,7 +502,7 @@ exit 0
 
 npm test
 Test Files  33 passed (33)
-Tests       811 passed (811)
+Tests       812 passed (812)
 exit 0
 
 npm run build
@@ -478,9 +535,10 @@ No known Task 3.1 logic defect remains. The future Obsidian composition task mus
 implement the proven transaction protocol with durable recovery state, stable
 identity/version observations, exclusive pair creation/promotion, per-member
 identity-conditional cleanup from a whole-operation journal, a single durable
-pair-plus-history save boundary, scoped terminal recovery quarantine, bounded
+pair-plus-history save boundary, scoped recoverable quarantine, bounded
 receipt acknowledgement/compaction, exact combined-receipt reconciliation,
-mode-aware create cleanup, and the same restart/failure-stage adapter-
-conformance coverage. This task
+full-payload quarantine with ownership-safe history rollback and explicit
+resolution, mode-aware create cleanup, and the same restart/failure-stage
+adapter-conformance coverage. This task
 deliberately does not add that Obsidian runtime adapter or modify the composition
 root.
