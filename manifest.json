@@ -1,0 +1,9 @@
+{
+  "id": "galley",
+  "name": "Galley",
+  "version": "0.1.0",
+  "minAppVersion": "1.11.4",
+  "description": "AI-driven Markdown-to-HTML publishing studio.",
+  "author": "Galley contributors",
+  "isDesktopOnly": false
+}
