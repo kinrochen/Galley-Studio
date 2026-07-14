@@ -9,6 +9,7 @@ import {
   sha256Text
 } from "../../src/documents/GalleySidecar";
 import {
+  MemoryWorkbenchVault,
   makeSessionDeps,
   TEST_COPY_ID,
   TEST_NOW,
@@ -18,6 +19,80 @@ import {
 } from "../support/workbenchFixtures";
 
 describe("DocumentSession", () => {
+  it.each([
+    "replace_after_html",
+    "replace_after_sidecar",
+    "replace_after_commit_marker"
+  ] as const)(
+    "replays a crashed replacement from durable backing at %s before exposing it",
+    async (stage) => {
+      const fixture = await makeSessionDeps({
+        hooks: { crashStages: new Set<MemoryFaultStage>([stage]) }
+      });
+      const session = await DocumentSession.open(fixture.dependencies);
+      session.updateBody("<article><p>durable replacement</p></article>");
+      const targetHtml = session.html();
+
+      await expect(session.save("explicit")).rejects.toMatchObject({
+        name: "MemoryCrashError"
+      });
+
+      expect(fixture.backing.rawRead(TEST_PATHS.html)).toBe(targetHtml);
+      const rawSidecar = GalleySidecarV1Schema.parse(
+        JSON.parse(fixture.backing.rawRead(TEST_PATHS.sidecar) ?? "")
+      );
+      expect(rawSidecar.htmlHash).toBe(
+        stage === "replace_after_html"
+          ? fixture.sidecar.htmlHash
+          : await sha256Text(targetHtml)
+      );
+      expect(fixture.backing.journalCount()).toBe(1);
+
+      fixture.vault.destroy();
+      const recreatedVault = MemoryWorkbenchVault.reopen(fixture.backing);
+      const recreatedRepository = new GalleyDocumentRepository(recreatedVault);
+      const recovered = await recreatedRepository.readPair(TEST_PATHS);
+      expect(recovered?.html).toBe(
+        stage === "replace_after_commit_marker" ? targetHtml : fixture.html
+      );
+      const recoveredSidecar = GalleySidecarV1Schema.parse(
+        JSON.parse(recovered?.sidecarJson ?? "")
+      );
+      expect(recoveredSidecar.htmlHash).toBe(recovered?.htmlHash);
+      expect(fixture.backing.journalCount()).toBe(0);
+    }
+  );
+
+  it("keeps a failed recovery journal for a later successful adapter reopen", async () => {
+    const fixture = await makeSessionDeps({
+      hooks: {
+        crashStages: new Set<MemoryFaultStage>(["replace_after_html"])
+      }
+    });
+    const session = await DocumentSession.open(fixture.dependencies);
+    session.updateBody("<article><p>crash then recover twice</p></article>");
+    await expect(session.save("explicit")).rejects.toMatchObject({
+      name: "MemoryCrashError"
+    });
+
+    fixture.vault.destroy();
+    const failedRecovery = MemoryWorkbenchVault.reopen(fixture.backing, {
+      faultStages: new Set<MemoryFaultStage>(["replace_rollback_html"])
+    });
+    await expect(
+      new GalleyDocumentRepository(failedRecovery).readPair(TEST_PATHS)
+    ).rejects.toThrow("replace_rollback_html");
+    expect(fixture.backing.journalCount()).toBe(1);
+
+    failedRecovery.destroy();
+    const successfulRecovery = MemoryWorkbenchVault.reopen(fixture.backing);
+    const recovered = await new GalleyDocumentRepository(
+      successfulRecovery
+    ).readPair(TEST_PATHS);
+    expect(recovered?.html).toBe(fixture.html);
+    expect(fixture.backing.journalCount()).toBe(0);
+  });
+
   it("opens a valid exact-hash pair, trusts the sidecar source path, and exposes body state", async () => {
     const fixture = await makeSessionDeps();
 
@@ -360,13 +435,17 @@ describe("DocumentSession", () => {
 
       await expect(session.save("explicit")).rejects.toThrow(/injected/i);
 
-      await expectMatchingPair(fixture.vault, TEST_PATHS);
-      expect(fixture.vault.read(TEST_PATHS.html)).toBe(fixture.html);
-      expect(await fixture.history.list(fixture.sidecar.documentId)).toEqual([]);
+      const reopened = MemoryWorkbenchVault.reopen(fixture.backing);
+      await new GalleyDocumentRepository(reopened).readPair(TEST_PATHS);
+      await expectMatchingPair(reopened, TEST_PATHS);
+      expect(reopened.read(TEST_PATHS.html)).toBe(fixture.html);
       expect(
-        fixture.vault.paths().some((path) => path.endsWith(".pending"))
+        await new HistoryRepository(reopened).list(fixture.sidecar.documentId)
+      ).toEqual([]);
+      expect(
+        reopened.paths().some((path) => path.endsWith(".pending"))
       ).toBe(false);
-      expect(fixture.vault.journalCount()).toBe(0);
+      expect(fixture.backing.journalCount()).toBe(0);
     }
   );
 
@@ -578,10 +657,42 @@ describe("DocumentSession", () => {
 
       await expect(session.saveCopy()).rejects.toThrow(/injected/i);
 
-      expect(fixture.vault.read("notes/article-2.galley.html")).toBeNull();
-      expect(fixture.vault.read("notes/article-2.galley.json")).toBeNull();
-      await expectMatchingPair(fixture.vault, TEST_PATHS);
-      expect(fixture.vault.journalCount()).toBe(0);
+      const reopened = MemoryWorkbenchVault.reopen(fixture.backing);
+      await new GalleyDocumentRepository(reopened).readPair(TEST_PATHS);
+      expect(reopened.read("notes/article-2.galley.html")).toBeNull();
+      expect(reopened.read("notes/article-2.galley.json")).toBeNull();
+      await expectMatchingPair(reopened, TEST_PATHS);
+      expect(fixture.backing.journalCount()).toBe(0);
+    }
+  );
+
+  it.each([
+    "create_after_html",
+    "create_after_sidecar",
+    "create_after_commit_marker"
+  ] as const)(
+    "replays crashed copy creation from durable backing at %s",
+    async (stage) => {
+      const fixture = await makeSessionDeps({
+        hooks: { crashStages: new Set<MemoryFaultStage>([stage]) }
+      });
+      const session = await DocumentSession.open(fixture.dependencies);
+      session.updateBody("<article><p>crashed copy</p></article>");
+
+      await expect(session.saveCopy()).rejects.toMatchObject({
+        name: "MemoryCrashError"
+      });
+      expect(fixture.backing.journalCount()).toBe(1);
+
+      fixture.vault.destroy();
+      const reopened = MemoryWorkbenchVault.reopen(fixture.backing);
+      expect(
+        await new GalleyDocumentRepository(reopened).readPair({
+          html: "notes/article-2.galley.html",
+          sidecar: "notes/article-2.galley.json"
+        })
+      ).toBeNull();
+      expect(fixture.backing.journalCount()).toBe(0);
     }
   );
 
@@ -898,6 +1009,115 @@ describe("DocumentSession", () => {
       conflict: true,
       saving: false
     });
+  });
+
+  it("rolls back pending history when promotion throws after the pair commit", async () => {
+    const fixture = await makeSessionDeps({
+      hooks: {
+        faultStages: new Set<MemoryFaultStage>(["history_before_promotion"])
+      }
+    });
+    const session = await DocumentSession.open(fixture.dependencies);
+    session.updateBody("<article><p>pair commits first</p></article>");
+
+    await expect(session.save("explicit")).rejects.toThrow(
+      "history_before_promotion"
+    );
+
+    expect(fixture.vault.paths().some((path) => path.endsWith(".pending"))).toBe(
+      false
+    );
+    expect(session.state()).toMatchObject({ dirty: true, conflict: true });
+  });
+
+  it.each([
+    ["first", new Set(["html"])],
+    ["second", new Set(["sidecar"])],
+    ["both", new Set(["html", "sidecar"])]
+  ] as const)(
+    "durably recovers created-member cleanup when the %s removal throws",
+    async (_label, failingMembers) => {
+      const hooks: MemoryWorkbenchHooks = {};
+      const fixture = await makeSessionDeps({ hooks });
+      const session = await DocumentSession.open(fixture.dependencies);
+      hooks.verifyReadOverride = null;
+      hooks.beforeRemovePair = (ownership) => {
+        if (failingMembers.has(ownership.member)) {
+          throw new Error(`simulated ${ownership.member} cleanup failure`);
+        }
+      };
+
+      await expect(session.saveCopy()).rejects.toMatchObject({
+        code: "document_commit_verification"
+      });
+      expect(fixture.backing.journalCount()).toBe(1);
+
+      fixture.vault.destroy();
+      const reopened = MemoryWorkbenchVault.reopen(fixture.backing);
+      await new GalleyDocumentRepository(reopened).readPair(TEST_PATHS);
+      expect(
+        fixture.backing
+          .rawPaths()
+          .filter((path) => path.includes("article-2.galley"))
+      ).toEqual([]);
+      expect(fixture.backing.journalCount()).toBe(0);
+    }
+  );
+
+  it("replays whole-pair cleanup after a crash between owned members", async () => {
+    const hooks: MemoryWorkbenchHooks = {
+      crashStages: new Set<MemoryFaultStage>(["owned_cleanup_after_html"])
+    };
+    const fixture = await makeSessionDeps({ hooks });
+    const session = await DocumentSession.open(fixture.dependencies);
+    hooks.verifyReadOverride = null;
+
+    await expect(session.saveCopy()).rejects.toMatchObject({
+      code: "document_commit_verification"
+    });
+    expect(fixture.backing.rawRead("notes/article-2.galley.html")).toBeNull();
+    expect(
+      fixture.backing.rawRead("notes/article-2.galley.json")
+    ).not.toBeNull();
+    expect(fixture.backing.journalCount()).toBe(1);
+
+    fixture.vault.destroy();
+    const reopened = MemoryWorkbenchVault.reopen(fixture.backing);
+    await new GalleyDocumentRepository(reopened).readPair(TEST_PATHS);
+    expect(
+      fixture.backing
+        .rawPaths()
+        .filter((path) => path.includes("article-2.galley"))
+    ).toEqual([]);
+    expect(fixture.backing.journalCount()).toBe(0);
+  });
+
+  it("preserves an external replacement while replaying failed copy cleanup", async () => {
+    const hooks: MemoryWorkbenchHooks = {};
+    const fixture = await makeSessionDeps({ hooks });
+    const session = await DocumentSession.open(fixture.dependencies);
+    hooks.verifyReadOverride = null;
+    hooks.beforeRemovePair = (ownership) => {
+      if (ownership.member === "html") {
+        throw new Error("simulated owned HTML cleanup failure");
+      }
+    };
+    await expect(session.saveCopy()).rejects.toMatchObject({
+      code: "document_commit_verification"
+    });
+    fixture.vault.writeExternally(
+      "notes/article-2.galley.html",
+      "external replacement HTML"
+    );
+
+    fixture.vault.destroy();
+    const reopened = MemoryWorkbenchVault.reopen(fixture.backing);
+    await new GalleyDocumentRepository(reopened).readPair(TEST_PATHS);
+    expect(reopened.read("notes/article-2.galley.html")).toBe(
+      "external replacement HTML"
+    );
+    expect(reopened.read("notes/article-2.galley.json")).toBeNull();
+    expect(fixture.backing.journalCount()).toBe(0);
   });
 
   it("marks ambiguous post-commit state dirty even when history finalization also fails", async () => {

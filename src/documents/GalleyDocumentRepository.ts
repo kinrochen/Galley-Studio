@@ -30,8 +30,12 @@ export type VaultCreatePairResult<Observation, Ownership> =
 
 /**
  * The adapter owns identity/version tracking and the transactional primitive.
- * A replace/create call must leave either the complete old pair or the complete
- * new pair durable on every return/throw; it must never expose a mixed pair.
+ * It must persist recovery intent before the first member mutation and replay
+ * unfinished work before any later read/mutation, including after adapter
+ * recreation. A replace/create call may be interrupted, but no entry point may
+ * expose a mixed pair: recovery must yield the complete old or complete new
+ * pair. Created-member cleanup must likewise register durable,
+ * identity-conditional recovery before it can throw.
  */
 export interface GalleyDocumentVault<Observation, Ownership> {
   readPair(
@@ -51,7 +55,9 @@ export interface GalleyDocumentVault<Observation, Ownership> {
     contents: { html: string; sidecarJson: string },
     signal?: AbortSignal
   ): Promise<VaultCreatePairResult<Observation, Ownership>>;
-  removeCreatedMember(ownership: Ownership): Promise<void>;
+  cleanupCreatedMembers(
+    ownership: readonly [Ownership, Ownership]
+  ): Promise<void>;
 }
 
 const OBSERVATION = Symbol("GalleyDocumentObservation");
@@ -226,12 +232,10 @@ export class GalleyDocumentRepository<Observation, Ownership> {
         );
         return { paths, snapshot };
       } catch (error) {
-        for (const ownership of result.ownership) {
-          try {
-            await this.vault.removeCreatedMember(ownership);
-          } catch {
-            // Preserve the operation/verification error. Cleanup is identity-safe.
-          }
+        try {
+          await this.vault.cleanupCreatedMembers(result.ownership);
+        } catch {
+          // Preserve the operation error; adapter-owned recovery remains durable.
         }
         throw error;
       }

@@ -6,9 +6,11 @@ export interface HistoryFile<Observation> {
   observation: Observation;
 }
 
-export type HistoryPromotionResult<Observation> =
+export type HistoryRetentionResult<Observation> =
   | { status: "created"; file: HistoryFile<Observation> }
   | { status: "collision" }
+  | { status: "conflict" }
+  | { status: "ownership-conflict" }
   | { status: "lost" };
 
 export interface HistoryVault<Observation> {
@@ -25,16 +27,20 @@ export interface HistoryVault<Observation> {
     | { status: "created"; file: HistoryFile<Observation> }
     | { status: "collision" }
   >;
-  promoteObserved(
+  /**
+   * Durably promotes one provisional file and conditionally removes the
+   * observed retention candidates as one recoverable transaction. Repeating
+   * the same provisional handle after an interrupted call is idempotent.
+   */
+  applyRetentionTransaction(
     provisional: HistoryFile<Observation>,
     finalPath: string,
+    observedFiles: readonly HistoryFile<Observation>[],
+    removals: readonly HistoryFile<Observation>[],
     signal?: AbortSignal
-  ): Promise<HistoryPromotionResult<Observation>>;
-  removeObserved(
-    file: HistoryFile<Observation>,
-    signal?: AbortSignal
-  ): Promise<boolean>;
-  removePrepared(file: HistoryFile<Observation>): Promise<boolean>;
+  ): Promise<HistoryRetentionResult<Observation>>;
+  /** Registers cleanup durably before removing a provisional file. */
+  rollbackPrepared(file: HistoryFile<Observation>): Promise<boolean>;
 }
 
 export interface HistorySnapshot {
@@ -58,7 +64,7 @@ export class HistoryPruneConflictError extends Error {
 
 const PREPARED = Symbol("PreparedHistorySnapshot");
 
-type PreparationState = "pending" | "recognized" | "committed" | "rolled-back";
+type PreparationState = "pending" | "committed" | "rolled-back";
 
 interface PreparationData<Observation> {
   readonly repository: symbol;
@@ -77,7 +83,7 @@ export interface PreparedHistorySnapshot {
 const HISTORY_ROOT = ".galley/history";
 const TIMESTAMP_WIDTH = 16;
 const SEQUENCE_WIDTH = 8;
-const MAX_PRUNE_RETRIES = 128;
+const MAX_RETENTION_RETRIES = 128;
 
 export class HistoryRepository<Observation> {
   readonly #identity = Symbol("HistoryRepository");
@@ -143,49 +149,58 @@ export class HistoryRepository<Observation> {
       throw new Error("Galley history preparation is no longer active.");
     }
 
-    return this.#serialize(data.folder, async () => {
-      throwIfAborted(signal);
-      while (true) {
-        const finalPath = `${data.folder}/${this.#newSnapshotStem(
-          data.timestampMs
-        )}.html`;
-        const promoted = await this.vault.promoteObserved(
-          data.file,
-          finalPath,
-          signal
-        );
-        if (promoted.status === "collision") continue;
-        if (promoted.status === "lost") {
-          data.state = "rolled-back";
-          throw new HistoryPruneConflictError();
+    try {
+      return await this.#serialize(data.folder, async () => {
+        for (let attempt = 0; attempt < MAX_RETENTION_RETRIES; attempt += 1) {
+          throwIfAborted(signal);
+          const finalPath = `${data.folder}/${this.#newSnapshotStem(
+            data.timestampMs
+          )}.html`;
+          const observedFiles = await this.vault.listFiles(data.folder, signal);
+          const files = parsedFiles(data.folder, observedFiles);
+          const removeCount = Math.max(0, files.length + 1 - this.limit);
+          const removals = files.slice(0, removeCount).map(({ file }) => file);
+          const result = await this.vault.applyRetentionTransaction(
+            data.file,
+            finalPath,
+            observedFiles,
+            removals,
+            signal
+          );
+          if (result.status === "collision" || result.status === "conflict") {
+            continue;
+          }
+          if (result.status === "ownership-conflict") {
+            throw new HistoryPruneConflictError();
+          }
+          if (result.status === "lost") throw new HistoryPruneConflictError();
+
+          data.file = result.file;
+          data.state = "committed";
+          const snapshot = parseSnapshotFile(data.folder, data.file);
+          if (!snapshot) {
+            throw new Error("Committed Galley history path is invalid.");
+          }
+          return snapshot;
         }
-        data.file = promoted.file;
-        data.state = "recognized";
-        break;
-      }
-
+        throw new Error("Galley history retention did not converge.");
+      });
+    } catch (error) {
       try {
-        await this.#pruneConverging(data.folder, signal);
-      } catch (error) {
-        await this.vault.removePrepared(data.file);
-        data.state = "rolled-back";
-        throw error;
+        await this.rollback(prepared);
+      } catch {
+        // rollbackPrepared registered its own durable recovery before throwing.
       }
-
-      data.state = "committed";
-      const snapshot = parseSnapshotFile(data.folder, data.file);
-      if (!snapshot) {
-        throw new Error("Committed Galley history path is invalid.");
-      }
-      return snapshot;
-    });
+      throw error;
+    }
   }
 
   async rollback(prepared: PreparedHistorySnapshot): Promise<void> {
     const data = this.#preparationData(prepared);
     if (data.state === "committed" || data.state === "rolled-back") return;
-    await this.vault.removePrepared(data.file);
-    data.state = "rolled-back";
+    if (await this.vault.rollbackPrepared(data.file)) {
+      data.state = "rolled-back";
+    }
   }
 
   async store(
@@ -198,7 +213,11 @@ export class HistoryRepository<Observation> {
     try {
       return await this.commit(prepared, signal);
     } catch (error) {
-      await this.rollback(prepared);
+      try {
+        await this.rollback(prepared);
+      } catch {
+        // rollbackPrepared registered its own durable recovery before throwing.
+      }
       throw error;
     }
   }
@@ -212,29 +231,6 @@ export class HistoryRepository<Observation> {
     const files = await this.vault.listFiles(folder, signal);
     throwIfAborted(signal);
     return parsedFiles(folder, files).map(({ snapshot }) => snapshot);
-  }
-
-  async #pruneConverging(folder: string, signal?: AbortSignal): Promise<void> {
-    for (let attempt = 0; attempt < MAX_PRUNE_RETRIES; attempt += 1) {
-      throwIfAborted(signal);
-      const files = parsedFiles(
-        folder,
-        await this.vault.listFiles(folder, signal)
-      );
-      if (files.length <= this.limit) return;
-      const candidate = files[0];
-      if (!candidate) return;
-      if (await this.vault.removeObserved(candidate.file, signal)) continue;
-
-      const refreshed = parsedFiles(
-        folder,
-        await this.vault.listFiles(folder, signal)
-      );
-      if (refreshed.some(({ snapshot }) => snapshot.path === candidate.snapshot.path)) {
-        throw new HistoryPruneConflictError();
-      }
-    }
-    throw new Error("Galley history retention did not converge.");
   }
 
   #newSnapshotStem(timestampMs: number): string {

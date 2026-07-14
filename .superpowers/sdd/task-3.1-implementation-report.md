@@ -7,6 +7,8 @@ DONE
 - Base: `95a6819cdc658d9501e4e3da9dd18346197f3f8e`
 - Independent-review remediation base:
   `b9a65aedd6443392213632a5827360f481d8f0af`
+- Independent-review R2 remediation base:
+  `f098c7d26662db9cdb3327738fd4bd06337dc5c7`
 - Task commit: the commit containing this report; its exact SHA is recorded in
   the implementation handoff because a Git commit cannot contain its own hash.
 - Progress ledger: not edited
@@ -24,19 +26,24 @@ HTML/sidecar pairs:
   opaque repository-owned observation, and exposes atomic compare-and-replace
   and exclusive numbered-copy operations.
 - The vault boundary exposes transactional replace/create primitives. The
-  concrete reference adapter uses a durable in-memory transaction journal,
-  staged member writes, identity-conditional rollback/recovery, and abort/fault
-  injection after either member write. Every tested failure leaves the old
-  matching pair or no created pair, with no recovery journal left behind.
+  concrete reference adapter stores files, commit markers, and recovery
+  journals in a durable backing object shared across destroyed/recreated
+  adapter instances. Crash injection bypasses the originating catch. The next
+  adapter replays the journal before any read can expose a mixed pair; failed
+  recovery retains the journal for a later successful reopen.
 - Copy creation starts at the Phase 2-compatible numbered sibling (`-2`), treats
   either occupied side as a collision, retries the whole pair, and conditionally
-  removes each still-owned member after verification/abort failure. One-sided
-  ABA replacements are preserved without retaining Galley's stale counterpart.
+  removes each still-owned member after verification/abort failure. Cleanup
+  registers the complete ownership tuple durably before either member, so a
+  throw or crash between members is replayable. One-sided ABA replacements are
+  preserved without retaining Galley's stale counterpart.
 - `HistoryRepository` prepares invisible owned `.pending` snapshots below a
   sidecar-schema-compatible canonical lowercase UUID folder, promotes only
   after the document CAS commits, and rolls back its own snapshot on precommit
-  failure or prune failure. A re-listing retention loop converges to the newest
-  20 recognized snapshots across independent repository instances.
+  failure. Promotion plus all observed retention removals form one idempotent
+  adapter transaction. Post-mutation failures roll forward from the durable
+  journal to exactly the newest 20 across independent repository/adapter
+  instances; pre-mutation and queued-abort paths durably clean pending files.
 - History ignores malformed and unrelated files. Pruning passes opaque observed
   handles to the adapter; an ABA/replacement causes a typed
   `history_prune_conflict` instead of path-only deletion.
@@ -137,12 +144,12 @@ failure. Both now pass.
 
 - Pair mutation is exercised against a staged transactional reference adapter
   after HTML write, after sidecar write, during rollback/cleanup recovery, and
-  on abort at every member boundary. A transaction journal must be empty after
-  every outcome.
+  on abort at every member boundary. Each ordinary fault/abort is recovered
+  before the adapter returns control.
 - History now has explicit prepare/commit/rollback ownership. CAS losers,
   precommit aborts, and adapter failures remove only their pending snapshot and
-  do not prune retained history; postcommit prune failure removes the newly
-  recognized snapshot. Cross-instance stale pruning re-lists and converges.
+  do not prune retained history. R2 subsequently upgrades postcommit
+  promotion/pruning to durable roll-forward replay.
 - Sidecar UUID validation is the sole identity source of truth. Uppercase,
   v7/v8, and nil UUIDs save under canonical lowercase folders; copy identity
   comparison is case-insensitive after schema validation.
@@ -150,18 +157,67 @@ failure. Both now pass.
   linkage, provenance, and model fields while changing only the HTML hash.
 - Repository writes reject malformed HTML/sidecar content and exact hash
   mismatches before mutation and repeat semantic verification after commit.
-- Copy ownership is per member, so cleanup independently removes every member
-  still owned by Galley while preserving one-sided external replacements.
+- Copy ownership is per member, so cleanup conditionally removes every member
+  still owned by Galley while preserving one-sided external replacements; R2
+  persists both handles as one cleanup operation.
 - Ambiguous post-commit verification or abort reconciles the durable pair when
   possible and always remains dirty/conflicted. Final dirty state after an
   ordinary commit depends only on exact current-vs-committed HTML.
+
+### Independent review R2 remediation RED
+
+Four permanent reproductions were added before the R2 production-contract
+changes:
+
+```text
+npm test -- tests/documents/HistoryRepository.test.ts \
+  tests/documents/DocumentSession.test.ts \
+  -t "recreated adapter exposes|promotion throws after|first removal throws|later prune step fails"
+Test Files  2 failed (2)
+Tests       4 failed | 85 skipped (89)
+```
+
+- C1 exposed a mixed HTML/sidecar pair after recreating an adapter with the
+  interrupted durable bytes but no consumed recovery journal.
+- I1 left an invisible `.pending` file after promotion threw following the main
+  pair commit.
+- I2 deleted one retained snapshot, removed the new snapshot on a later failure,
+  and returned only 19.
+- I6 swallowed the first cleanup error, removed the sidecar, and left Galley's
+  owned HTML orphan.
+
+### Independent review R2 remediation
+
+- `MemoryWorkbenchBacking` now owns files and journals independently of any
+  adapter instance. Crash stages after HTML, after sidecar, and after the durable
+  commit marker bypass same-stack cleanup. Raw backing assertions prove the
+  intermediate state and persisted journal; a newly constructed adapter reads
+  and replays that journal before exposing the pair.
+- Replacement recovery rolls back pre-marker crashes and rolls forward a
+  post-marker crash. Unacknowledged copy creation rolls back after crashes at
+  every corresponding boundary. An injected recovery failure rejects the read,
+  retains the journal, and a later clean adapter reopen completes replay.
+- History promotion and all observed retention removals are one durable,
+  idempotent adapter transaction. The transaction validates the complete folder
+  observation, so adapters racing from 19 or 20 converge to exactly 20.
+- History tests cover promotion throws/crashes before and after mutation,
+  idempotent retry, recreated-adapter recovery, recovery failure followed by a
+  later reopen, rollback throws before and after deletion, and abort while
+  waiting in the local queue.
+- Multi-delete retention tests interrupt after the first successful removal for
+  both an ordinary throw and a crash. Raw state is temporarily 21 with a journal;
+  reopening rolls forward to exactly the newest 20, never 19.
+- Copy verification cleanup persists the complete two-member ownership tuple
+  before either conditional delete. First, second, both, and between-member
+  failures recover after restart; external replacements remain untouched while
+  every still-owned counterpart is removed.
 
 ### Final focused GREEN
 
 ```text
 npm test -- tests/documents/HistoryRepository.test.ts tests/documents/DocumentSession.test.ts
 Test Files  2 passed (2)
-Tests       85 passed (85)
+Tests       108 passed (108)
 exit 0
 
 npm run test:typecheck
@@ -171,10 +227,11 @@ exit 0
 ## Required behavior coverage
 
 - History: provisional prepare/rollback invisibility, newest-20 retention,
-  deterministic oldest-first order, equal-time uniqueness, cross-instance
-  exact-20 convergence, sidecar-compatible UUID canonicalization,
-  malformed/unrelated preservation, traversal rejection, prune failure, ABA
-  pruning conflict, and abort.
+  deterministic oldest-first order, equal-time uniqueness, cross-adapter
+  exact-20 convergence from 19/20/21, failure-atomic multi-delete replay,
+  sidecar-compatible UUID canonicalization, malformed/unrelated preservation,
+  traversal rejection, promotion/rollback/recovery failure, ABA pruning
+  conflict, queued abort, and restart.
 - Open: valid shell, malformed/strict sidecar failures, hash mismatch, invalid
   shell, contradictory pair paths, exact source hash, and missing source.
 - Editing: body-only changes, exact shell preservation, whole-document
@@ -189,8 +246,9 @@ exit 0
   and malformed reload preserving local state.
 - Copy: different canonical UUID, matching hash, unchanged session/original
   pair, one-sided collision, same-name race, staged creation/cleanup failure,
-  per-member owned cleanup, verification failure, and one- or two-sided ABA
-  replacement preservation during cleanup.
+  durable whole-ownership cleanup, first/second/both and between-member cleanup
+  failure, verification failure, restart, and one- or two-sided ABA replacement
+  preservation during cleanup.
 
 ## Security and shell audit
 
@@ -210,30 +268,37 @@ exit 0
 | --- | --- |
 | External HTML/sidecar or same-byte ABA before save | external pair preserved; typed conflict; no replace call |
 | Race after re-observation | adapter CAS rejects; raced pair preserved; local session dirty/conflicted |
-| Staged replacement/rollback failure or abort | old HTML and old matching sidecar remain; session dirty; journal empty |
+| Crash after replacement HTML/sidecar | raw backing is interrupted with journal; recreated adapter rolls back before exposing a read |
+| Crash after durable replacement marker | recreated adapter rolls forward the complete new pair before exposing a read |
+| Recovery failure | read rejects and journal remains; later clean reopen completes replay |
 | Post-commit verification failure | new HTML and new matching sidecar remain; session dirty |
 | Overwrite after external HTML-only edit | exact latest external HTML stored in history; new matching local pair committed |
 | Existing one-sided copy candidate | occupied side preserved; whole copy advances to next number |
 | Copy candidate appears during create | raced file preserved; whole copy advances again |
-| Staged copy/cleanup failure or abort | no partial copy pair remains; journal empty |
-| Copy verification failure | each still-owned member is conditionally removed |
+| Crashed copy creation | recreated adapter replays the journal and removes every unacknowledged member |
+| Copy verification/cleanup failure | complete ownership tuple remains journaled until each still-owned member is removed |
+| Crash between copy cleanup members | raw backing can be one-sided only behind a journal; reopen removes the remaining owned member |
 | One-sided copy-path ABA before cleanup | replacement member preserved; Galley-owned counterpart removed |
 | History CAS loser/precommit abort | pending snapshot removed; retained history unchanged |
-| History prune failure | newly recognized snapshot rolled back; original failure propagates |
+| History promotion failure before mutation | pending snapshot is durably rolled back |
+| History promotion failure/crash after mutation | retry/reopen idempotently returns the promoted snapshot |
+| History multi-delete failure/crash | journal rolls forward from temporary 21 to exactly the newest 20 |
+| History rollback/recovery failure | journal survives and a later adapter reopen completes cleanup/replay |
 | History snapshot ABA before prune | replacement preserved; typed prune conflict |
 | Cross-instance history pruning | stale removal re-lists until exactly 20 snapshots remain |
 
 The main-pair interface has no path-based delete or general overwrite method.
-The history interface deletes/promotes only observed handles. The copy interface
-cleans only per-member opaque ownership handles returned by exclusive pair
-creation.
+The history interface applies only complete observed-folder retention plans.
+The copy interface registers the opaque two-member ownership tuple before any
+cleanup mutation. Every adapter entry point must replay unfinished journals
+before exposing persistent state.
 
 ## Final verification
 
 ```text
 npm test -- tests/documents/HistoryRepository.test.ts tests/documents/DocumentSession.test.ts
 Test Files  2 passed (2)
-Tests       85 passed (85)
+Tests       108 passed (108)
 exit 0
 
 npm run test:typecheck
@@ -241,7 +306,7 @@ exit 0
 
 npm test
 Test Files  33 passed (33)
-Tests       778 passed (778)
+Tests       801 passed (801)
 exit 0
 
 npm run build
@@ -273,6 +338,7 @@ included in the final implementation handoff, after the commit exists.
 No known Task 3.1 logic defect remains. The future Obsidian composition task must
 implement the proven transaction protocol with durable recovery state, stable
 identity/version observations, exclusive pair creation/promotion, per-member
-identity-conditional cleanup, and adapter-conformance coverage. This task
+identity-conditional cleanup from a whole-operation journal, and the same
+restart/failure-stage adapter-conformance coverage. This task
 deliberately does not add that Obsidian runtime adapter or modify the composition
 root.
