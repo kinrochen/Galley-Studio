@@ -2,7 +2,7 @@
 
 ## Status
 
-DONE — R1 and R2 remediation included
+DONE — R1, R2, and R3 remediation included
 
 - Required base: `2ae5c19cc9571d8985618b7c920713ce1388f89f`
 - Base HEAD and clean worktree verified before the formal RED
@@ -33,7 +33,9 @@ The adapter now provides:
   or length as authority to delete a newly-created replacement;
 - retryable history-only committed receipts through explicit acknowledgement;
 - fresh-runtime compaction of exact orphan combined receipts without losing or
-  duplicating pair/history state.
+  duplicating pair/history state;
+- WAL-independent closing proof with target revalidation throughout combined
+  receipt compaction.
 
 ## TDD evidence
 
@@ -91,23 +93,40 @@ after all 128 lock retries. The other three tests proved that no orphan
 compaction, and therefore no crashable `WAL -> locks -> indexes` cleanup, was
 being attempted.
 
+### R3 formal RED
+
+The R3 in-cleanup race matrix was added before production changes and run
+against R2 HEAD `cd296bace5f7b87bdcc3bc9ac8f4ecf1ebfa0d6a`:
+
+```text
+npm test -- tests/documents/ObsidianWorkbenchVault.test.ts tests/documents/ObsidianTransactionRecovery.test.ts
+
+Test Files  1 failed | 1 passed (2)
+Tests       6 failed | 63 passed (69)
+exit 1
+```
+
+All six planned-target races (first/middle/last combined WAL deletion, each for
+pair HTML and promoted history final) incorrectly resolved and erased all
+proof/locks/indexes instead of retaining a scoped recovery conflict.
+
 ### Final GREEN
 
 ```text
 npm test -- tests/documents/ObsidianWorkbenchVault.test.ts tests/documents/ObsidianTransactionRecovery.test.ts
 Test Files  2 passed (2)
-Tests       63 passed (63)
+Tests       74 passed (74)
 
 npm test -- tests/documents/ObsidianVaultFileStore.test.ts tests/documents/ObsidianTransactionStore.test.ts tests/documents/ObsidianWorkbenchVault.test.ts tests/documents/ObsidianTransactionRecovery.test.ts
 Test Files  4 passed (4)
-Tests       158 passed (158)
+Tests       169 passed (169)
 
 npm run test:typecheck
 exit 0
 
 npm test
 Test Files  42 passed (42)
-Tests       1010 passed (1010)
+Tests       1021 passed (1021)
 
 npm run build
 exit 0
@@ -195,13 +214,29 @@ It also adds closed routing/admission records:
   locks/<sha256(canonical-scope-key)>.lock       # exact text = transaction UUID
   scopes/pair-<scope-hash>/<transaction>.json
   scopes/history-<document-hash>/<transaction>.json
+  closing/<transaction>.json
+  closing/<transaction>.quarantine.json
+  closing-final/pair-<scope-hash>/<transaction>.json
+  closing-final/history-<document-hash>/<transaction>.json
 ```
 
 Each scope index contains only schema version, exact transaction UUID, exact
 canonical scope, and checksum. It is created exclusively after the WAL is
 durable. Normal finalization orders cleanup as `WAL -> exact lock -> exact
-scope index`, leaving the index as the crash-recovery marker until both earlier
-steps finish. No directory path deletion is used.
+scope index` for non-combined records, leaving the index as the crash-recovery
+marker until both earlier steps finish. Completed combined receipts use the
+closing-proof protocol below. No directory path deletion is used.
+
+Before a completed combined receipt can lose any WAL member, the adapter
+creates one strict canonical/checksummed closing proof outside the WAL. It
+binds transaction ID, exact scope, the complete verified receipt envelope,
+pair-after text/hash/length, and the complete signed history plan (provisional,
+final, observed, removals, hashes, lengths, and plan checksum). A separate
+checksummed closing quarantine records target evidence if closing validation
+fails after WAL deletion. Scope-hashed signed final markers are created only
+after the last target validation; they distinguish a legally removed closing
+proof from a missing/tampered proof and remain discoverable after ordinary
+scope indexes are removed.
 
 ## Transaction and recovery state machine
 
@@ -251,6 +286,15 @@ only after that full forward state is already proved. Missing/tampered proof or
 external drift remains locked and becomes a scoped recovery conflict/target
 quarantine; it is never compacted.
 
+That proof is re-read and the full planned target vector is revalidated
+immediately after WAL cleanup and again after lock release. Drift at either
+boundary writes the independent closing quarantine and preserves the closing
+proof, scope indexes, and any still-held locks. Only a successful final
+validation may create final markers and remove the closing proof/indexes. Once
+the signed final marker exists, later external edits are post-completion and
+replay performs only idempotent proof/index/marker cleanup. Later valid history
+finals outside the old plan are ignored by closing validation and preserved.
+
 ## Concurrency and cleanup
 
 Each adapter serializes by canonical pair and history keys, but in-memory
@@ -275,12 +319,19 @@ receipt and final state and returns the idempotent `created` result; a changed
 retry plan returns `lost`.
 
 When the continuation registry is absent after a true restart, exact orphan
-combined proof is compacted in the crash-replayable order `WAL -> pair/history
-locks -> pair/history scope indexes`. The consumed pending-preparation WAL is
+combined proof is compacted in the crash-replayable order `closing proof ->
+WAL -> target revalidation -> pair/history locks -> target revalidation ->
+final marker -> scope indexes -> final marker cleanup`. The consumed
+pending-preparation WAL is
 removed only when its signed path/hash/length exactly match the combined plan
 whose forward state and receipt were just verified. Empty transaction
-tombstones use their signed scope index to finish all matching locks/indexes;
-non-empty partial proof stays fail-closed.
+tombstones use their signed scope index plus closing proof/final marker to
+finish all matching locks/indexes. A missing/tampered proof without a final
+marker, closing quarantine, or non-empty partial proof stays fail-closed.
+
+Live combined acknowledgement uses the same closing-proof protocol as fresh
+orphan recovery. History-only acknowledgement retains its existing exact WAL
+cleanup path because it does not own a combined pair/history receipt.
 
 ## Crash points and tested outcomes
 
@@ -297,7 +348,8 @@ Deterministic crash hooks cover:
 - after completed marker;
 - after recovery WAL cleanup;
 - after recovery lock cleanup;
-- after recovery index cleanup.
+- after recovery index cleanup;
+- after recovery proof cleanup.
 
 Permanent tests cover pair replacement and creation at every applicable point,
 one-sided creation, partial owned cleanup, history-only retention, combined
@@ -327,6 +379,14 @@ pair, no duplicate/lost finals, and complete WAL/lock/index compaction. Each of
 the three cleanup boundaries crashes and converges on another fresh adapter.
 Fresh receipt tamper and external pair drift are negative controls that retain
 proof/locks and return a scoped recovery conflict instead of cleaning.
+
+The R3 matrix injects pair and planned-history drift after the first, middle,
+and final combined WAL member deletion. Each case preserves external bytes,
+closing proof/quarantine, scope blockers, and unrelated-scope availability on
+repeated fresh recovery. Additional controls cover closing-proof tamper and
+absence after WAL cleanup, all four cleanup crash boundaries, a later valid
+out-of-plan history final, and the same race through live combined
+acknowledgement.
 
 ## Reconciliation and quarantine outcomes
 

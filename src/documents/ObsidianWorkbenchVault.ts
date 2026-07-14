@@ -29,7 +29,8 @@ import {
   type TransactionBlobRole,
   type TransactionRecord,
   type TransactionReceiptPlan,
-  type TransactionScope
+  type TransactionScope,
+  type VerifiedTransactionReceipt
 } from "./ObsidianTransactionStore";
 import {
   ObsidianVaultFileStore,
@@ -67,7 +68,8 @@ export type ObsidianWorkbenchCrashPoint =
   | "after-completed"
   | "after-recovery-wal-cleanup"
   | "after-recovery-lock-cleanup"
-  | "after-recovery-index-cleanup";
+  | "after-recovery-index-cleanup"
+  | "after-recovery-proof-cleanup";
 
 export interface ObsidianWorkbenchCrashContext {
   readonly transactionId: string;
@@ -180,6 +182,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 const SHA256 = /^[a-f0-9]{64}$/u;
 const EMPTY_PAIR_SUFFIX = ".history-scope";
 const SCOPE_INDEX_ROOT = `${TRANSACTION_ROOT}/scopes`;
+const CLOSING_ROOT = `${TRANSACTION_ROOT}/closing`;
+const CLOSING_FINAL_ROOT = `${TRANSACTION_ROOT}/closing-final`;
 const ACTIVE_TRANSACTIONS = new Map<string, Promise<void>>();
 const ACTIVE_RELEASES = new Map<string, () => void>();
 const DELETION_OWNERSHIP = new WeakMap<
@@ -195,6 +199,44 @@ interface ScopeIndexData {
   readonly schemaVersion: 1;
   readonly transactionId: string;
   readonly scope: TransactionScope;
+  readonly checksum: string;
+}
+
+interface ClosingProofData {
+  readonly schemaVersion: 1;
+  readonly transactionId: string;
+  readonly scope: TransactionScope;
+  readonly receipt: VerifiedTransactionReceipt;
+  readonly pairAfter: {
+    readonly html: string;
+    readonly sidecar: string;
+    readonly htmlHash: string;
+    readonly sidecarHash: string;
+    readonly htmlByteLength: number;
+    readonly sidecarByteLength: number;
+  };
+  readonly historyPlan: string;
+  readonly checksum: string;
+}
+
+interface ClosingQuarantineData {
+  readonly schemaVersion: 1;
+  readonly transactionId: string;
+  readonly proofChecksum: string;
+  readonly evidence: readonly {
+    readonly path: string;
+    readonly state: "absent" | "present" | "unreadable";
+    readonly sha256?: string;
+    readonly byteLength?: number;
+  }[];
+  readonly checksum: string;
+}
+
+interface ClosingFinalData {
+  readonly schemaVersion: 1;
+  readonly transactionId: string;
+  readonly scope: TransactionScope;
+  readonly proofChecksum: string;
   readonly checksum: string;
 }
 
@@ -804,6 +846,33 @@ export class ObsidianWorkbenchVault
               record = await this.#transactions.transition(record, "completed");
             }
             const metadata = await parseMetadata(blobText(record, "metadata"));
+            if (record.kind === "pair-history" && record.phase === "completed") {
+              const history = await parseHistoryPlan(blobText(record, "history-plan"));
+              const pair = pairPlanFromRecord(record);
+              const drift = await this.#orphanCombinedForwardDrift(pair, history);
+              if (drift) {
+                await this.#transactions.quarantineTargetDrift(record, drift);
+                throw new ObsidianWorkbenchRecoveryConflictError(record.id);
+              }
+              const receiptPlan = await this.#receiptPlan(
+                record.scope.pair,
+                { html: pair.afterHtml, sidecarJson: pair.afterSidecar },
+                history
+              );
+              const receipt = await this.#transactions.verifyReceipt(
+                record,
+                receiptPlan
+              );
+              const proof = await this.#createClosingProof(
+                record,
+                pair,
+                history,
+                receipt
+              );
+              await this.#compactConsumedPending(history);
+              await this.#compactOrphanCombined(record, proof);
+              continue;
+            }
             let cleanup:
               | { status: "cleaned"; directory: "retained" }
               | { status: "conflict" }
@@ -1109,6 +1178,121 @@ export class ObsidianWorkbenchVault
     }
   }
 
+  async #recoverClosingFinalFolder(
+    folder: string,
+    expected: (scope: TransactionScope) => boolean,
+    signal?: AbortSignal
+  ): Promise<void> {
+    for (const entry of await this.#files.list(folder, signal)) {
+      if (entry.kind !== "file" || !entry.name.endsWith(".json")) {
+        throw new ObsidianWorkbenchRecoveryConflictError("closing-final-invalid");
+      }
+      const transactionId = entry.name.slice(0, -".json".length);
+      const current = await this.#files.readTextStable(entry.path, signal);
+      if (!current) continue;
+      let finalized: ClosingFinalData;
+      try {
+        finalized = await parseClosingFinal(current.text, transactionId);
+      } catch {
+        throw new ObsidianWorkbenchRecoveryConflictError(transactionId);
+      }
+      if (!expected(finalized.scope)) {
+        throw new ObsidianWorkbenchRecoveryConflictError(transactionId);
+      }
+      await this.#finishClosingFinal(finalized, signal);
+    }
+  }
+
+  async #readClosingFinal(
+    scope: TransactionScope,
+    transactionId: string,
+    signal?: AbortSignal
+  ): Promise<ClosingFinalData | null> {
+    let found: ClosingFinalData | null = null;
+    for (const folder of await closingFinalFolders(scope)) {
+      const current = await this.#files.readTextStable(
+        `${folder}/${transactionId}.json`,
+        signal
+      );
+      if (!current) continue;
+      let parsed: ClosingFinalData;
+      try {
+        parsed = await parseClosingFinal(current.text, transactionId, scope);
+      } catch {
+        throw new ObsidianWorkbenchRecoveryConflictError(transactionId);
+      }
+      if (found && found.checksum !== parsed.checksum) {
+        throw new ObsidianWorkbenchRecoveryConflictError(transactionId);
+      }
+      found = parsed;
+    }
+    return found;
+  }
+
+  async #finishClosingFinal(
+    finalized: ClosingFinalData,
+    signal?: AbortSignal
+  ): Promise<void> {
+    if (
+      await this.#files.readTextStable(
+        closingQuarantinePath(finalized.transactionId),
+        signal
+      )
+    ) {
+      throw new ObsidianWorkbenchRecoveryConflictError(finalized.transactionId);
+    }
+    const proof = await this.#readClosingProof(
+      finalized.transactionId,
+      finalized.scope,
+      signal
+    );
+    if (proof && proof.checksum !== finalized.proofChecksum) {
+      throw new ObsidianWorkbenchRecoveryConflictError(finalized.transactionId);
+    }
+    if (proof) await this.#removeClosingProof(proof, signal);
+    await this.#releaseScopeLocks(
+      finalized.scope,
+      finalized.transactionId,
+      signal
+    );
+    await this.#removeScopeIndexesFor(
+      finalized.scope,
+      finalized.transactionId,
+      signal
+    );
+    await this.#removeClosingFinalMarkers(finalized, signal);
+    this.#forgetDeletionOwnership(finalized.transactionId);
+    this.#forgetRetentionContinuation(finalized.transactionId);
+  }
+
+  async #recoverClosingTombstone(
+    index: ScopeIndexData,
+    signal?: AbortSignal
+  ): Promise<boolean> {
+    const finalized = await this.#readClosingFinal(
+      index.scope,
+      index.transactionId,
+      signal
+    );
+    if (finalized) {
+      await this.#finishClosingFinal(finalized, signal);
+      return true;
+    }
+    const proof = await this.#readClosingProof(
+      index.transactionId,
+      index.scope,
+      signal
+    );
+    if (proof) {
+      await this.#finishClosingProof(proof, signal);
+      return true;
+    }
+    if (isCombinedScope(index.scope)) {
+      throw new ObsidianWorkbenchRecoveryConflictError(index.transactionId);
+    }
+    return false;
+  }
+
   async #indexedRecords(
     folder: string,
     expected: (scope: TransactionScope) => boolean,
@@ -1140,6 +1324,7 @@ export class ObsidianWorkbenchVault
         throw new ObsidianWorkbenchRecoveryConflictError(id);
       }
       if (await this.#transactionFolderEmpty(id, signal)) {
+        if (await this.#recoverClosingTombstone(index, signal)) continue;
         await this.#releaseScopeLocks(index.scope, id, signal);
         await this.#removeScopeIndexesFor(index.scope, id, signal);
         continue;
@@ -1148,6 +1333,7 @@ export class ObsidianWorkbenchVault
         records.push(await this.#transactions.open(id, signal));
       } catch {
         if (await this.#transactionFolderEmpty(id, signal)) {
+          if (await this.#recoverClosingTombstone(index, signal)) continue;
           const remaining = await this.#files.readTextStable(entry.path, signal);
           if (remaining && sameExact(remaining, owned)) {
             await this.#releaseScopeLocks(index.scope, id, signal);
@@ -1167,6 +1353,12 @@ export class ObsidianWorkbenchVault
     paths: ArtifactPaths,
     signal?: AbortSignal
   ): Promise<void> {
+    await this.#recoverClosingFinalFolder(
+      await closingFinalPairFolder(paths),
+      (scope) =>
+        scope.pair.html === paths.html && scope.pair.sidecar === paths.sidecar,
+      signal
+    );
     for (const record of await this.#recordsForPair(paths, signal)) {
       await this.#recoverRecord(record, signal);
     }
@@ -1177,6 +1369,11 @@ export class ObsidianWorkbenchVault
     signal?: AbortSignal
   ): Promise<void> {
     const { documentId } = historyFolder(folder);
+    await this.#recoverClosingFinalFolder(
+      await closingFinalHistoryFolder(documentId),
+      (scope) => scope.historyDocumentId === documentId,
+      signal
+    );
     const indexFolder = await historyIndexFolder(documentId);
     const indexed = await this.#indexedRecords(
       indexFolder,
@@ -1245,6 +1442,19 @@ export class ObsidianWorkbenchVault
       const cleaning = ACTIVE_TRANSACTIONS.get(record.id);
       if (cleaning) await cleaning;
       if (await this.#transactionFolderEmpty(record.id, signal)) {
+        if (
+          await this.#recoverClosingTombstone(
+            {
+              schemaVersion: 1,
+              transactionId: record.id,
+              scope: record.scope,
+              checksum: ""
+            },
+            signal
+          )
+        ) {
+          return;
+        }
         await this.#releaseScopeLocks(record.scope, record.id, signal);
         await this.#removeScopeIndexes(record, signal);
         return;
@@ -1322,12 +1532,17 @@ export class ObsidianWorkbenchVault
         { html: pairPlan.afterHtml, sidecarJson: pairPlan.afterSidecar },
         history
       );
+      let verifiedReceipt: VerifiedTransactionReceipt;
       try {
         if (record.phase === "committed") {
           await this.#transactions.writeReceipt(record, receiptPlan, signal);
           record = await this.#transactions.transition(record, "completed", signal);
         }
-        await this.#transactions.verifyReceipt(record, receiptPlan, signal);
+        verifiedReceipt = await this.#transactions.verifyReceipt(
+          record,
+          receiptPlan,
+          signal
+        );
       } catch (error) {
         if (
           error instanceof TransactionReceiptInvalidError ||
@@ -1339,8 +1554,15 @@ export class ObsidianWorkbenchVault
         }
         throw error;
       }
+      const proof = await this.#createClosingProof(
+        record,
+        pairPlan,
+        history,
+        verifiedReceipt,
+        signal
+      );
       await this.#compactConsumedPending(history, signal);
-      await this.#compactOrphanCombined(record, signal);
+      await this.#compactOrphanCombined(record, proof, signal);
       return;
     }
 
@@ -1569,19 +1791,44 @@ export class ObsidianWorkbenchVault
 
   async #compactOrphanCombined(
     record: TransactionRecord,
+    proof: ClosingProofData,
     signal?: AbortSignal
   ): Promise<void> {
     const cleanup = await this.#transactions.cleanup(record, signal);
     if (cleanup.status !== "cleaned") {
       throw new ObsidianWorkbenchRecoveryConflictError(record.id);
     }
-    await this.#crashPoint("after-recovery-wal-cleanup", record);
-    await this.#releaseLocks(record, ["pair", "history"], signal);
-    await this.#crashPoint("after-recovery-lock-cleanup", record);
-    await this.#removeScopeIndexes(record, signal);
-    await this.#crashPoint("after-recovery-index-cleanup", record);
-    this.#forgetDeletionOwnership(record.id);
-    this.#forgetRetentionContinuation(record.id);
+    await this.#crashPointFor("after-recovery-wal-cleanup", record.id);
+    await this.#finishClosingProof(proof, signal);
+  }
+
+  async #finishClosingProof(
+    proof: ClosingProofData,
+    signal?: AbortSignal
+  ): Promise<void> {
+    if (await this.#readClosingQuarantine(proof, signal)) {
+      throw new ObsidianWorkbenchRecoveryConflictError(proof.transactionId);
+    }
+    let drift = await this.#closingProofDrift(proof, signal);
+    if (drift) {
+      await this.#writeClosingQuarantine(proof, drift, signal);
+      throw new ObsidianWorkbenchRecoveryConflictError(proof.transactionId);
+    }
+    await this.#releaseScopeLocks(proof.scope, proof.transactionId, signal);
+    await this.#crashPointFor("after-recovery-lock-cleanup", proof.transactionId);
+    drift = await this.#closingProofDrift(proof, signal);
+    if (drift) {
+      await this.#writeClosingQuarantine(proof, drift, signal);
+      throw new ObsidianWorkbenchRecoveryConflictError(proof.transactionId);
+    }
+    const finalized = await this.#createClosingFinalMarkers(proof, signal);
+    await this.#removeClosingProof(proof, signal);
+    await this.#removeScopeIndexesFor(proof.scope, proof.transactionId, signal);
+    await this.#crashPointFor("after-recovery-index-cleanup", proof.transactionId);
+    await this.#removeClosingFinalMarkers(finalized, signal);
+    await this.#crashPointFor("after-recovery-proof-cleanup", proof.transactionId);
+    this.#forgetDeletionOwnership(proof.transactionId);
+    this.#forgetRetentionContinuation(proof.transactionId);
   }
 
   async #compactConsumedPending(
@@ -1622,6 +1869,224 @@ export class ObsidianWorkbenchVault
       }
       await this.#removeScopeIndexes(pending, signal);
       this.#forgetDeletionOwnership(pending.id);
+    }
+  }
+
+  async #createClosingProof(
+    record: TransactionRecord,
+    pair: ReturnType<typeof pairPlanFromRecord>,
+    history: HistoryPlanData,
+    receipt: VerifiedTransactionReceipt,
+    signal?: AbortSignal
+  ): Promise<ClosingProofData> {
+    const pairAfter = {
+      html: pair.afterHtml,
+      sidecar: pair.afterSidecar,
+      htmlHash: await sha256Text(pair.afterHtml),
+      sidecarHash: await sha256Text(pair.afterSidecar),
+      htmlByteLength: byteLength(pair.afterHtml),
+      sidecarByteLength: byteLength(pair.afterSidecar)
+    };
+    const unsigned = {
+      schemaVersion: 1 as const,
+      transactionId: record.id,
+      scope: record.scope,
+      receipt,
+      pairAfter,
+      historyPlan: serializeCanonical(history)
+    };
+    const expected = {
+      ...unsigned,
+      checksum: await sha256Text(canonicalJson(unsigned))
+    };
+    await this.#files.ensureFolder(CLOSING_ROOT, signal);
+    const path = closingProofPath(record.id);
+    const result = await this.#files.createExclusive(
+      path,
+      serializeCanonical(expected),
+      signal
+    );
+    if (result.status === "ambiguous") {
+      throw new ObsidianWorkbenchAmbiguousError(record.id, result);
+    }
+    if (result.status === "collision") {
+      const existing = await this.#files.readTextStable(path, signal);
+      if (!existing) throw new ObsidianWorkbenchRecoveryConflictError(record.id);
+      const parsed = await parseClosingProof(existing.text, record.id, record.scope);
+      if (canonicalJson(parsed) !== canonicalJson(expected)) {
+        throw new ObsidianWorkbenchRecoveryConflictError(record.id);
+      }
+      return parsed;
+    }
+    return expected;
+  }
+
+  async #readClosingProof(
+    transactionId: string,
+    scope: TransactionScope,
+    signal?: AbortSignal
+  ): Promise<ClosingProofData | null> {
+    const current = await this.#files.readTextStable(
+      closingProofPath(transactionId),
+      signal
+    );
+    if (!current) return null;
+    try {
+      return await parseClosingProof(current.text, transactionId, scope);
+    } catch {
+      throw new ObsidianWorkbenchRecoveryConflictError(transactionId);
+    }
+  }
+
+  async #removeClosingProof(
+    proof: ClosingProofData,
+    signal?: AbortSignal
+  ): Promise<void> {
+    const current = await this.#files.readTextStable(
+      closingProofPath(proof.transactionId),
+      signal
+    );
+    if (!current) return;
+    const parsed = await parseClosingProof(
+      current.text,
+      proof.transactionId,
+      proof.scope
+    );
+    if (parsed.checksum !== proof.checksum) {
+      throw new ObsidianWorkbenchRecoveryConflictError(proof.transactionId);
+    }
+    await this.#removeExact(current, proof.transactionId, signal);
+  }
+
+  async #closingProofDrift(
+    proof: ClosingProofData,
+    signal?: AbortSignal
+  ): Promise<readonly {
+    path: string;
+    state: "absent" | "present" | "unreadable";
+    sha256?: string;
+    byteLength?: number;
+  }[] | null> {
+    const history = await parseHistoryPlan(proof.historyPlan);
+    return this.#orphanCombinedForwardDrift(
+      {
+        paths: proof.scope.pair,
+        beforeHtml: null,
+        beforeSidecar: null,
+        afterHtml: proof.pairAfter.html,
+        afterSidecar: proof.pairAfter.sidecar
+      },
+      history,
+      signal
+    );
+  }
+
+  async #writeClosingQuarantine(
+    proof: ClosingProofData,
+    evidence: ClosingQuarantineData["evidence"],
+    signal?: AbortSignal
+  ): Promise<ClosingQuarantineData> {
+    const unsigned = {
+      schemaVersion: 1 as const,
+      transactionId: proof.transactionId,
+      proofChecksum: proof.checksum,
+      evidence
+    };
+    const expected = {
+      ...unsigned,
+      checksum: await sha256Text(canonicalJson(unsigned))
+    };
+    const path = closingQuarantinePath(proof.transactionId);
+    const result = await this.#files.createExclusive(
+      path,
+      serializeCanonical(expected),
+      signal
+    );
+    if (result.status === "ambiguous") {
+      throw new ObsidianWorkbenchAmbiguousError(proof.transactionId, result);
+    }
+    if (result.status === "collision") {
+      const existing = await this.#files.readTextStable(path, signal);
+      if (!existing) throw new ObsidianWorkbenchRecoveryConflictError(proof.transactionId);
+      return parseClosingQuarantine(existing.text, proof);
+    }
+    return expected;
+  }
+
+  async #readClosingQuarantine(
+    proof: ClosingProofData,
+    signal?: AbortSignal
+  ): Promise<ClosingQuarantineData | null> {
+    const current = await this.#files.readTextStable(
+      closingQuarantinePath(proof.transactionId),
+      signal
+    );
+    if (!current) return null;
+    try {
+      return await parseClosingQuarantine(current.text, proof);
+    } catch {
+      throw new ObsidianWorkbenchRecoveryConflictError(proof.transactionId);
+    }
+  }
+
+  async #createClosingFinalMarkers(
+    proof: ClosingProofData,
+    signal?: AbortSignal
+  ): Promise<ClosingFinalData> {
+    const unsigned = {
+      schemaVersion: 1 as const,
+      transactionId: proof.transactionId,
+      scope: proof.scope,
+      proofChecksum: proof.checksum
+    };
+    const expected = {
+      ...unsigned,
+      checksum: await sha256Text(canonicalJson(unsigned))
+    };
+    for (const folder of await closingFinalFolders(proof.scope)) {
+      await this.#files.ensureFolder(folder, signal);
+      const path = `${folder}/${proof.transactionId}.json`;
+      const result = await this.#files.createExclusive(
+        path,
+        serializeCanonical(expected),
+        signal
+      );
+      if (result.status === "ambiguous") {
+        throw new ObsidianWorkbenchAmbiguousError(proof.transactionId, result);
+      }
+      if (result.status === "collision") {
+        const current = await this.#files.readTextStable(path, signal);
+        if (!current) throw new ObsidianWorkbenchRecoveryConflictError(proof.transactionId);
+        const parsed = await parseClosingFinal(
+          current.text,
+          proof.transactionId,
+          proof.scope
+        );
+        if (parsed.proofChecksum !== proof.checksum) {
+          throw new ObsidianWorkbenchRecoveryConflictError(proof.transactionId);
+        }
+      }
+    }
+    return expected;
+  }
+
+  async #removeClosingFinalMarkers(
+    finalized: ClosingFinalData,
+    signal?: AbortSignal
+  ): Promise<void> {
+    for (const folder of (await closingFinalFolders(finalized.scope)).reverse()) {
+      const path = `${folder}/${finalized.transactionId}.json`;
+      const current = await this.#files.readTextStable(path, signal);
+      if (!current) continue;
+      const parsed = await parseClosingFinal(
+        current.text,
+        finalized.transactionId,
+        finalized.scope
+      );
+      if (parsed.checksum !== finalized.checksum) {
+        throw new ObsidianWorkbenchRecoveryConflictError(finalized.transactionId);
+      }
+      await this.#removeExact(current, finalized.transactionId, signal);
     }
   }
 
@@ -2335,8 +2800,16 @@ export class ObsidianWorkbenchVault
     record: TransactionRecord,
     removalIndex?: number
   ): Promise<void> {
+    await this.#crashPointFor(point, record.id, removalIndex);
+  }
+
+  async #crashPointFor(
+    point: ObsidianWorkbenchCrashPoint,
+    transactionId: string,
+    removalIndex?: number
+  ): Promise<void> {
     await this.#options.onCrashPoint?.(point, {
-      transactionId: record.id,
+      transactionId,
       ...(removalIndex === undefined ? {} : { removalIndex })
     });
     if (this.#options.crashAt?.has(point)) {
@@ -2458,6 +2931,14 @@ function historyScope(documentId: string): TransactionScope {
   };
 }
 
+function isCombinedScope(scope: TransactionScope): boolean {
+  if (scope.historyDocumentId === undefined) return false;
+  return (
+    canonicalJson(scope.pair) !==
+    canonicalJson(historyScope(scope.historyDocumentId).pair)
+  );
+}
+
 function pairQueueKey(paths: ArtifactPaths): string {
   return `pair:${paths.html}\n${paths.sidecar}`;
 }
@@ -2521,6 +3002,32 @@ async function scopeIndexFolders(scope: TransactionScope): Promise<string[]> {
   return result.sort(compareText);
 }
 
+function closingProofPath(transactionId: string): string {
+  return `${CLOSING_ROOT}/${transactionId}.json`;
+}
+
+function closingQuarantinePath(transactionId: string): string {
+  return `${CLOSING_ROOT}/${transactionId}.quarantine.json`;
+}
+
+async function closingFinalFolders(scope: TransactionScope): Promise<string[]> {
+  const result = [await closingFinalPairFolder(scope.pair)];
+  if (scope.historyDocumentId !== undefined) {
+    result.push(await closingFinalHistoryFolder(scope.historyDocumentId));
+  }
+  return result.sort(compareText);
+}
+
+async function closingFinalPairFolder(paths: ArtifactPaths): Promise<string> {
+  return `${CLOSING_FINAL_ROOT}/pair-${await sha256Text(
+    canonicalJson({ html: paths.html, sidecar: paths.sidecar })
+  )}`;
+}
+
+async function closingFinalHistoryFolder(documentId: string): Promise<string> {
+  return `${CLOSING_FINAL_ROOT}/history-${await sha256Text(documentId)}`;
+}
+
 async function signedScopeIndex(
   transactionId: string,
   scope: TransactionScope
@@ -2576,6 +3083,277 @@ async function parseScopeIndex(
     throw new TransactionRecordInvalidError();
   }
   return result;
+}
+
+async function parseClosingProof(
+  text: string,
+  expectedId: string,
+  expectedScope: TransactionScope
+): Promise<ClosingProofData> {
+  try {
+    const value = parseObject(text);
+    exactKeys(value, [
+      "schemaVersion",
+      "transactionId",
+      "scope",
+      "receipt",
+      "pairAfter",
+      "historyPlan",
+      "checksum"
+    ]);
+    if (value.schemaVersion !== 1 || value.transactionId !== expectedId) {
+      throw new TransactionRecordInvalidError();
+    }
+    const scope = parseClosingScope(value.scope);
+    if (canonicalJson(scope) !== canonicalJson(expectedScope)) {
+      throw new TransactionRecordInvalidError();
+    }
+    const pairValue = objectValue(value.pairAfter);
+    exactKeys(pairValue, [
+      "html",
+      "sidecar",
+      "htmlHash",
+      "sidecarHash",
+      "htmlByteLength",
+      "sidecarByteLength"
+    ]);
+    const pairAfter = {
+      html: stringValue(pairValue.html),
+      sidecar: stringValue(pairValue.sidecar),
+      htmlHash: stringValue(pairValue.htmlHash),
+      sidecarHash: stringValue(pairValue.sidecarHash),
+      htmlByteLength: numberValue(pairValue.htmlByteLength),
+      sidecarByteLength: numberValue(pairValue.sidecarByteLength)
+    };
+    if (
+      !SHA256.test(pairAfter.htmlHash) ||
+      !SHA256.test(pairAfter.sidecarHash) ||
+      pairAfter.htmlHash !== (await sha256Text(pairAfter.html)) ||
+      pairAfter.sidecarHash !== (await sha256Text(pairAfter.sidecar)) ||
+      pairAfter.htmlByteLength !== byteLength(pairAfter.html) ||
+      pairAfter.sidecarByteLength !== byteLength(pairAfter.sidecar)
+    ) {
+      throw new TransactionRecordInvalidError();
+    }
+    const historyPlan = stringValue(value.historyPlan);
+    const history = await parseHistoryPlan(historyPlan);
+    if (scope.historyDocumentId !== history.documentId) {
+      throw new TransactionRecordInvalidError();
+    }
+    const receipt = await parseClosingReceipt(value.receipt, expectedId);
+    const expectedReceipt = {
+      pair: {
+        htmlPath: scope.pair.html,
+        sidecarPath: scope.pair.sidecar,
+        htmlHash: pairAfter.htmlHash,
+        sidecarHash: pairAfter.sidecarHash
+      },
+      historyHashes: await historyReceiptHashes(history)
+    };
+    if (
+      canonicalJson({ pair: receipt.pair, historyHashes: receipt.historyHashes }) !==
+      canonicalJson(expectedReceipt)
+    ) {
+      throw new TransactionRecordInvalidError();
+    }
+    const checksum = stringValue(value.checksum);
+    const unsigned = {
+      schemaVersion: 1 as const,
+      transactionId: expectedId,
+      scope,
+      receipt,
+      pairAfter,
+      historyPlan
+    };
+    const result = { ...unsigned, checksum };
+    if (
+      !SHA256.test(checksum) ||
+      checksum !== (await sha256Text(canonicalJson(unsigned))) ||
+      text !== serializeCanonical(result)
+    ) {
+      throw new TransactionRecordInvalidError();
+    }
+    return result;
+  } catch (error) {
+    if (error instanceof TransactionRecordInvalidError) throw error;
+    throw new TransactionRecordInvalidError();
+  }
+}
+
+async function parseClosingReceipt(
+  input: unknown,
+  expectedId: string
+): Promise<VerifiedTransactionReceipt> {
+  const value = objectValue(input);
+  exactKeys(value, [
+    "schemaVersion",
+    "transactionId",
+    "manifestChecksum",
+    "aggregateDigest",
+    "pair",
+    "historyHashes",
+    "checksum"
+  ]);
+  if (value.schemaVersion !== 1 || value.transactionId !== expectedId) {
+    throw new TransactionRecordInvalidError();
+  }
+  const pairValue = objectValue(value.pair);
+  exactKeys(pairValue, ["htmlPath", "sidecarPath", "htmlHash", "sidecarHash"]);
+  const pair = {
+    htmlPath: canonicalVaultPath(stringValue(pairValue.htmlPath)),
+    sidecarPath: canonicalVaultPath(stringValue(pairValue.sidecarPath)),
+    htmlHash: stringValue(pairValue.htmlHash),
+    sidecarHash: stringValue(pairValue.sidecarHash)
+  };
+  if (!SHA256.test(pair.htmlHash) || !SHA256.test(pair.sidecarHash)) {
+    throw new TransactionRecordInvalidError();
+  }
+  if (!Array.isArray(value.historyHashes) || value.historyHashes.length > 4096) {
+    throw new TransactionRecordInvalidError();
+  }
+  const historyHashes = value.historyHashes.map(stringValue);
+  if (historyHashes.some((hash) => !SHA256.test(hash))) {
+    throw new TransactionRecordInvalidError();
+  }
+  const manifestChecksum = stringValue(value.manifestChecksum);
+  const aggregateDigest = stringValue(value.aggregateDigest);
+  const checksum = stringValue(value.checksum);
+  const unsigned = {
+    schemaVersion: 1 as const,
+    transactionId: expectedId,
+    manifestChecksum,
+    aggregateDigest,
+    pair,
+    historyHashes
+  };
+  if (
+    !SHA256.test(manifestChecksum) ||
+    !SHA256.test(aggregateDigest) ||
+    !SHA256.test(checksum) ||
+    checksum !== (await sha256Text(canonicalJson(unsigned)))
+  ) {
+    throw new TransactionRecordInvalidError();
+  }
+  return { ...unsigned, checksum };
+}
+
+async function parseClosingQuarantine(
+  text: string,
+  proof: ClosingProofData
+): Promise<ClosingQuarantineData> {
+  const value = parseObject(text);
+  exactKeys(value, [
+    "schemaVersion",
+    "transactionId",
+    "proofChecksum",
+    "evidence",
+    "checksum"
+  ]);
+  if (
+    value.schemaVersion !== 1 ||
+    value.transactionId !== proof.transactionId ||
+    value.proofChecksum !== proof.checksum ||
+    !Array.isArray(value.evidence)
+  ) {
+    throw new TransactionRecordInvalidError();
+  }
+  const evidence = value.evidence.map(
+    (item): ClosingQuarantineData["evidence"][number] => {
+    const entry = objectValue(item);
+    const state = entry.state;
+    exactKeys(entry, [
+      "path",
+      "state",
+      ...(state === "present" ? ["sha256", "byteLength"] : [])
+    ]);
+    if (state !== "absent" && state !== "present" && state !== "unreadable") {
+      throw new TransactionRecordInvalidError();
+    }
+    const path = canonicalVaultPath(stringValue(entry.path));
+    if (state !== "present") return { path, state };
+    const sha256 = stringValue(entry.sha256);
+    const length = numberValue(entry.byteLength);
+    if (!SHA256.test(sha256) || !Number.isSafeInteger(length) || length < 0) {
+      throw new TransactionRecordInvalidError();
+    }
+      return { path, state, sha256, byteLength: length };
+    }
+  );
+  const checksum = stringValue(value.checksum);
+  const unsigned = {
+    schemaVersion: 1 as const,
+    transactionId: proof.transactionId,
+    proofChecksum: proof.checksum,
+    evidence
+  };
+  const result = { ...unsigned, checksum };
+  if (
+    !SHA256.test(checksum) ||
+    checksum !== (await sha256Text(canonicalJson(unsigned))) ||
+    text !== serializeCanonical(result)
+  ) {
+    throw new TransactionRecordInvalidError();
+  }
+  return result;
+}
+
+async function parseClosingFinal(
+  text: string,
+  expectedId: string,
+  expectedScope?: TransactionScope
+): Promise<ClosingFinalData> {
+  const value = parseObject(text);
+  exactKeys(value, [
+    "schemaVersion",
+    "transactionId",
+    "scope",
+    "proofChecksum",
+    "checksum"
+  ]);
+  if (value.schemaVersion !== 1 || value.transactionId !== expectedId) {
+    throw new TransactionRecordInvalidError();
+  }
+  const scope = parseClosingScope(value.scope);
+  if (expectedScope && canonicalJson(scope) !== canonicalJson(expectedScope)) {
+    throw new TransactionRecordInvalidError();
+  }
+  const proofChecksum = stringValue(value.proofChecksum);
+  const checksum = stringValue(value.checksum);
+  const unsigned = {
+    schemaVersion: 1 as const,
+    transactionId: expectedId,
+    scope,
+    proofChecksum
+  };
+  const result = { ...unsigned, checksum };
+  if (
+    !SHA256.test(proofChecksum) ||
+    !SHA256.test(checksum) ||
+    checksum !== (await sha256Text(canonicalJson(unsigned))) ||
+    text !== serializeCanonical(result)
+  ) {
+    throw new TransactionRecordInvalidError();
+  }
+  return result;
+}
+
+function parseClosingScope(input: unknown): TransactionScope {
+  const value = objectValue(input);
+  exactKeys(value, [
+    "pair",
+    ...(value.historyDocumentId === undefined ? [] : ["historyDocumentId"])
+  ]);
+  const pairValue = objectValue(value.pair);
+  exactKeys(pairValue, ["html", "sidecar"]);
+  return {
+    pair: validPairPaths({
+      html: stringValue(pairValue.html),
+      sidecar: stringValue(pairValue.sidecar)
+    }),
+    ...(value.historyDocumentId === undefined
+      ? {}
+      : { historyDocumentId: canonicalDocumentId(stringValue(value.historyDocumentId)) })
+  };
 }
 
 function mergeRecords(

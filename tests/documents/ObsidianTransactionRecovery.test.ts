@@ -9,12 +9,17 @@ import {
 } from "../../src/documents/ObsidianWorkbenchVault";
 import {
   PersistentObsidianBacking,
-  persistentObsidianVault
+  persistentObsidianVault,
+  type PersistentObsidianHooks
 } from "../support/obsidianVaultFixtures";
 
 const PATHS = {
   html: "notes/article.galley.html",
   sidecar: "notes/article.galley.json"
+} as const;
+const UNRELATED_PATHS = {
+  html: "notes/unrelated.galley.html",
+  sidecar: "notes/unrelated.galley.json"
 } as const;
 
 describe("Obsidian workbench transaction recovery", () => {
@@ -236,6 +241,47 @@ describe("Obsidian workbench transaction recovery", () => {
     ).toEqual([]);
   });
 
+  it("keeps closing proof when a live combined acknowledgement drifts during WAL cleanup", async () => {
+    let transactionFolder = "";
+    let deleted = 0;
+    const fixture = await completedCombinedFixture(1, {
+      afterDelete(path, backing) {
+        if (!transactionFolder || !path.startsWith(`${transactionFolder}/`)) return;
+        deleted += 1;
+        if (deleted === 1) backing.replace(PATHS.html, "external-live-ack");
+      }
+    });
+    await fixture.vault.replacePairWithHistoryTransactional(
+      PATHS,
+      fixture.observed.observation,
+      fixture.nextPair,
+      fixture.plan
+    );
+    const receiptPath = fixture.backing.paths().find((path) => path.endsWith("/receipt.json"));
+    if (!receiptPath) throw new Error("missing combined receipt");
+    transactionFolder = receiptPath.slice(0, receiptPath.lastIndexOf("/"));
+
+    await expect(fixture.history.commit(fixture.prepared)).resolves.toMatchObject({
+      html: fixture.oldPair.html
+    });
+    expect(fixture.backing.read(PATHS.html)).toBe("external-live-ack");
+    expect(
+      fixture.backing.paths().some((path) => path.endsWith(".quarantine.json"))
+    ).toBe(true);
+    expect(fixture.backing.paths().some((path) => path.endsWith(".lock"))).toBe(true);
+    await expect(
+      new HistoryRepository(
+        new ObsidianWorkbenchVault(persistentObsidianVault(fixture.backing)),
+        20
+      ).list(DOCUMENT_ID)
+    ).rejects.toMatchObject({ code: "transaction_recovery_conflict" });
+    await expect(
+      new ObsidianWorkbenchVault(persistentObsidianVault(fixture.backing)).readPair(
+        UNRELATED_PATHS
+      )
+    ).resolves.toMatchObject(fixture.unrelatedPair);
+  });
+
   it("compacts an orphan completed combined receipt before fresh history work", async () => {
     const fixture = await completedCombinedFixture(20);
     await expect(
@@ -277,7 +323,8 @@ describe("Obsidian workbench transaction recovery", () => {
   for (const point of [
     "after-recovery-wal-cleanup",
     "after-recovery-lock-cleanup",
-    "after-recovery-index-cleanup"
+    "after-recovery-index-cleanup",
+    "after-recovery-proof-cleanup"
   ] as const) {
     it(`replays orphan combined compaction after ${point}`, async () => {
       const fixture = await completedCombinedFixture(1);
@@ -315,6 +362,46 @@ describe("Obsidian workbench transaction recovery", () => {
       );
       expect(fixture.backing.read(fixture.plan.finalPath)).toBe(fixture.oldPair.html);
       expect(transactionProofFiles(fixture.backing)).toEqual([]);
+    });
+  }
+
+  for (const mutation of ["tampered", "missing"] as const) {
+    it(`does not compact a ${mutation} closing proof after WAL cleanup`, async () => {
+      const fixture = await completedCombinedFixture(1);
+      await fixture.vault.replacePairWithHistoryTransactional(
+        PATHS,
+        fixture.observed.observation,
+        fixture.nextPair,
+        fixture.plan
+      );
+      const crashing = new ObsidianWorkbenchVault(
+        persistentObsidianVault(fixture.backing),
+        { crashAt: new Set(["after-recovery-wal-cleanup"]) }
+      );
+      await expect(new HistoryRepository(crashing, 20).list(DOCUMENT_ID)).rejects.toMatchObject({
+        code: "workbench_simulated_crash"
+      });
+      const proofPath = fixture.backing
+        .paths()
+        .find(
+          (path) =>
+            path.startsWith(".galley/transactions/closing/") &&
+            !path.endsWith(".quarantine.json")
+        );
+      if (!proofPath) throw new Error("missing closing proof");
+      if (mutation === "tampered") fixture.backing.replace(proofPath, "{}\n");
+      else fixture.backing.remove(proofPath);
+
+      await expect(
+        new HistoryRepository(
+          new ObsidianWorkbenchVault(persistentObsidianVault(fixture.backing)),
+          20
+        ).list(DOCUMENT_ID)
+      ).rejects.toMatchObject({ code: "transaction_recovery_conflict" });
+      expect(fixture.backing.paths().some((path) => path.endsWith(".lock"))).toBe(true);
+      expect(
+        fixture.backing.paths().some((path) => path.includes("/scopes/"))
+      ).toBe(true);
     });
   }
 
@@ -367,6 +454,96 @@ describe("Obsidian workbench transaction recovery", () => {
     ).toBe(true);
     expect(fixture.backing.paths().some((path) => path.endsWith(".lock"))).toBe(true);
   });
+
+  it("preserves a later history final outside the closing plan", async () => {
+    const fixture = await completedCombinedFixture(1);
+    await fixture.vault.replacePairWithHistoryTransactional(
+      PATHS,
+      fixture.observed.observation,
+      fixture.nextPair,
+      fixture.plan
+    );
+    const laterPath = `.galley/history/${DOCUMENT_ID}/0001784016601000-923e4567-e89b-42d3-a456-426614174000-00000001.html`;
+    fixture.backing.replace(laterPath, "later-independent");
+
+    const restarted = new HistoryRepository(
+      new ObsidianWorkbenchVault(persistentObsidianVault(fixture.backing)),
+      20
+    );
+    await expect(restarted.list(DOCUMENT_ID)).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ path: laterPath, html: "later-independent" }),
+        expect.objectContaining({ path: fixture.plan.finalPath, html: fixture.oldPair.html })
+      ])
+    );
+    expect(fixture.backing.read(laterPath)).toBe("later-independent");
+    expect(transactionProofFiles(fixture.backing)).toEqual([]);
+  });
+
+  for (const deletion of ["first", "middle", "last"] as const) {
+    for (const target of ["pair", "history"] as const) {
+      it(`retains closing proof when ${target} drifts after the ${deletion} WAL deletion`, async () => {
+        const fixture = await completedCombinedFixture(1);
+        await fixture.vault.replacePairWithHistoryTransactional(
+          PATHS,
+          fixture.observed.observation,
+          fixture.nextPair,
+          fixture.plan
+        );
+        const receiptPath = fixture.backing
+          .paths()
+          .find((path) => path.endsWith("/receipt.json"));
+        if (!receiptPath) throw new Error("missing combined receipt");
+        const transactionFolder = receiptPath.slice(0, receiptPath.lastIndexOf("/"));
+        const transactionId = transactionFolder.slice(transactionFolder.lastIndexOf("/") + 1);
+        const members = fixture.backing
+          .paths()
+          .filter((path) => path.startsWith(`${transactionFolder}/`));
+        const deletionNumber =
+          deletion === "first"
+            ? 1
+            : deletion === "middle"
+              ? Math.ceil(members.length / 2)
+              : members.length;
+        const targetPath = target === "pair" ? PATHS.html : fixture.plan.finalPath;
+        const external = `external-${target}-${deletion}`;
+        let deleted = 0;
+        const recoveringVault = new ObsidianWorkbenchVault(
+          persistentObsidianVault(fixture.backing, {
+            afterDelete(path) {
+              if (!path.startsWith(`${transactionFolder}/`)) return;
+              deleted += 1;
+              if (deleted === deletionNumber) {
+                fixture.backing.replace(targetPath, external);
+              }
+            }
+          })
+        );
+
+        await expect(
+          new HistoryRepository(recoveringVault, 20).list(DOCUMENT_ID)
+        ).rejects.toMatchObject({ code: "transaction_recovery_conflict" });
+        expect(fixture.backing.read(targetPath)).toBe(external);
+        expect(
+          fixture.backing
+            .paths()
+            .some((path) => path.endsWith(`/${transactionId}.json`))
+        ).toBe(true);
+        expect(fixture.backing.paths().some((path) => path.endsWith(".lock"))).toBe(true);
+        await expect(
+          new HistoryRepository(
+            new ObsidianWorkbenchVault(persistentObsidianVault(fixture.backing)),
+            20
+          ).list(DOCUMENT_ID)
+        ).rejects.toMatchObject({ code: "transaction_recovery_conflict" });
+        await expect(
+          new ObsidianWorkbenchVault(persistentObsidianVault(fixture.backing)).readPair(
+            UNRELATED_PATHS
+          )
+        ).resolves.toMatchObject(fixture.unrelatedPair);
+      });
+    }
+  }
 
   for (const point of [
     "after-intent",
@@ -867,12 +1044,18 @@ async function historyFixture(point: ObsidianWorkbenchCrashPoint) {
   return { backing, vault, plan };
 }
 
-async function completedCombinedFixture(seedCount: number) {
+async function completedCombinedFixture(
+  seedCount: number,
+  liveHooks: PersistentObsidianHooks = {}
+) {
   const oldPair = await pair("old");
   const nextPair = await pair("next");
+  const unrelatedPair = await pair("unrelated");
   const backing = new PersistentObsidianBacking({
     [PATHS.html]: oldPair.html,
-    [PATHS.sidecar]: oldPair.sidecarJson
+    [PATHS.sidecar]: oldPair.sidecarJson,
+    [UNRELATED_PATHS.html]: unrelatedPair.html,
+    [UNRELATED_PATHS.sidecar]: unrelatedPair.sidecarJson
   });
   const seedingVault = new ObsidianWorkbenchVault(persistentObsidianVault(backing));
   const seedingHistory = new HistoryRepository(seedingVault, 20, {
@@ -886,7 +1069,9 @@ async function completedCombinedFixture(seedCount: number) {
     );
   }
 
-  const vault = new ObsidianWorkbenchVault(persistentObsidianVault(backing));
+  const vault = new ObsidianWorkbenchVault(
+    persistentObsidianVault(backing, liveHooks)
+  );
   const history = new HistoryRepository(vault, 20, {
     randomUUID: () => "323e4567-e89b-42d3-a456-426614174000"
   });
@@ -897,7 +1082,17 @@ async function completedCombinedFixture(seedCount: number) {
   );
   const plan = await history.plan(prepared);
   const observed = (await vault.readPair(PATHS))!;
-  return { oldPair, nextPair, backing, vault, history, prepared, plan, observed };
+  return {
+    oldPair,
+    nextPair,
+    unrelatedPair,
+    backing,
+    vault,
+    history,
+    prepared,
+    plan,
+    observed
+  };
 }
 
 function transactionProofFiles(backing: PersistentObsidianBacking): string[] {
