@@ -4,6 +4,7 @@ import {
   type GalleyDocumentVault,
   type VaultCreatePairResult,
   type VaultPairSnapshot,
+  type VaultReconcilePairWithHistoryResult,
   type VaultReplacePairResult,
   type VaultReplacePairWithHistoryResult
 } from "../../src/documents/GalleyDocumentRepository";
@@ -53,8 +54,10 @@ interface MemoryOwnershipCleanupJournal {
 }
 
 interface MemoryHistoryJournal {
+  readonly kind: "combined-save" | "history-only";
   readonly provisional: HistoryFile<MemoryHistoryObservation>;
   readonly promoted: HistoryFile<MemoryHistoryObservation>;
+  readonly observedFiles: readonly HistoryFile<MemoryHistoryObservation>[];
   readonly removals: readonly HistoryFile<MemoryHistoryObservation>[];
   removedCount: number;
   rollback: boolean;
@@ -62,6 +65,13 @@ interface MemoryHistoryJournal {
 
 interface MemoryPendingCleanupJournal {
   readonly file: HistoryFile<MemoryHistoryObservation>;
+}
+
+interface MemoryHistoryReceipt {
+  readonly kind: "combined-save" | "history-only";
+  readonly file: HistoryFile<MemoryHistoryObservation>;
+  readonly observedFiles: readonly HistoryFile<MemoryHistoryObservation>[];
+  readonly removals: readonly HistoryFile<MemoryHistoryObservation>[];
 }
 
 interface MemoryRecoveryConflict {
@@ -156,7 +166,7 @@ export class MemoryWorkbenchBacking {
   >();
   readonly historyReceipts = new Map<
     MemoryEntry,
-    HistoryFile<MemoryHistoryObservation>
+    MemoryHistoryReceipt
   >();
   readonly recoveryConflicts = new Map<string, MemoryRecoveryConflict>();
   readonly #queues = new Map<string, Promise<void>>();
@@ -365,12 +375,14 @@ export class MemoryWorkbenchVault
       const sidecar = makeEntry(next.sidecarJson);
       const promotedEntry = makeEntry(historyPlan.provisional.html);
       const history: MemoryHistoryJournal = {
+        kind: "combined-save",
         provisional: historyPlan.provisional,
         promoted: {
           path: historyPlan.finalPath,
           html: historyPlan.provisional.html,
           observation: { entry: promotedEntry }
         },
+        observedFiles: historyPlan.observedFiles,
         removals: historyPlan.removals,
         removedCount: 0,
         rollback: false
@@ -410,6 +422,48 @@ export class MemoryWorkbenchVault
       await this.hooks.afterReplaceCommitted?.();
       return { status: "committed", observation: { html, sidecar } };
     });
+  }
+
+  async reconcilePairWithHistoryTransaction(
+    paths: ArtifactPaths,
+    expected: MemoryPairObservation,
+    next: { html: string; sidecarJson: string },
+    historyPlan: HistoryCommitPlan<MemoryHistoryObservation>
+  ): Promise<VaultReconcilePairWithHistoryResult<MemoryPairObservation>> {
+    this.#assertLive();
+    try {
+      await this.#recoverPairScope(paths);
+    } catch (error) {
+      if (error instanceof MemoryTransactionRecoveryConflictError) {
+        return { status: "unknown" };
+      }
+      throw error;
+    }
+
+    const currentHtml = this.backing.files.get(paths.html);
+    const currentSidecar = this.backing.files.get(paths.sidecar);
+    const receipt = this.backing.historyReceipts.get(
+      historyPlan.provisional.observation.entry
+    );
+    if (receipt) {
+      if (
+        !this.#historyReceiptMatchesPlan(receipt, historyPlan) ||
+        !currentHtml ||
+        !currentSidecar ||
+        currentHtml.contents !== next.html ||
+        currentSidecar.contents !== next.sidecarJson
+      ) {
+        return { status: "unknown" };
+      }
+      return {
+        status: "committed",
+        observation: { html: currentHtml, sidecar: currentSidecar }
+      };
+    }
+    if (currentHtml === expected.html && currentSidecar === expected.sidecar) {
+      return { status: "precommit" };
+    }
+    return { status: "conflict" };
   }
 
   async createPairTransactional(
@@ -558,13 +612,13 @@ export class MemoryWorkbenchVault
     const receipt = this.backing.historyReceipts.get(
       provisional.observation.entry
     );
-    if (receipt) return { status: "created", file: receipt };
+    if (receipt) return { status: "created", file: receipt.file };
 
     return this.backing.serialize(`history:${folder}`, async () => {
       const repeated = this.backing.historyReceipts.get(
         provisional.observation.entry
       );
-      if (repeated) return { status: "created", file: repeated };
+      if (repeated) return { status: "created", file: repeated.file };
       if (
         this.backing.files.get(provisional.path) !==
         provisional.observation.entry
@@ -602,8 +656,10 @@ export class MemoryWorkbenchVault
         observation: { entry }
       };
       const journal: MemoryHistoryJournal = {
+        kind: "history-only",
         provisional,
         promoted,
+        observedFiles,
         removals,
         removedCount: 0,
         rollback: false
@@ -642,10 +698,7 @@ export class MemoryWorkbenchVault
           this.#operationStage("history_after_remove", signal);
         }
 
-        this.backing.historyReceipts.set(
-          provisional.observation.entry,
-          promoted
-        );
+        this.#recordHistoryReceipt(journal);
         this.backing.historyJournals.delete(provisional.observation.entry);
         return { status: "created", file: promoted };
       } catch (error) {
@@ -779,16 +832,14 @@ export class MemoryWorkbenchVault
       journal.removedCount += 1;
       this.#operationStage("history_after_remove", signal);
     }
-    this.backing.historyReceipts.set(
-      journal.provisional.observation.entry,
-      journal.promoted
-    );
+    this.#recordHistoryReceipt(journal);
     this.#compactHistoryReceipts(folderOf(journal.promoted.path));
   }
 
   #compactHistoryReceipts(folder: string): void {
     const prefix = `${folder}/`;
-    for (const [key, file] of this.backing.historyReceipts) {
+    for (const [key, receipt] of this.backing.historyReceipts) {
+      const file = receipt.file;
       if (
         file.path.startsWith(prefix) &&
         this.backing.files.get(file.path) !== file.observation.entry
@@ -796,6 +847,30 @@ export class MemoryWorkbenchVault
         this.backing.historyReceipts.delete(key);
       }
     }
+  }
+
+  #recordHistoryReceipt(journal: MemoryHistoryJournal): void {
+    this.backing.historyReceipts.set(journal.provisional.observation.entry, {
+      kind: journal.kind,
+      file: journal.promoted,
+      observedFiles: journal.observedFiles,
+      removals: journal.removals
+    });
+  }
+
+  #historyReceiptMatchesPlan(
+    receipt: MemoryHistoryReceipt,
+    plan: HistoryCommitPlan<MemoryHistoryObservation>
+  ): boolean {
+    return (
+      receipt.kind === "combined-save" &&
+      receipt.file.path === plan.finalPath &&
+      receipt.file.html === plan.provisional.html &&
+      this.backing.files.get(receipt.file.path) ===
+        receipt.file.observation.entry &&
+      sameHistoryFiles(receipt.observedFiles, plan.observedFiles) &&
+      sameHistoryFiles(receipt.removals, plan.removals)
+    );
   }
 
   #assertLive(): void {
@@ -897,6 +972,22 @@ export class MemoryWorkbenchVault
   }
 
   async #recoverPairJournal(journal: MemoryPairJournal): Promise<void> {
+    if (journal.mode === "create") {
+      const currentHtml = this.backing.files.get(journal.paths.html) ?? null;
+      const currentSidecar =
+        this.backing.files.get(journal.paths.sidecar) ?? null;
+      this.#operationStage("create_cleanup_html");
+      this.#operationStage("create_cleanup_sidecar");
+      if (currentHtml === journal.newHtml) {
+        this.backing.files.delete(journal.paths.html);
+      }
+      if (currentSidecar === journal.newSidecar) {
+        this.backing.files.delete(journal.paths.sidecar);
+      }
+      this.backing.pairJournals.delete(journal.paths.html);
+      return;
+    }
+
     const reason = this.#pairRecoveryConflictReason(journal);
     if (reason) {
       const conflict: MemoryRecoveryConflict = {
@@ -1002,10 +1093,7 @@ export class MemoryWorkbenchVault
         this.backing.files.delete(file.path);
       }
     }
-    this.backing.historyReceipts.set(
-      journal.provisional.observation.entry,
-      journal.promoted
-    );
+    this.#recordHistoryReceipt(journal);
     this.#compactHistoryReceipts(folderOf(journal.promoted.path));
   }
 
@@ -1040,10 +1128,7 @@ export class MemoryWorkbenchVault
         throw new Error("History recovery lost prune-candidate ownership.");
       }
     }
-    this.backing.historyReceipts.set(
-      journal.provisional.observation.entry,
-      journal.promoted
-    );
+    this.#recordHistoryReceipt(journal);
     this.backing.historyJournals.delete(
       journal.provisional.observation.entry
     );
@@ -1206,6 +1291,20 @@ function isOwnedPairMember(
   newEntry: MemoryEntry
 ): boolean {
   return current === oldEntry || current === newEntry;
+}
+
+function sameHistoryFiles(
+  left: readonly HistoryFile<MemoryHistoryObservation>[],
+  right: readonly HistoryFile<MemoryHistoryObservation>[]
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every(
+      (file, index) =>
+        file.path === right[index]?.path &&
+        file.observation.entry === right[index]?.observation.entry
+    )
+  );
 }
 
 function throwIfAborted(signal?: AbortSignal): void {

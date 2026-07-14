@@ -26,6 +26,12 @@ export type VaultReplacePairWithHistoryResult<Observation> =
   | { status: "conflict" }
   | { status: "history-conflict" };
 
+export type VaultReconcilePairWithHistoryResult<Observation> =
+  | { status: "committed"; observation: Observation }
+  | { status: "precommit" }
+  | { status: "conflict" }
+  | { status: "unknown" };
+
 export type VaultCreatePairResult<Observation, Ownership> =
   | {
       status: "created";
@@ -67,6 +73,18 @@ export interface GalleyDocumentVault<
     history: HistoryCommitPlan<HistoryObservation>,
     signal?: AbortSignal
   ): Promise<VaultReplacePairWithHistoryResult<Observation>>;
+  /**
+   * Replays any relevant durable journal and proves the outcome for this exact
+   * pair/history plan. `committed` requires both the requested pair bytes and a
+   * matching combined-history receipt; `unknown` must be used when either side
+   * of that proof is unavailable or quarantined.
+   */
+  reconcilePairWithHistoryTransaction(
+    paths: ArtifactPaths,
+    expected: Observation,
+    next: { html: string; sidecarJson: string },
+    history: HistoryCommitPlan<HistoryObservation>
+  ): Promise<VaultReconcilePairWithHistoryResult<Observation>>;
   createPairTransactional(
     paths: ArtifactPaths,
     contents: { html: string; sidecarJson: string },
@@ -128,6 +146,33 @@ export class DocumentPostCommitError<Observation>
   ) {
     super();
     this.name = "DocumentPostCommitError";
+  }
+}
+
+export class DocumentSavePostCommitError<Observation>
+  extends DocumentPostCommitError<Observation>
+{
+  readonly combinedHistoryProved = true;
+
+  constructor(
+    snapshot: DocumentPairSnapshot<Observation> | null,
+    operationError: unknown,
+    readonly proof: "adapter-commit" | "reconciled-receipt"
+  ) {
+    super(snapshot, operationError);
+    this.name = "DocumentSavePostCommitError";
+  }
+}
+
+export class DocumentCommitAmbiguousError extends Error {
+  readonly code = "document_commit_ambiguous";
+
+  constructor(
+    readonly operationError: unknown,
+    readonly reconciliationError?: unknown
+  ) {
+    super("Galley could not determine the document save transaction outcome.");
+    this.name = "DocumentCommitAmbiguousError";
   }
 }
 
@@ -294,34 +339,41 @@ export class GalleyDocumentRepository<
         signal
       );
     } catch (error) {
-      let recovered: DocumentPairSnapshot<Observation> | null = null;
+      let reconciliation: VaultReconcilePairWithHistoryResult<Observation>;
       try {
-        recovered = await this.readPair(paths);
-        if (
-          recovered &&
-          recovered.html === next.html &&
-          recovered.sidecarJson === next.sidecarJson
-        ) {
-          await validatePairContents({
-            html: recovered.html,
-            sidecarJson: recovered.sidecarJson
-          });
-          throw new DocumentPostCommitError(recovered, error);
-        }
-        if (
-          recovered &&
-          this.sameObservation(expected, recovered.observation)
-        ) {
-          throw error;
-        }
+        reconciliation =
+          await this.vault.reconcilePairWithHistoryTransaction(
+            paths,
+            expectedData.vault,
+            next,
+            history
+          );
       } catch (recoveryError) {
-        if (recoveryError instanceof DocumentPostCommitError) {
-          throw recoveryError;
-        }
-        if (recoveryError === error) throw error;
-        throw new DocumentPostCommitError<Observation>(null, error);
+        throw new DocumentCommitAmbiguousError(error, recoveryError);
       }
-      throw new DocumentPostCommitError<Observation>(null, error);
+      if (reconciliation.status === "precommit") throw error;
+      if (reconciliation.status === "conflict") {
+        return { status: "conflict" };
+      }
+      if (reconciliation.status === "unknown") {
+        throw new DocumentCommitAmbiguousError(error);
+      }
+
+      let snapshot: DocumentPairSnapshot<Observation> | null = null;
+      try {
+        snapshot = await this.#verifyCommitted(
+          paths,
+          next,
+          reconciliation.observation
+        );
+      } catch {
+        // The combined receipt proves commit even if a later read raced.
+      }
+      throw new DocumentSavePostCommitError(
+        snapshot,
+        error,
+        "reconciled-receipt"
+      );
     }
 
     if (result.status !== "committed") return result;
@@ -329,12 +381,17 @@ export class GalleyDocumentRepository<
     try {
       snapshot = await this.#verifyCommitted(paths, next, result.observation);
     } catch (error) {
-      throw new DocumentPostCommitError<Observation>(null, error);
+      throw new DocumentSavePostCommitError<Observation>(
+        null,
+        error,
+        "adapter-commit"
+      );
     }
     if (signal?.aborted) {
-      throw new DocumentPostCommitError<Observation>(
+      throw new DocumentSavePostCommitError<Observation>(
         snapshot,
-        new DOMException("Aborted", "AbortError")
+        new DOMException("Aborted", "AbortError"),
+        "adapter-commit"
       );
     }
     return { status: "committed", snapshot };

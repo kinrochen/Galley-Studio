@@ -11,6 +11,8 @@ DONE
   `f098c7d26662db9cdb3327738fd4bd06337dc5c7`
 - Independent-review R3 remediation base:
   `79daf6cc35f1b570c11aa5facc2eccdb2407b451`
+- Independent-review R4 remediation base:
+  `2a5f28b5e695af972435a388a96c7b85efc7497c`
 - Task commit: the commit containing this report; its exact SHA is recorded in
   the implementation handoff because a Git commit cannot contain its own hash.
 - Progress ledger: not edited
@@ -81,17 +83,26 @@ HTML/sidecar pairs:
   outcomes reconcile when possible and remain explicitly dirty/conflicted,
   including when history finalization also fails.
 - Every catchable adapter throw is reconciled generically at the repository
-  boundary. If replay proves the exact new pair, the session takes its
-  post-commit path and finalizes the associated history; if replay proves the
-  exact old observation, the original precommit error is preserved. Crash
-  conformance tests abandon the upper call stack at the vault boundary rather
-  than relying on test-only production error recognition.
+  boundary. The vault's idempotent reconciliation result proves the exact
+  `HistoryCommitPlan`, a `combined-save` receipt, and the requested pair before
+  the session can take its history-finalizing post-commit path. Exact old state
+  preserves the original precommit error; external/deleted state without a
+  matching receipt becomes a conflict and rolls back only the owned pending
+  preparation. Unknown or quarantined state becomes typed
+  `document_commit_ambiguous`, which cannot enter history commit or rollback.
+  Crash conformance tests abandon the upper call stack at the vault boundary
+  rather than relying on test-only production error recognition.
 - Recovery is resource-scoped. Pair replay preflights the complete pair/history
   ownership set before its first mutation. Identity loss durably removes the
   active journal into a typed `transaction_recovery_conflict` quarantine for
   only that pair and history transaction; unrelated pairs, source files, and
   history folders remain usable across fresh adapters. Repeated reads of the
   affected pair fail deterministically without changing raw bytes.
+- Create-journal recovery uses cleanup semantics rather than replacement
+  quarantine semantics: it observes both members before mutation, preserves
+  every external identity, conditionally deletes every member still equal to
+  Galley's recorded create ownership, and clears the cleanup journal. This
+  remains safe for HTML-only, sidecar-only, and two-member replacement.
 - History idempotency receipts are acknowledged after repository commit and
   compacted against retained visible files on later adapter entry, so recovery
   metadata remains bounded with retention rather than growing for the lifetime
@@ -280,12 +291,61 @@ Tests       5 failed | 108 skipped (113)
   retained set. The long-running retention test now bounds both the 20 visible
   snapshots and hidden receipt metadata.
 
+### Independent review R4 remediation RED
+
+Both R4 findings were added as permanent negative reproductions before the
+production and recovery changes. The crashed-create reproduction is
+parameterized across HTML-only, sidecar-only, and both-member replacement, so
+the initial targeted RED contained four failing cases:
+
+```text
+npm test -- tests/documents/DocumentSession.test.ts \
+  -t "pre-CAS adapter throw|crashed-create members"
+Test Files  1 failed (1)
+Tests       4 failed | 84 skipped (88)
+```
+
+- A pre-CAS hook installed a valid external pair and threw before Galley wrote
+  a journal. Repository reconciliation labeled the unproved outcome committed,
+  and the session standalone-promoted one history snapshot for a save whose
+  target never reached disk.
+- A copy create crash after both members, followed by one- or two-member
+  external replacement, produced `transaction_recovery_conflict` and retained
+  every still-owned counterpart instead of completing safe cleanup.
+
+### Independent review R4 remediation
+
+- `GalleyDocumentVault` now exposes idempotent exact-plan reconciliation with
+  four outcomes: `committed`, `precommit`, `conflict`, and `unknown`.
+  `committed` requires requested pair bytes plus a visible matching receipt for
+  the same provisional identity, final path, complete observation/removal set,
+  and `combined-save` transaction kind. A history-only receipt cannot prove a
+  combined document commit.
+- Proved combined outcomes use `DocumentSavePostCommitError`, a subtype that
+  explicitly carries `combinedHistoryProved`. Only that subtype can reach
+  `#finishPostCommitFailure` and `history.commit`. A separate
+  `DocumentCommitAmbiguousError` has no `committed` property; the session marks
+  it dirty/conflicted and performs neither standalone promotion nor rollback.
+- External or deleted pair state with no matching receipt returns the normal
+  conflict path. The session removes only its owned pending history. The
+  permanent pre-CAS test proves the valid external pair remains, recognized
+  history stays empty, no pending file or journal remains, and state is
+  dirty/conflicted.
+- A permanent quarantine test composes a combined retention mutation with pair
+  ownership loss. It proves the result is typed ambiguous, does not advertise
+  `committed`, leaves the durable quarantine intact, and records no receipt.
+- Create recovery now captures both current member identities before any
+  cleanup write, executes both injected recovery gates, deletes each member
+  only if it still equals the create journal's owned identity, preserves all
+  replacements, clears the journal, and never creates a cleanup-only
+  quarantine. Repeated fresh adapters and unrelated reads remain usable.
+
 ### Final focused GREEN
 
 ```text
 npm test -- tests/documents/HistoryRepository.test.ts tests/documents/DocumentSession.test.ts
 Test Files  2 passed (2)
-Tests       113 passed (113)
+Tests       118 passed (118)
 exit 0
 
 npm run test:typecheck
@@ -307,6 +367,8 @@ exit 0
   rejection, sanitized no-op, and exact revert.
 - Save: clean no-op, auto/explicit success, exact prior history, combined
   pair/history recovery after ordinary throws and true caller-level restart,
+  exact-plan receipt proof, pre-CAS external-winner rollback, typed unknown
+  outcome without history finalization,
   matching strict sidecar, HTML/sidecar changes, same-byte ABA, CAS race,
   overwrite metadata
   adoption, staged transaction/rollback failures, post-commit verification and
@@ -318,7 +380,7 @@ exit 0
   pair, one-sided collision, same-name race, staged creation/cleanup failure,
   durable whole-ownership cleanup, first/second/both and between-member cleanup
   failure, verification failure, restart, and one- or two-sided ABA replacement
-  preservation during cleanup.
+  preservation during both verification cleanup and crashed-create recovery.
 
 ## Security and shell audit
 
@@ -342,6 +404,8 @@ exit 0
 | Crash after durable replacement marker | recreated adapter rolls forward the complete new pair before exposing a read |
 | Crash after combined save marker | recreated adapter rolls forward the complete new pair and promotes its exact prior HTML |
 | Ordinary throw after combined save marker | repository reconciles the recovered new pair; session remains dirty/conflicted and history is finalized |
+| Pre-CAS throw after an external winner | no combined receipt exists; external pair remains, pending history rolls back, and no snapshot is promoted |
+| Unknown/quarantined combined outcome | typed non-committed ambiguity remains dirty/conflicted and cannot call standalone history commit/rollback |
 | Pair/history ownership loss before replay | all members are preflighted; affected transaction is typed/quarantined without raw mutation or unrelated-resource denial |
 | Recovery failure | read rejects and journal remains; later clean reopen completes replay |
 | Post-commit verification failure | new HTML and new matching sidecar remain; session dirty |
@@ -349,6 +413,7 @@ exit 0
 | Existing one-sided copy candidate | occupied side preserved; whole copy advances to next number |
 | Copy candidate appears during create | raced file preserved; whole copy advances again |
 | Crashed copy creation | recreated adapter replays the journal and removes every unacknowledged member |
+| Crashed copy creation plus external member replacement | every replacement is preserved; each still-owned counterpart is removed; journal clears without quarantine |
 | Copy verification/cleanup failure | complete ownership tuple remains journaled until each still-owned member is removed |
 | Crash between copy cleanup members | raw backing can be one-sided only behind a journal; reopen removes the remaining owned member |
 | One-sided copy-path ABA before cleanup | replacement member preserved; Galley-owned counterpart removed |
@@ -372,7 +437,7 @@ before exposing persistent state.
 ```text
 npm test -- tests/documents/HistoryRepository.test.ts tests/documents/DocumentSession.test.ts
 Test Files  2 passed (2)
-Tests       113 passed (113)
+Tests       118 passed (118)
 exit 0
 
 npm run test:typecheck
@@ -380,7 +445,7 @@ exit 0
 
 npm test
 Test Files  33 passed (33)
-Tests       806 passed (806)
+Tests       811 passed (811)
 exit 0
 
 npm run build
@@ -414,7 +479,8 @@ implement the proven transaction protocol with durable recovery state, stable
 identity/version observations, exclusive pair creation/promotion, per-member
 identity-conditional cleanup from a whole-operation journal, a single durable
 pair-plus-history save boundary, scoped terminal recovery quarantine, bounded
-receipt acknowledgement/compaction, and the same restart/failure-stage
-adapter-conformance coverage. This task
+receipt acknowledgement/compaction, exact combined-receipt reconciliation,
+mode-aware create cleanup, and the same restart/failure-stage adapter-
+conformance coverage. This task
 deliberately does not add that Obsidian runtime adapter or modify the composition
 root.

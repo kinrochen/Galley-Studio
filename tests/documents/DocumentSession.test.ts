@@ -609,7 +609,19 @@ describe("DocumentSession", () => {
       const session = await DocumentSession.open(fixture.dependencies);
       session.updateBody("<article><p>transactional replacement</p></article>");
 
-      await expect(session.save("explicit")).rejects.toThrow(/injected/i);
+      if (stages.length > 1) {
+        await expect(session.save("explicit")).rejects.toMatchObject({
+          code: "document_commit_ambiguous"
+        });
+        expect(fixture.backing.journalCount()).toBe(1);
+        expect(
+          fixture.backing.rawPaths().some((path) => path.endsWith(".pending"))
+        ).toBe(true);
+        expect(fixture.backing.historyReceipts.size).toBe(0);
+        expect(session.state()).toMatchObject({ dirty: true, conflict: true });
+      } else {
+        await expect(session.save("explicit")).rejects.toThrow(/injected/i);
+      }
 
       const reopened = MemoryWorkbenchVault.reopen(fixture.backing);
       await new GalleyDocumentRepository(reopened).readPair(TEST_PATHS);
@@ -734,6 +746,75 @@ describe("DocumentSession", () => {
       fixture.backing.rawPaths().some((path) => path.endsWith(".pending"))
     ).toBe(false);
     expect(session.state()).toMatchObject({ dirty: true, conflict: true });
+  });
+
+  it("does not promote history when a pre-CAS adapter throw leaves an external pair", async () => {
+    const hooks: MemoryWorkbenchHooks = {};
+    const fixture = await makeSessionDeps({ hooks });
+    const session = await DocumentSession.open(fixture.dependencies);
+    session.updateBody("<article><p>local target never committed</p></article>");
+    hooks.beforeReplace = async () => {
+      await fixture.replacePairExternally(
+        "<article><p>external winner</p></article>"
+      );
+      throw new Error("precommit adapter failure");
+    };
+
+    await expect(session.save("explicit")).rejects.toMatchObject({
+      code: "document_conflict"
+    });
+
+    const external = await fixture.repository.readPair(TEST_PATHS);
+    expect(external?.html).toContain("external winner");
+    expect(await fixture.history.list(fixture.sidecar.documentId)).toEqual([]);
+    expect(
+      fixture.backing.rawPaths().some((path) => path.endsWith(".pending"))
+    ).toBe(false);
+    expect(fixture.backing.journalCount()).toBe(0);
+    expect(session.state()).toMatchObject({
+      dirty: true,
+      conflict: true,
+      saving: false
+    });
+  });
+
+  it("keeps a quarantined combined outcome ambiguous without finalizing history", async () => {
+    const hooks: MemoryWorkbenchHooks = {};
+    const fixture = await makeSessionDeps({ hooks });
+    for (let index = 0; index < 20; index += 1) {
+      await fixture.history.store(
+        fixture.sidecar.documentId,
+        `retained-${index}`,
+        new Date(1_700_000_000_000 + index)
+      );
+    }
+    const session = await DocumentSession.open(fixture.dependencies);
+    session.updateBody("<article><p>ambiguous combined target</p></article>");
+    hooks.beforeHistoryRemove = () => {
+      fixture.vault.writeExternally(
+        TEST_PATHS.sidecar,
+        "external sidecar during combined recovery"
+      );
+      throw new Error("combined ownership interruption");
+    };
+
+    const failure: unknown = await session.save("explicit").then(
+      () => failTest("expected an ambiguous combined-save failure"),
+      (error: unknown) => error
+    );
+
+    expect(failure).toMatchObject({ code: "document_commit_ambiguous" });
+    expect(
+      typeof failure === "object" && failure !== null && "committed" in failure
+    ).toBe(false);
+    expect(fixture.backing.historyReceipts.size).toBe(0);
+    expect(fixture.backing.journalCount()).toBe(0);
+    expect(fixture.backing.recoveryConflicts.size).toBe(1);
+    expect(session.state()).toMatchObject({
+      dirty: true,
+      conflict: true,
+      saving: false
+    });
   });
 
   it("reload discards local content only after a valid reread and refreshes source status", async () => {
@@ -901,6 +982,61 @@ describe("DocumentSession", () => {
         })
       ).toBeNull();
       expect(fixture.backing.journalCount()).toBe(0);
+    }
+  );
+
+  it.each(["html", "sidecar", "both"] as const)(
+    "cleans still-owned crashed-create members after %s replacement without quarantine",
+    async (replacement) => {
+      const fixture = await makeSessionDeps({
+        hooks: {
+          crashStages: new Set<MemoryFaultStage>(["create_after_sidecar"])
+        }
+      });
+      fixture.vault.writeExternally("notes/unrelated.md", "unrelated source");
+      const session = await DocumentSession.open(fixture.dependencies);
+      session.updateBody("<article><p>crashed copy ownership</p></article>");
+
+      await expect(session.saveCopy()).rejects.toMatchObject({
+        name: "MemoryCrashError"
+      });
+      expect(fixture.backing.journalCount()).toBe(1);
+      if (replacement === "html" || replacement === "both") {
+        fixture.vault.writeExternally(
+          "notes/article-2.galley.html",
+          "external copy HTML"
+        );
+      }
+      if (replacement === "sidecar" || replacement === "both") {
+        fixture.vault.writeExternally(
+          "notes/article-2.galley.json",
+          "external copy sidecar"
+        );
+      }
+      fixture.vault.destroy();
+
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const reopened = MemoryWorkbenchVault.reopen(fixture.backing);
+        const repository = new GalleyDocumentRepository(reopened);
+        await expect(repository.readText("notes/unrelated.md")).resolves.toBe(
+          "unrelated source"
+        );
+        await expect(
+          repository.readText("notes/article-2.galley.html")
+        ).resolves.toBe(
+          replacement === "html" || replacement === "both"
+            ? "external copy HTML"
+            : null
+        );
+        expect(reopened.read("notes/article-2.galley.json")).toBe(
+          replacement === "sidecar" || replacement === "both"
+            ? "external copy sidecar"
+            : null
+        );
+        expect(fixture.backing.journalCount()).toBe(0);
+        expect(fixture.backing.recoveryConflicts.size).toBe(0);
+        reopened.destroy();
+      }
     }
   );
 

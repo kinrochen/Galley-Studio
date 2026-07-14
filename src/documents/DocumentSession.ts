@@ -1,6 +1,8 @@
 import {
+  DocumentCommitAmbiguousError,
   DocumentCommitVerificationError,
   DocumentPostCommitError,
+  DocumentSavePostCommitError,
   type ArtifactPaths,
   type DocumentObservation,
   type DocumentPairSnapshot,
@@ -274,7 +276,12 @@ export class DocumentSession<
           throw new Error("Galley save transaction did not converge.");
         }
       } catch (error) {
-        if (error instanceof DocumentPostCommitError) {
+        if (error instanceof DocumentCommitAmbiguousError) {
+          this.#dirty = true;
+          this.#conflict = true;
+          throw error;
+        }
+        if (error instanceof DocumentSavePostCommitError) {
           await this.#finishPostCommitFailure(
             error,
             preparedHistory,
@@ -285,6 +292,11 @@ export class DocumentSession<
             savedAt
           );
           throw postCommitCause(error);
+        }
+        if (error instanceof DocumentPostCommitError) {
+          this.#dirty = true;
+          this.#conflict = true;
+          throw error;
         }
         await this.#history.rollback(preparedHistory);
         throw error;
@@ -395,7 +407,7 @@ export class DocumentSession<
   }
 
   async #finishPostCommitFailure(
-    error: DocumentPostCommitError<Observation>,
+    error: DocumentSavePostCommitError<Observation>,
     preparedHistory: PreparedHistorySnapshot,
     targetHtml: string,
     targetDocument: GalleyDocument,
