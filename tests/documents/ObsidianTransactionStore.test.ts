@@ -18,6 +18,10 @@ const SCOPE: TransactionScope = {
   pair: { html: "notes/a.galley.html", sidecar: "notes/a.galley.json" },
   historyDocumentId: "323e4567-e89b-42d3-a456-426614174000"
 };
+const OTHER_SCOPE: TransactionScope = {
+  pair: { html: "notes/b.galley.html", sidecar: "notes/b.galley.json" },
+  historyDocumentId: "323e4567-e89b-42d3-a456-426614174000"
+};
 const BLOBS = [
   { role: "pair-html-before" as const, text: "old html" },
   { role: "pair-html-after" as const, text: "new html" },
@@ -160,7 +164,11 @@ describe("ObsidianTransactionStore", () => {
     const store = makeStore(backing, [ID_A]);
     const record = await store.prepare({ kind: "pair-history", scope: SCOPE, blobs: BLOBS });
     const plan = receiptPlan();
-    await store.writeReceipt(record, plan);
+    const receipt = await store.writeReceipt(record, plan);
+    expect(receipt).toMatchObject({
+      manifestChecksum: record.checksum,
+      aggregateDigest: expect.stringMatching(/^[a-f0-9]{64}$/u)
+    });
     await expect(store.verifyReceipt(record, plan)).resolves.toMatchObject({ transactionId: ID_A });
     await expect(
       store.verifyReceipt(record, {
@@ -171,6 +179,183 @@ describe("ObsidianTransactionStore", () => {
     await expect(
       store.verifyReceipt(record, { ...plan, historyHashes: ["e".repeat(64)] })
     ).rejects.toMatchObject({ code: "transaction_receipt_invalid" });
+  });
+
+  it("retries the whole record vector when an earlier blob drifts during a later read", async () => {
+    const backing = new PersistentObsidianBacking();
+    const files = new ObsidianVaultFileStore(persistentObsidianVault(backing));
+    const store = makeStoreWithFiles(files, [ID_A]);
+    const record = await store.prepare({ kind: "pair-replace", scope: SCOPE, blobs: BLOBS });
+    const firstPath = record.blobs[0]!.path;
+    const laterPath = record.blobs.at(-1)!.path;
+    const read = files.readTextStable.bind(files);
+    let laterReads = 0;
+    let drifted = false;
+    files.readTextStable = async (path, signal) => {
+      const result = await read(path, signal);
+      if (path === laterPath) {
+        laterReads += 1;
+        if (laterReads === 2 && !drifted) {
+          drifted = true;
+          backing.replace(firstPath, "corrupt!", {
+            sameIdentity: true,
+            preserveStat: true
+          });
+        }
+      }
+      return result;
+    };
+    await expect(store.open(ID_A)).rejects.toMatchObject({
+      code: "transaction_record_unstable"
+    });
+  });
+
+  it("retries the whole record vector when manifest scope drifts during blob reads", async () => {
+    const backing = new PersistentObsidianBacking();
+    const files = new ObsidianVaultFileStore(persistentObsidianVault(backing));
+    const store = makeStoreWithFiles(files, [ID_A]);
+    const record = await store.prepare({ kind: "pair-replace", scope: SCOPE, blobs: BLOBS });
+    const read = files.readTextStable.bind(files);
+    let drifted = false;
+    files.readTextStable = async (path, signal) => {
+      const result = await read(path, signal);
+      if (path === record.blobs[0]!.path && !drifted) {
+        drifted = true;
+        await rewriteManifest(backing, ID_A, (value) => {
+          value.scope = OTHER_SCOPE;
+        });
+      }
+      return result;
+    };
+    await expect(store.open(ID_A)).resolves.toMatchObject({ scope: OTHER_SCOPE });
+  });
+
+  it("fails with typed instability when aggregate record churn exhausts bounded retries", async () => {
+    const backing = new PersistentObsidianBacking();
+    const files = new ObsidianVaultFileStore(persistentObsidianVault(backing));
+    let index = 0;
+    const store = new ObsidianTransactionStore(files, {
+      randomUUID: () => ID_A,
+      now: () => new Date("2026-07-15T00:00:00.000Z"),
+      maxSnapshotAttempts: 2
+    });
+    const record = await store.prepare({ kind: "pair-replace", scope: SCOPE, blobs: BLOBS });
+    const read = files.readTextStable.bind(files);
+    files.readTextStable = async (path, signal) => {
+      const result = await read(path, signal);
+      if (path === record.blobs[0]!.path) {
+        index += 1;
+        await rewriteManifest(backing, ID_A, (value) => {
+          value.scope = index % 2 === 0 ? SCOPE : OTHER_SCOPE;
+        });
+      }
+      return result;
+    };
+    await expect(store.open(ID_A)).rejects.toMatchObject({
+      code: "transaction_record_unstable"
+    });
+  });
+
+  it("binds stale-handle CAS to blob observations across stores", async () => {
+    const backing = new PersistentObsidianBacking();
+    const first = makeStore(backing, [ID_A]);
+    const stale = await first.prepare({ kind: "pair-replace", scope: SCOPE, blobs: BLOBS });
+    const blob = stale.blobs[0]!;
+    backing.replace(blob.path, blob.text);
+    const second = makeStore(backing, [ID_B]);
+    await expect(second.open(ID_A)).resolves.toMatchObject({ id: ID_A });
+    await expect(first.transition(stale, "applying")).rejects.toMatchObject({
+      code: "transaction_write_conflict"
+    });
+  });
+
+  it("does not return a receipt when durable scope drifts inside its create window", async () => {
+    const backing = new PersistentObsidianBacking();
+    const files = new ObsidianVaultFileStore(persistentObsidianVault(backing));
+    const store = makeStoreWithFiles(files, [ID_A]);
+    const record = await store.prepare({ kind: "pair-history", scope: SCOPE, blobs: BLOBS });
+    const create = files.createExclusive.bind(files);
+    files.createExclusive = async (path, text, signal) => {
+      if (path.endsWith("/receipt.json")) {
+        await rewriteManifest(backing, ID_A, (value) => {
+          value.scope = OTHER_SCOPE;
+        });
+      }
+      return create(path, text, signal);
+    };
+    await expect(store.writeReceipt(record, receiptPlan())).rejects.toMatchObject({
+      code: "transaction_write_ambiguous"
+    });
+  });
+
+  it("does not return a receipt when a blob drifts after receipt creation", async () => {
+    const backing = new PersistentObsidianBacking();
+    const files = new ObsidianVaultFileStore(persistentObsidianVault(backing));
+    const store = makeStoreWithFiles(files, [ID_A]);
+    const record = await store.prepare({ kind: "pair-history", scope: SCOPE, blobs: BLOBS });
+    const create = files.createExclusive.bind(files);
+    files.createExclusive = async (path, text, signal) => {
+      const result = await create(path, text, signal);
+      if (path.endsWith("/receipt.json")) {
+        const blob = record.blobs[0]!;
+        backing.replace(blob.path, blob.text);
+      }
+      return result;
+    };
+    await expect(store.writeReceipt(record, receiptPlan())).rejects.toMatchObject({
+      code: "transaction_write_ambiguous"
+    });
+  });
+
+  it("closes receipt verification over the aggregate transaction snapshot", async () => {
+    const backing = new PersistentObsidianBacking();
+    const files = new ObsidianVaultFileStore(persistentObsidianVault(backing));
+    const store = makeStoreWithFiles(files, [ID_A]);
+    const record = await store.prepare({ kind: "pair-history", scope: SCOPE, blobs: BLOBS });
+    const plan = receiptPlan();
+    await store.writeReceipt(record, plan);
+    const read = files.readTextStable.bind(files);
+    let drifted = false;
+    files.readTextStable = async (path, signal) => {
+      const result = await read(path, signal);
+      if (path.endsWith("/receipt.json") && !drifted) {
+        drifted = true;
+        const blob = record.blobs[0]!;
+        backing.replace(blob.path, blob.text);
+      }
+      return result;
+    };
+    await expect(store.verifyReceipt(record, plan)).rejects.toMatchObject({
+      code: "transaction_receipt_invalid"
+    });
+  });
+
+  it("rejects semantically valid but noncanonical manifest JSON bytes", async () => {
+    const backing = new PersistentObsidianBacking();
+    const store = makeStore(backing, [ID_A]);
+    await store.prepare({ kind: "pair-replace", scope: SCOPE, blobs: BLOBS });
+    const path = `.galley/transactions/${ID_A}/manifest.json`;
+    backing.replace(path, `${JSON.stringify(JSON.parse(backing.read(path)!), null, 2)}\n`, {
+      sameIdentity: true
+    });
+    await expect(store.open(ID_A)).rejects.toMatchObject({
+      code: "transaction_record_invalid"
+    });
+  });
+
+  it("rejects semantically valid but noncanonical receipt JSON bytes", async () => {
+    const backing = new PersistentObsidianBacking();
+    const store = makeStore(backing, [ID_A]);
+    const record = await store.prepare({ kind: "pair-history", scope: SCOPE, blobs: BLOBS });
+    const plan = receiptPlan();
+    await store.writeReceipt(record, plan);
+    const path = `.galley/transactions/${ID_A}/receipt.json`;
+    backing.replace(path, `${JSON.stringify(JSON.parse(backing.read(path)!), null, 2)}\n`, {
+      sameIdentity: true
+    });
+    await expect(store.verifyReceipt(record, plan)).rejects.toMatchObject({
+      code: "transaction_receipt_invalid"
+    });
   });
 
   it.each([
@@ -358,9 +543,14 @@ describe("ObsidianTransactionStore", () => {
     record = await store.transition(record, "applying");
     record = await store.transition(record, "committed");
     record = await store.transition(record, "completed");
-    await expect(store.cleanup(record)).resolves.toEqual({ status: "cleaned" });
+    await expect(store.cleanup(record)).resolves.toEqual({
+      status: "cleaned",
+      directory: "retained"
+    });
     expect(backing.paths().some((path) => path.includes(ID_A))).toBe(false);
-    expect(backing.nodes.has(`.galley/transactions/${ID_A}`)).toBe(false);
+    expect(backing.nodes.has(`.galley/transactions/${ID_A}`)).toBe(true);
+    expect(backing.rmdirPaths).toEqual([]);
+    expect(await store.list(SCOPE)).toEqual([]);
   });
 
   it("keeps quarantine scope-local while unrelated valid scope listing remains usable", async () => {

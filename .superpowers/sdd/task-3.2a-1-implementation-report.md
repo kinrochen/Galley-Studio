@@ -2,7 +2,7 @@
 
 ## Status
 
-DONE — independent-review R1 remediation included
+DONE — independent-review R1 and R2 remediation included
 
 - Required base: `d3c65d5bc9f7f3f2201e3abc8ca99cce29a22d48`
 - Base HEAD verified before edits: exact match
@@ -20,7 +20,8 @@ Obsidian adapter:
   public path, obtains bounded stable reads, hashes exact text with Web Crypto,
   carries `TFile` identity plus copied stat evidence, performs exclusive
   creation, exact conditional modification/removal, recursive directory
-  creation, deterministic direct listing, and exact empty-folder cleanup.
+  creation, deterministic direct listing, and conservatively retains empty
+  folders when Obsidian cannot bind deletion to a `TFolder` identity.
 - `ObsidianTransactionStore` owns only `.galley/transactions`, generates
   canonical UUID folders, writes immutable staged blobs before a canonical
   checksummed manifest, strictly reopens records after store recreation,
@@ -80,7 +81,8 @@ Inspected the installed file
   `stat(normalizedPath)`, non-recursive `list(normalizedPath)`, direct
   `read(normalizedPath)`, overwriting `write`, `mkdir`, `remove`, and related
   methods. The implementation uses only `adapter.list`; it does not use the
-  overwriting `write` primitive.
+  overwriting `write` primitive. `rmdir(normalizedPath, recursive)` is also
+  path-only; it is deliberately not used for transaction UUID folders.
 - `FileStats` at lines 2564-2584: exact declared evidence fields are `ctime`,
   `mtime`, and `size`.
 - `TAbstractFile` at lines 5838-5859: `vault`, `path`, `name`, `parent`.
@@ -107,7 +109,8 @@ Inspected the installed file
   `VaultFileReadUnstableError`, `VaultMutationAmbiguousError`.
 - Result unions: `VaultMutationAmbiguity`,
   `VaultCreateExclusiveResult`, `VaultConditionalModifyResult`,
-  `VaultConditionalRemoveResult`, `VaultCreateFolderExclusiveResult`.
+  `VaultConditionalRemoveResult`, `VaultConditionalRemoveFolderResult`,
+  `VaultCreateFolderExclusiveResult`.
 - Operations: `readTextStable`, `createExclusive`, `modifyOwned`,
   `removeOwned`, `ensureFolder`, `createFolderExclusive`, `list`, and
   `removeEmptyFolderOwned`.
@@ -115,8 +118,8 @@ Inspected the installed file
 
 Every successful file observation contains normalized `path`, exact `text`,
 lowercase SHA-256, UTF-8 byte length, the in-process `TFile` identity, and copied
-`ctime`/`mtime`/`size`. Exact identity plus text/hash is authoritative; stats
-are evidence only.
+`ctime`/`mtime`/`size`. Aggregate transaction snapshots and stale-handle CAS
+bind all of that evidence, including exact identity, bytes, and stats.
 
 `ObsidianTransactionStore.ts` exports:
 
@@ -128,6 +131,7 @@ are evidence only.
   `TransactionReceiptPlan`, `VerifiedTransactionReceipt`, and
   `ObsidianTransactionStoreOptions`.
 - Explicit errors: `TransactionRecordInvalidError`,
+  `TransactionRecordUnstableError`,
   `TransactionPhaseInvalidError`, `TransactionWriteConflictError`,
   `TransactionWriteAmbiguousError`, `TransactionHandleUntrustedError`, and
   `TransactionReceiptInvalidError`.
@@ -171,8 +175,12 @@ checksum = SHA-256(canonical JSON of every preceding field)
 Canonical JSON recursively sorts object keys, preserves array order, contains
 no insignificant whitespace, and is stored with one final newline. Preparation
 creates and verifies every blob first, creates `manifest.json` last, and returns
-only after a strict re-read verifies the manifest, checksum, folder, blob
-identity, exact bytes, lengths, and hashes.
+only after bounded aggregate verification: an opening canonical manifest and
+ordered blob vector is closed by reverse-order blob re-reads and a final
+manifest re-read. Both vectors must match in path, identity, exact bytes,
+hashes, lengths, and copied stat evidence. Drift retries; exhausted aggregate
+churn throws `transaction_record_unstable` and remains scope-locally
+quarantinable.
 
 The phase graph is deliberately adjacent and monotonic:
 
@@ -181,12 +189,17 @@ prepared -> applying -> committed -> completed
 ```
 
 Skipping, repeating, unknown, or backwards transitions fail before mutation.
-Transitions compare the exact manifest ownership returned by the preceding
-read, conditionally modify, and strictly reopen the new record.
+Transitions compare the complete aggregate ownership/digest returned by the
+preceding read, conditionally modify only the exact manifest, and strictly
+reopen the complete new record while proving every staged blob stayed owned.
 
-Receipt v1 binds `schemaVersion`, exact `transactionId`, both target paths,
-exact target HTML/sidecar SHA-256 values, ordered exact history-plan hashes, and
-its canonical checksum. It must also match the record's pair scope.
+Receipt v1 binds `schemaVersion`, exact `transactionId`, durable manifest
+checksum, aggregate transaction digest, both target paths, exact target
+HTML/sidecar SHA-256 values, ordered exact history-plan hashes, and its
+canonical checksum. It must also match the record's durable pair scope.
+Receipt creation reopens the aggregate before mutation and after any possible
+creation. Verification closes over stable receipt bytes and the aggregate
+again before return.
 
 ## Exact-read, ambiguity, and abort semantics
 
@@ -216,19 +229,25 @@ Permanent tests prove fail-closed behavior for:
 - traversal, absolute, backslash, URL-like, NUL/control, empty-segment,
   dot-segment, drive-like, and non-NFC alias paths;
 - unknown manifest/receipt keys, malformed JSON, unsupported version, unknown
-  kind/phase, changed transaction ID, and checksum drift;
+  kind/phase, changed transaction ID, checksum drift, and semantically valid
+  but bytewise noncanonical JSON (key order/whitespace/newline);
 - `../` blob names, sibling transaction references, duplicate roles,
   duplicate filenames, oversized metadata, and corrupt staged bytes;
 - receipt pair-hash or ordered history-plan-hash changes;
 - identity swaps, same-stat byte changes, repeated churn, create collisions,
   conditional write/delete conflicts, and post-mutation ambiguity;
+- earlier-blob drift during a later closing-vector read, manifest scope drift
+  during blob reads, sustained aggregate-vector churn, and two-store stale
+  aggregate CAS after a same-byte blob identity replacement;
+- durable aggregate drift inside receipt creation, after receipt creation, and
+  while receipt verification is reading its own durable record;
 - cleanup preflight against externally replaced blob identity/bytes;
 - one malformed scope becoming quarantined without blocking deterministic
   listing of an unrelated valid scope.
 
 Untrusted manifest paths never drive reads or cleanup. Blob reads are derived
 from `TRANSACTION_ROOT + canonical transaction ID + role filename`; receipt,
-manifest, quarantine, and folder cleanup paths are likewise closed and derived.
+manifest and quarantine paths are likewise closed and derived.
 Unexpected files make cleanup conflict. Quarantine writes only canonical
 checksummed metadata inside that derived transaction folder and never reads,
 renames, or deletes a target pair/history path.
@@ -239,13 +258,13 @@ Final post-report command results are recorded below after the last full gate:
 
 ```text
 npm test -- tests/documents/ObsidianVaultFileStore.test.ts tests/documents/ObsidianTransactionStore.test.ts
-2 files passed; 64 tests passed; exit 0
+2 files passed; 74 tests passed; exit 0
 
 npm run test:typecheck
 exit 0
 
 npm test
-40 files passed; 916 tests passed; exit 0
+40 files passed; 926 tests passed; exit 0
 
 npm run build
 exit 0
@@ -274,6 +293,13 @@ structural port.
   close in-process async races; after a plugin/app restart the transaction layer
   reopens fresh exact owned handles from durable bytes. Task 3.2a.2 must still
   use durable intent before target mutation and never treat stats as ownership.
+- Obsidian 1.11.4 exposes no identity-conditional directory delete. Its
+  `DataAdapter.rmdir` is path-only, so cleanup removes exact-owned closed files
+  but retains the now-empty canonical UUID folder as an inert tombstone and
+  reports `{ status: "cleaned", directory: "retained" }`. Listing ignores
+  empty retained UUID folders. Neither production cleanup nor the file-store
+  folder helper invokes `rmdir`, so a same-path replacement directory cannot
+  be deleted by a stale path check.
 - `Vault.create` does not expose a typed collision-vs-after-create error in the
   1.11.4 declaration. The wrapper therefore reports only a precheck-visible
   existing path as `collision`. Once `Vault.create` has been invoked, any throw
@@ -309,12 +335,13 @@ was added while hardening the outer await boundary.
 - Every `prepare`, `open`, and `list` result is recursively frozen at the
   record, scope, pair, blob-array, and blob levels. The store records an
   unforgeable private `WeakMap` provenance entry containing the canonical
-  transaction ID and exact manifest ownership snapshot.
+  transaction ID and (after R2) the exact aggregate manifest/blob ownership
+  snapshot plus digest.
 - `transition`, receipt write/verification, and cleanup reject a forged,
   structured-cloned, or foreign-store record with
   `transaction_handle_untrusted`. A fresh store can strictly `open` the durable
   record to obtain its own valid handle. A once-valid stale handle fails exact
-  manifest ownership comparison with `transaction_write_conflict`.
+  aggregate ownership comparison with `transaction_write_conflict`.
 - After provenance validation, every operation derives the transaction folder
   from the trusted canonical ID and strictly reopens the current durable
   manifest. Durable phase and scope—not public object fields—authorize the
@@ -352,11 +379,12 @@ was added while hardening the outer await boundary.
 - `canonicalVaultPath` now rejects Unicode general categories `Cc` and `Cf`,
   covering C0, DEL, C1 including `U+0085`, and prohibited format controls such
   as `U+200B`, in addition to all earlier path restrictions.
-- Empty owned transaction folders are removed with
-  `DataAdapter.rmdir(path, false)`, the declared non-recursive primitive. The
-  persistent fixture now implements that exact contract. A child injected
-  after listing but before removal is preserved and the operation becomes
-  ambiguous instead of recursively deleting the child.
+- Empty owned transaction folders are retained without invoking any deletion
+  primitive. R2 superseded the R1 non-recursive approach after
+  proving that `DataAdapter.rmdir(path, false)` still cannot bind the mutation
+  to the checked `TFolder`. The method now returns
+  `preserved/identity-delete-unsupported`; tests prove `rmdir` is never called
+  and a same-path replacement folder remains intact.
 
 ### R1 regression GREEN
 
@@ -367,5 +395,98 @@ Tests       64 passed (64)
 exit 0
 
 npm run test:typecheck
+exit 0
+```
+
+## Independent-review R2 remediation
+
+The independent R2 review at reviewed HEAD
+`329d783660035478a78034f19b9f7195fbed79b1` supplied an 18-case suite whose
+six new failures exposed aggregate reopen, receipt authority-window, folder
+identity, and canonical-serialization gaps. Those cases and additional closing
+controls were first made permanent without changing production. The formal R2
+RED was:
+
+```text
+npm test -- tests/documents/ObsidianVaultFileStore.test.ts tests/documents/ObsidianTransactionStore.test.ts
+Test Files  2 failed (2)
+Tests       12 failed | 62 passed (74)
+exit 1
+```
+
+The twelve failures comprise the six review scenarios plus receipt aggregate
+fields, closing-pass churn exhaustion, cross-store stale aggregate CAS,
+post-create receipt drift, noncanonical receipt bytes, and the explicit
+retained-directory cleanup result.
+
+### Aggregate stable snapshot and CAS
+
+- `open`, `list`, every post-prepare/post-transition reopen, and every
+  authority check use a bounded aggregate protocol. The opening pass reads and
+  strictly parses the canonical manifest, then reads every fixed-path blob in
+  closed role order and verifies manifest hash/size binding. The closing pass
+  re-reads blobs in reverse order and reads the manifest last. Only exact
+  equality of manifest plus every blob observation returns a trusted record.
+- Equality covers path, in-process identity, exact text, byte length, SHA-256,
+  and `ctime`/`mtime`/`size`. A SHA-256 aggregate digest binds the manifest
+  observation and ordered blob observations. The private `WeakMap` handle now
+  stores that full snapshot, not only manifest ownership.
+- Mid-pass drift retries. Persistent malformed/corrupt bytes remain
+  `transaction_record_invalid`; churn after a complete vector exhausts as the
+  distinct typed `transaction_record_unstable`. Both stay inside the canonical
+  UUID folder's scope-local quarantine policy.
+- `transition`, receipt operations, and cleanup re-open and compare the entire
+  aggregate against the trusted snapshot. A same-byte replacement blob from a
+  second store therefore makes the first store's handle stale even though the
+  manifest bytes did not change.
+
+### Receipt authority closure and canonical records
+
+- Receipt payloads now include the durable manifest checksum and aggregate
+  digest in addition to transaction ID, exact scope paths, pair hashes, and
+  ordered history hashes; their checksum covers every field.
+- Receipt creation compares an aggregate snapshot before `createExclusive`,
+  then verifies the exact created receipt observation and obtains a closing
+  aggregate snapshot. Drift after possible creation becomes typed
+  `transaction_write_ambiguous/applied`; stale receipts remain inspectable and
+  cannot verify against the changed durable aggregate.
+- Receipt verification requires byte-for-byte canonical JSON, stable receipt
+  ownership, exact plan equality, exact durable manifest/aggregate binding,
+  and a final aggregate re-open before returning. Drift in the receipt-read
+  window fails as `transaction_receipt_invalid` and is quarantined locally.
+- Manifest and receipt parsers require raw text to equal the canonical
+  serializer output exactly: recursively sorted object keys, no insignificant
+  whitespace, preserved validated array order, and one trailing newline.
+  Quarantine metadata is produced through the same canonical serializer and is
+  never accepted as authority by a parser.
+
+### Directory identity safety
+
+- `DataAdapter.rmdir(path, recursive)` has no identity CAS in Obsidian 1.11.4.
+  Transaction cleanup therefore deletes only exact-owned files and retains the
+  empty UUID directory. The public cleanup result explicitly reports
+  `directory: "retained"`; deterministic listing ignores the inert empty
+  tombstone.
+- `removeEmptyFolderOwned` defaults to
+  `preserved/identity-delete-unsupported`. Fixture instrumentation proves no
+  `rmdir` call occurs and a same-path replacement `TFolder` is preserved.
+
+### R2 regression GREEN
+
+```text
+npm test -- tests/documents/ObsidianVaultFileStore.test.ts tests/documents/ObsidianTransactionStore.test.ts
+Test Files  2 passed (2)
+Tests       74 passed (74)
+exit 0
+
+npm run test:typecheck
+exit 0
+
+npm test
+Test Files  40 passed (40)
+Tests       926 passed (926)
+exit 0
+
+npm run build
 exit 0
 ```

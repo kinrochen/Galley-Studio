@@ -35,6 +35,7 @@ export interface PersistentObsidianHooks {
 export class PersistentObsidianBacking {
   readonly nodes = new Map<string, FakeNode>();
   readonly createdPaths: string[] = [];
+  readonly rmdirPaths: string[] = [];
   clock = 1_000;
 
   constructor(initialFiles: Readonly<Record<string, string>> = {}) {
@@ -104,6 +105,12 @@ export class PersistentObsidianBacking {
   remove(path: string): void {
     this.nodes.delete(path);
   }
+
+  replaceFolder(path: string): void {
+    const node = this.nodes.get(path);
+    if (node?.kind !== "folder") throw new Error("Missing folder");
+    this.nodes.set(path, { kind: "folder", folder: makeFolder(path) });
+  }
 }
 
 export function persistentObsidianVault(
@@ -135,6 +142,7 @@ export function persistentObsidianVault(
       return { files: files.sort(), folders: folders.sort() };
     },
     async rmdir(path: string, recursive: boolean): Promise<void> {
+      backing.rmdirPaths.push(path);
       hooks.beforeRmdir?.(path, backing);
       const node = backing.nodes.get(path);
       if (node?.kind !== "folder") throw new Error("Missing folder");

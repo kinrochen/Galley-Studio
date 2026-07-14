@@ -257,25 +257,36 @@ describe("ObsidianVaultFileStore", () => {
     expect(backing.nodes.get("created")?.kind).toBe("folder");
   });
 
-  it("uses non-recursive empty-folder removal and preserves a racing child", async () => {
+  it("preserves empty owned folders when the adapter cannot bind rmdir to identity", async () => {
     const backing = new PersistentObsidianBacking();
-    let injected = false;
     const store = new ObsidianVaultFileStore(
       persistentObsidianVault(backing, {
-        beforeRmdir(path) {
-          if (injected) return;
-          injected = true;
-          backing.replace(`${path}/peer.txt`, "peer");
+        beforeRmdir() {
+          throw new Error("path-only rmdir must not be called");
         }
       })
     );
-    await store.ensureFolder("folder");
     const folder = await store.createFolderExclusive("owned");
     if (folder.status !== "created") throw new Error("expected folder");
-    await expect(store.removeEmptyFolderOwned(folder.folder)).resolves.toMatchObject({
-      status: "ambiguous"
+    await expect(store.removeEmptyFolderOwned(folder.folder)).resolves.toEqual({
+      status: "preserved",
+      reason: "identity-delete-unsupported"
     });
-    expect(backing.read("owned/peer.txt")).toBe("peer");
+    expect(backing.nodes.get("owned")?.kind).toBe("folder");
+    expect(backing.rmdirPaths).toEqual([]);
+  });
+
+  it("never deletes a same-path replacement folder without an identity-CAS primitive", async () => {
+    const backing = new PersistentObsidianBacking();
+    const store = new ObsidianVaultFileStore(persistentObsidianVault(backing));
+    const folder = await store.createFolderExclusive("owned");
+    if (folder.status !== "created") throw new Error("expected folder");
+    backing.replaceFolder("owned");
+    await expect(store.removeEmptyFolderOwned(folder.folder)).resolves.toEqual({
+      status: "conflict"
+    });
+    expect(backing.nodes.get("owned")?.kind).toBe("folder");
+    expect(backing.rmdirPaths).toEqual([]);
   });
 
   it.each(["notes/a\u0080b.txt", "notes/a\u0085b.txt", "notes/a\u009fb.txt", "notes/a\u200bb.txt"])(

@@ -112,6 +112,13 @@ export type VaultConditionalRemoveResult =
   | { readonly status: "conflict" }
   | VaultMutationAmbiguity;
 
+export type VaultConditionalRemoveFolderResult =
+  | { readonly status: "conflict" }
+  | {
+      readonly status: "preserved";
+      readonly reason: "identity-delete-unsupported";
+    };
+
 export type VaultCreateFolderExclusiveResult =
   | { readonly status: "created"; readonly folder: VaultOwnedFolder }
   | { readonly status: "collision" }
@@ -402,43 +409,14 @@ export class ObsidianVaultFileStore {
   async removeEmptyFolderOwned(
     owned: VaultOwnedFolder,
     signal?: AbortSignal
-  ): Promise<VaultConditionalRemoveResult> {
+  ): Promise<VaultConditionalRemoveFolderResult> {
     const path = canonicalVaultPath(owned.path);
     throwIfAborted(signal);
     if (this.vault.getFolderByPath(path) !== owned.identity) return { status: "conflict" };
-    if ((await this.list(path, signal)).length > 0) return { status: "conflict" };
-    throwIfAborted(signal);
-    if (this.vault.getFolderByPath(path) !== owned.identity) {
-      return { status: "conflict" };
-    }
-    try {
-      await this.vault.adapter.rmdir(path, false);
-    } catch (error) {
-      return {
-        status: "ambiguous",
-        operation: "remove-folder",
-        outcome: this.vault.getAbstractFileByPath(path) ? "unknown" : "applied",
-        aborted: signal?.aborted === true,
-        error
-      };
-    }
-    if (signal?.aborted) {
-      return {
-        status: "ambiguous",
-        operation: "remove-folder",
-        outcome: this.vault.getAbstractFileByPath(path) ? "unknown" : "applied",
-        aborted: true,
-        error: new DOMException("Aborted", "AbortError")
-      };
-    }
-    return this.vault.getAbstractFileByPath(path)
-      ? {
-          status: "ambiguous",
-          operation: "remove-folder",
-          outcome: "unknown",
-          aborted: false
-        }
-      : { status: "removed" };
+    // Obsidian 1.11.4 exposes only path-based DataAdapter.rmdir. A path check
+    // cannot bind that mutation to `owned.identity`, so retaining an inert
+    // empty folder is the only identity-safe behavior on this platform.
+    return { status: "preserved", reason: "identity-delete-unsupported" };
   }
 
   async #observeAfterPossibleMutation(

@@ -84,6 +84,8 @@ export interface TransactionReceiptPlan {
 export interface VerifiedTransactionReceipt extends TransactionReceiptPlan {
   readonly schemaVersion: 1;
   readonly transactionId: string;
+  readonly manifestChecksum: string;
+  readonly aggregateDigest: string;
   readonly checksum: string;
 }
 
@@ -91,6 +93,7 @@ export interface ObsidianTransactionStoreOptions {
   readonly randomUUID?: () => string;
   readonly now?: () => Date;
   readonly maxPrepareAttempts?: number;
+  readonly maxSnapshotAttempts?: number;
 }
 
 export class TransactionRecordInvalidError extends Error {
@@ -99,6 +102,15 @@ export class TransactionRecordInvalidError extends Error {
   constructor() {
     super("Galley transaction storage contains an invalid or drifted record.");
     this.name = "TransactionRecordInvalidError";
+  }
+}
+
+export class TransactionRecordUnstableError extends Error {
+  readonly code = "transaction_record_unstable";
+
+  constructor() {
+    super("Galley could not obtain one stable aggregate transaction record.");
+    this.name = "TransactionRecordUnstableError";
   }
 }
 
@@ -173,6 +185,8 @@ interface TransactionManifest {
 interface ReceiptData extends TransactionReceiptPlan {
   schemaVersion: 1;
   transactionId: string;
+  manifestChecksum: string;
+  aggregateDigest: string;
   checksum: string;
 }
 
@@ -184,12 +198,18 @@ interface OpenedTransaction {
   readonly record: TransactionRecord;
   readonly blobs: readonly OwnedStoredTransactionBlob[];
   readonly manifestOwnership: VaultOwnedFile;
-  readonly folderOwnership: VaultOwnedFolder;
+  readonly aggregateDigest: string;
 }
 
 interface TrustedTransactionHandle {
   readonly id: string;
+  readonly aggregate: AggregateSnapshot;
+}
+
+interface AggregateSnapshot {
+  readonly digest: string;
   readonly manifestOwnership: VaultOwnedFile;
+  readonly blobOwnerships: readonly VaultOwnedFile[];
 }
 
 const BLOB_FILENAMES: Readonly<Record<TransactionBlobRole, string>> = {
@@ -208,6 +228,7 @@ const MAX_MANIFEST_BYTES = 64 * 1024;
 const MAX_BLOB_BYTES = 8 * 1024 * 1024;
 const MAX_TOTAL_BLOB_BYTES = 32 * 1024 * 1024;
 const MAX_SCOPE_PATH = 1024;
+const DEFAULT_SNAPSHOT_ATTEMPTS = 4;
 const SHA256 = /^[a-f0-9]{64}$/u;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const NEXT_PHASE: Readonly<Partial<Record<TransactionPhase, TransactionPhase>>> = {
@@ -220,6 +241,7 @@ export class ObsidianTransactionStore {
   readonly #randomUUID: () => string;
   readonly #now: () => Date;
   readonly #maxPrepareAttempts: number;
+  readonly #maxSnapshotAttempts: number;
   readonly #handles = new WeakMap<TransactionRecord, TrustedTransactionHandle>();
 
   constructor(
@@ -229,12 +251,20 @@ export class ObsidianTransactionStore {
     this.#randomUUID = options.randomUUID ?? (() => globalThis.crypto.randomUUID());
     this.#now = options.now ?? (() => new Date());
     this.#maxPrepareAttempts = options.maxPrepareAttempts ?? 128;
+    this.#maxSnapshotAttempts = options.maxSnapshotAttempts ?? DEFAULT_SNAPSHOT_ATTEMPTS;
     if (
       !Number.isSafeInteger(this.#maxPrepareAttempts) ||
       this.#maxPrepareAttempts < 1 ||
       this.#maxPrepareAttempts > 1024
     ) {
       throw new Error("Galley transaction prepare attempts are invalid.");
+    }
+    if (
+      !Number.isSafeInteger(this.#maxSnapshotAttempts) ||
+      this.#maxSnapshotAttempts < 1 ||
+      this.#maxSnapshotAttempts > 32
+    ) {
+      throw new Error("Galley transaction snapshot attempts are invalid.");
     }
   }
 
@@ -355,7 +385,13 @@ export class ObsidianTransactionStore {
         if (signal?.aborted) {
           throw new DOMException("Aborted", "AbortError");
         }
-        if (!sameOwned(opened.manifestOwnership, manifestResult.file)) {
+        if (
+          !sameOwned(opened.manifestOwnership, manifestResult.file) ||
+          !sameOwnedList(
+            opened.blobs.map(({ ownership }) => ownership),
+            ownedBlobs.map(({ ownership }) => ownership)
+          )
+        ) {
           throw new TransactionRecordInvalidError();
         }
         return this.#brand(opened);
@@ -373,7 +409,12 @@ export class ObsidianTransactionStore {
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") throw error;
       await this.#quarantineBestEffort(canonicalId, "record-invalid");
-      if (error instanceof TransactionRecordInvalidError) throw error;
+      if (
+        error instanceof TransactionRecordInvalidError ||
+        error instanceof TransactionRecordUnstableError
+      ) {
+        throw error;
+      }
       throw new TransactionRecordInvalidError();
     }
   }
@@ -389,6 +430,9 @@ export class ObsidianTransactionStore {
     for (const entry of entries) {
       if (entry.kind !== "folder" || !UUID.test(entry.name)) continue;
       try {
+        // Completed cleanup leaves an intentionally inert empty UUID folder
+        // because Obsidian has no identity-conditional directory delete.
+        if ((await this.files.list(entry.path, signal)).length === 0) continue;
         const record = await this.open(entry.name, signal);
         if (sameScope(record.scope, expected)) records.push(record);
       } catch (error) {
@@ -449,7 +493,11 @@ export class ObsidianTransactionStore {
       }
       if (
         reopened.record.phase !== next ||
-        !sameOwned(reopened.manifestOwnership, result.file)
+        !sameOwned(reopened.manifestOwnership, result.file) ||
+        !sameOwnedList(
+          reopened.blobs.map(({ ownership }) => ownership),
+          current.blobs.map(({ ownership }) => ownership)
+        )
       ) {
         throw new TransactionRecordInvalidError();
       }
@@ -479,9 +527,15 @@ export class ObsidianTransactionStore {
     const receipt = await signed({
       schemaVersion: 1 as const,
       transactionId: current.record.id,
+      manifestChecksum: current.record.checksum,
+      aggregateDigest: current.aggregateDigest,
       pair: checked.pair,
       historyHashes: [...checked.historyHashes]
     });
+    const beforeCreate = await this.#currentFor(record, signal);
+    if (!sameAggregate(current, beforeCreate)) {
+      throw new TransactionWriteConflictError();
+    }
     const path = `${transactionFolder(current.record.id)}/${RECEIPT_NAME}`;
     const result = await this.files.createExclusive(path, serializeCanonical(receipt), signal);
     if (result.status === "ambiguous") {
@@ -499,7 +553,19 @@ export class ObsidianTransactionStore {
         new DOMException("Aborted", "AbortError")
       );
     }
-    return freezeReceipt(receipt);
+    try {
+      const receiptOwned = await this.files.readTextStable(path, signal);
+      const afterCreate = await this.#currentFor(record, signal);
+      if (
+        !sameAggregate(current, afterCreate) ||
+        !sameOwned(receiptOwned, result.file)
+      ) {
+        throw new TransactionWriteConflictError();
+      }
+      return freezeReceipt(receipt);
+    } catch (error) {
+      throw new TransactionWriteAmbiguousError(current.record.id, "applied", error);
+    }
   }
 
   async verifyReceipt(
@@ -517,40 +583,24 @@ export class ObsidianTransactionStore {
         throw new TransactionReceiptInvalidError();
       }
       const path = `${transactionFolder(current.record.id)}/${RECEIPT_NAME}`;
-      const owned = await this.files.readTextStable(path, signal);
-      if (!owned || owned.byteLength > MAX_MANIFEST_BYTES) {
+      const firstOwned = await this.files.readTextStable(path, signal);
+      if (!firstOwned || firstOwned.byteLength > MAX_MANIFEST_BYTES) {
         throw new TransactionReceiptInvalidError();
       }
-      const value = parseObject(owned.text);
-      exactKeys(value, [
-        "schemaVersion",
-        "transactionId",
-        "pair",
-        "historyHashes",
-        "checksum"
-      ]);
-      if (value.schemaVersion !== 1 || value.transactionId !== current.record.id) {
+      const parsed = await parseReceipt(firstOwned.text, current, plan);
+      const closing = await this.#currentFor(record, signal);
+      if (!sameAggregate(current, closing)) {
         throw new TransactionReceiptInvalidError();
       }
-      const parsedPlan = validReceiptPlan({
-        pair: value.pair as TransactionReceiptPlan["pair"],
-        historyHashes: value.historyHashes as string[]
-      });
-      const checksum = stringValue(value.checksum);
-      const unsigned = {
-        schemaVersion: 1 as const,
-        transactionId: current.record.id,
-        pair: parsedPlan.pair,
-        historyHashes: [...parsedPlan.historyHashes]
-      };
-      if (
-        !SHA256.test(checksum) ||
-        checksum !== (await sha256Text(canonicalJson(unsigned))) ||
-        canonicalJson(parsedPlan) !== canonicalJson(plan)
-      ) {
+      const secondOwned = await this.files.readTextStable(path, signal);
+      if (!sameOwned(secondOwned, firstOwned)) {
         throw new TransactionReceiptInvalidError();
       }
-      return freezeReceipt({ ...unsigned, checksum });
+      const finalAggregate = await this.#currentFor(record, signal);
+      if (!sameAggregate(current, finalAggregate)) {
+        throw new TransactionReceiptInvalidError();
+      }
+      return freezeReceipt(parsed);
     } catch (error) {
       await this.#quarantineBestEffort(current.record.id, "receipt-invalid");
       if (error instanceof TransactionReceiptInvalidError) throw error;
@@ -561,13 +611,18 @@ export class ObsidianTransactionStore {
   async cleanup(
     record: TransactionRecord,
     signal?: AbortSignal
-  ): Promise<{ status: "cleaned" | "conflict" | "ambiguous" }> {
+  ): Promise<
+    | { status: "cleaned"; directory: "retained" }
+    | { status: "conflict" }
+    | { status: "ambiguous" }
+  > {
     let currentRecord: OpenedTransaction;
     try {
       currentRecord = await this.#currentFor(record, signal);
     } catch (error) {
       if (
         error instanceof TransactionRecordInvalidError ||
+        error instanceof TransactionRecordUnstableError ||
         error instanceof TransactionWriteConflictError
       ) {
         return { status: "conflict" };
@@ -601,6 +656,19 @@ export class ObsidianTransactionStore {
       const owned = await this.files.readTextStable(`${folderPath}/${name}`, signal);
       if (owned) optional.push(owned);
     }
+    try {
+      const beforeDelete = await this.#currentFor(record, signal);
+      if (!sameAggregate(currentRecord, beforeDelete)) return { status: "conflict" };
+    } catch (error) {
+      if (
+        error instanceof TransactionRecordInvalidError ||
+        error instanceof TransactionRecordUnstableError ||
+        error instanceof TransactionWriteConflictError
+      ) {
+        return { status: "conflict" };
+      }
+      throw error;
+    }
     let mutated = false;
     for (const owned of [
       ...currentRecord.blobs.map(({ ownership }) => ownership),
@@ -618,23 +686,57 @@ export class ObsidianTransactionStore {
       if (result.status === "ambiguous") return { status: "ambiguous" };
       mutated = true;
     }
-    let folder;
-    try {
-      folder = await this.files.removeEmptyFolderOwned(
-        currentRecord.folderOwnership,
-        signal
-      );
-    } catch {
-      return { status: "ambiguous" };
-    }
-    return folder.status === "removed"
-      ? { status: "cleaned" }
-      : folder.status === "conflict"
-        ? { status: "conflict" }
-        : { status: "ambiguous" };
+    return { status: "cleaned", directory: "retained" };
   }
 
   async #openStrict(id: string, signal?: AbortSignal): Promise<OpenedTransaction> {
+    let sawCompleteVector = false;
+    let sawAggregateDrift = false;
+    let lastInvalid: TransactionRecordInvalidError | undefined;
+    for (let attempt = 0; attempt < this.#maxSnapshotAttempts; attempt += 1) {
+      let opening: OpenedTransaction;
+      try {
+        opening = await this.#readVectorOnce(id, signal);
+        sawCompleteVector = true;
+      } catch (error) {
+        if (error instanceof TransactionRecordInvalidError) {
+          lastInvalid = error;
+          if (sawCompleteVector) sawAggregateDrift = true;
+          continue;
+        }
+        if (isVaultReadUnstable(error)) {
+          sawAggregateDrift = true;
+          continue;
+        }
+        throw error;
+      }
+
+      let closing: OpenedTransaction;
+      try {
+        closing = await this.#readClosingVector(id, opening, signal);
+      } catch (error) {
+        if (error instanceof TransactionRecordInvalidError) {
+          lastInvalid = error;
+          sawAggregateDrift = true;
+          continue;
+        }
+        if (isVaultReadUnstable(error)) {
+          sawAggregateDrift = true;
+          continue;
+        }
+        throw error;
+      }
+      if (sameAggregate(opening, closing)) return closing;
+      sawAggregateDrift = true;
+    }
+    if (sawAggregateDrift) throw new TransactionRecordUnstableError();
+    throw lastInvalid ?? new TransactionRecordInvalidError();
+  }
+
+  async #readVectorOnce(
+    id: string,
+    signal?: AbortSignal
+  ): Promise<OpenedTransaction> {
     const folderPath = transactionFolder(id);
     const manifestOwned = await this.files.readTextStable(
       `${folderPath}/${MANIFEST_NAME}`,
@@ -663,10 +765,10 @@ export class ObsidianTransactionStore {
       });
     }
     const rootEntries = await this.files.list(TRANSACTION_ROOT, signal);
-    const folderEntry = rootEntries.find(
+    const hasFolder = rootEntries.some(
       ({ path, kind }) => path === folderPath && kind === "folder"
     );
-    if (!folderEntry) throw new TransactionRecordInvalidError();
+    if (!hasFolder) throw new TransactionRecordInvalidError();
     const record: TransactionRecord = {
       schemaVersion: 1,
       id,
@@ -678,14 +780,90 @@ export class ObsidianTransactionStore {
       updatedAt: manifest.updatedAt,
       checksum: manifest.checksum
     };
+    const aggregateDigest = await transactionAggregateDigest(
+      manifestOwned,
+      storedBlobs.map(({ ownership }) => ownership)
+    );
     return {
       record,
       blobs: storedBlobs,
       manifestOwnership: manifestOwned,
-      folderOwnership: {
-        path: folderPath,
-        identity: folderEntry.identity as VaultOwnedFolder["identity"]
+      aggregateDigest
+    };
+  }
+
+  async #readClosingVector(
+    id: string,
+    opening: OpenedTransaction,
+    signal?: AbortSignal
+  ): Promise<OpenedTransaction> {
+    const folderPath = transactionFolder(id);
+    const reversed: OwnedStoredTransactionBlob[] = [];
+    for (const blob of [...opening.record.blobs].reverse()) {
+      const path = `${folderPath}/${BLOB_FILENAMES[blob.role]}`;
+      const owned = await this.files.readTextStable(path, signal);
+      if (
+        !owned ||
+        owned.byteLength !== blob.byteLength ||
+        owned.sha256 !== blob.sha256
+      ) {
+        throw new TransactionRecordInvalidError();
       }
+      reversed.push({ ...blob, path, text: owned.text, ownership: owned });
+    }
+    const storedBlobs = reversed.reverse();
+    const rootEntries = await this.files.list(TRANSACTION_ROOT, signal);
+    if (
+      !rootEntries.some(
+        ({ path, kind }) => path === folderPath && kind === "folder"
+      )
+    ) {
+      throw new TransactionRecordInvalidError();
+    }
+    // Manifest is deliberately the final durable member read. This closes
+    // both an earlier-blob/later-blob window and scope/metadata drift during
+    // the blob pass.
+    const manifestOwned = await this.files.readTextStable(
+      `${folderPath}/${MANIFEST_NAME}`,
+      signal
+    );
+    if (!manifestOwned || manifestOwned.byteLength > MAX_MANIFEST_BYTES) {
+      throw new TransactionRecordInvalidError();
+    }
+    const manifest = await parseManifest(manifestOwned.text, id);
+    if (
+      canonicalJson(manifest.blobs) !==
+      canonicalJson(
+        opening.record.blobs.map(({ role, filename, byteLength, sha256 }) => ({
+          role,
+          filename,
+          byteLength,
+          sha256
+        }))
+      )
+    ) {
+      throw new TransactionRecordInvalidError();
+    }
+    const record: TransactionRecord = {
+      schemaVersion: 1,
+      id,
+      kind: manifest.kind,
+      phase: manifest.phase,
+      scope: manifest.scope,
+      blobs: storedBlobs.map(({ ownership: _ownership, ...blob }) => blob),
+      createdAt: manifest.createdAt,
+      updatedAt: manifest.updatedAt,
+      checksum: manifest.checksum
+    };
+    const aggregateDigest = await transactionAggregateDigest(
+      manifestOwned,
+      storedBlobs.map(({ ownership }) => ownership)
+    );
+    return {
+      record,
+      blobs: storedBlobs,
+      manifestOwnership: manifestOwned,
+      aggregateDigest
     };
   }
 
@@ -697,7 +875,7 @@ export class ObsidianTransactionStore {
     if (!handle) throw new TransactionHandleUntrustedError();
     throwIfAborted(signal);
     const current = await this.#openStrict(handle.id, signal);
-    if (!sameOwned(current.manifestOwnership, handle.manifestOwnership)) {
+    if (!sameAggregateSnapshot(snapshotOf(current), handle.aggregate)) {
       throw new TransactionWriteConflictError();
     }
     return current;
@@ -707,7 +885,7 @@ export class ObsidianTransactionStore {
     const record = freezeRecord(opened.record);
     this.#handles.set(record, {
       id: record.id,
-      manifestOwnership: opened.manifestOwnership
+      aggregate: snapshotOf(opened)
     });
     return record;
   }
@@ -814,6 +992,10 @@ async function parseManifest(text: string, expectedId: string): Promise<Transact
   if (
     new Set(blobs.map(({ role }) => role)).size !== blobs.length ||
     new Set(blobs.map(({ filename }) => filename)).size !== blobs.length ||
+    blobs.some(
+      (blob, index) =>
+        index > 0 && compareText(blobs[index - 1]!.role, blob.role) >= 0
+    ) ||
     blobs.reduce((sum, blob) => sum + blob.byteLength, 0) > MAX_TOTAL_BLOB_BYTES
   ) {
     throw new TransactionRecordInvalidError();
@@ -834,7 +1016,58 @@ async function parseManifest(text: string, expectedId: string): Promise<Transact
   if (!SHA256.test(checksum) || checksum !== (await sha256Text(canonicalJson(unsigned)))) {
     throw new TransactionRecordInvalidError();
   }
-  return { ...unsigned, checksum };
+  const manifest = { ...unsigned, checksum };
+  if (text !== serializeCanonical(manifest)) throw new TransactionRecordInvalidError();
+  return manifest;
+}
+
+async function parseReceipt(
+  text: string,
+  transaction: OpenedTransaction,
+  expected: TransactionReceiptPlan
+): Promise<ReceiptData> {
+  const value = parseObject(text);
+  exactKeys(value, [
+    "schemaVersion",
+    "transactionId",
+    "manifestChecksum",
+    "aggregateDigest",
+    "pair",
+    "historyHashes",
+    "checksum"
+  ]);
+  if (value.schemaVersion !== 1 || value.transactionId !== transaction.record.id) {
+    throw new TransactionReceiptInvalidError();
+  }
+  const plan = validReceiptPlan({
+    pair: value.pair as TransactionReceiptPlan["pair"],
+    historyHashes: value.historyHashes as string[]
+  });
+  const manifestChecksum = stringValue(value.manifestChecksum);
+  const aggregateDigest = stringValue(value.aggregateDigest);
+  const checksum = stringValue(value.checksum);
+  const unsigned = {
+    schemaVersion: 1 as const,
+    transactionId: transaction.record.id,
+    manifestChecksum,
+    aggregateDigest,
+    pair: plan.pair,
+    historyHashes: [...plan.historyHashes]
+  };
+  const receipt = { ...unsigned, checksum };
+  if (
+    !SHA256.test(manifestChecksum) ||
+    !SHA256.test(aggregateDigest) ||
+    !SHA256.test(checksum) ||
+    manifestChecksum !== transaction.record.checksum ||
+    aggregateDigest !== transaction.aggregateDigest ||
+    checksum !== (await sha256Text(canonicalJson(unsigned))) ||
+    canonicalJson(plan) !== canonicalJson(expected) ||
+    text !== serializeCanonical(receipt)
+  ) {
+    throw new TransactionReceiptInvalidError();
+  }
+  return receipt;
 }
 
 function validScope(scope: TransactionScope): TransactionScope {
@@ -1030,7 +1263,81 @@ function sameOwned(
     left.identity === right.identity &&
     left.text === right.text &&
     left.sha256 === right.sha256 &&
-    left.byteLength === right.byteLength
+    left.byteLength === right.byteLength &&
+    left.stat.ctime === right.stat.ctime &&
+    left.stat.mtime === right.stat.mtime &&
+    left.stat.size === right.stat.size
+  );
+}
+
+function sameOwnedList(
+  left: readonly VaultOwnedFile[],
+  right: readonly VaultOwnedFile[]
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((owned, index) => sameOwned(owned, right[index]!))
+  );
+}
+
+function snapshotOf(opened: OpenedTransaction): AggregateSnapshot {
+  return {
+    digest: opened.aggregateDigest,
+    manifestOwnership: opened.manifestOwnership,
+    blobOwnerships: opened.blobs.map(({ ownership }) => ownership)
+  };
+}
+
+function sameAggregate(
+  left: OpenedTransaction,
+  right: OpenedTransaction
+): boolean {
+  return sameAggregateSnapshot(snapshotOf(left), snapshotOf(right));
+}
+
+function sameAggregateSnapshot(
+  left: AggregateSnapshot,
+  right: AggregateSnapshot
+): boolean {
+  return (
+    left.digest === right.digest &&
+    sameOwned(left.manifestOwnership, right.manifestOwnership) &&
+    sameOwnedList(left.blobOwnerships, right.blobOwnerships)
+  );
+}
+
+async function transactionAggregateDigest(
+  manifest: VaultOwnedFile,
+  blobs: readonly VaultOwnedFile[]
+): Promise<string> {
+  return sha256Text(
+    canonicalJson({
+      schemaVersion: 1,
+      manifest: aggregateEvidence(manifest),
+      blobs: blobs.map(aggregateEvidence)
+    })
+  );
+}
+
+function aggregateEvidence(owned: VaultOwnedFile): Record<string, unknown> {
+  return {
+    path: owned.path,
+    sha256: owned.sha256,
+    byteLength: owned.byteLength,
+    stat: {
+      ctime: owned.stat.ctime,
+      mtime: owned.stat.mtime,
+      size: owned.stat.size
+    }
+  };
+}
+
+function isVaultReadUnstable(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === "vault_file_read_unstable"
   );
 }
 
