@@ -7,3 +7,8 @@ Galley preserves attribution to the upstream `gzh-design-skill` project:
 - Source: https://github.com/isjiamu/gzh-design-skill
 - Pinned commit: `ba1f4175519b481cb3566616c9e5178705067904`
 - License: GNU Affero General Public License v3.0 (AGPL-3.0)
+
+Galley embeds the regular files from that pinned, clean checkout, excluding
+Git metadata and upstream GitHub workflow metadata. The embedded package
+includes the upstream license and source files. Bundled scripts are exposed
+to the Skill runtime as read-only text and are not executed by Galley.

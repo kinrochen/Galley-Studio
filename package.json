@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "node esbuild.config.mjs --watch",
     "build": "tsc --noEmit && node esbuild.config.mjs production",
+    "embed:gzh-skill": "node tools/embed-gzh-skill.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:typecheck": "tsc -p tsconfig.test.json --noEmit"
