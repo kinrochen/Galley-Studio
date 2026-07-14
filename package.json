@@ -4,8 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node esbuild.config.mjs --watch",
-    "build": "tsc --noEmit && node esbuild.config.mjs production",
+    "dev": "npm run embed:hugerte && node esbuild.config.mjs --watch",
+    "build": "npm run embed:hugerte && tsc --noEmit && node esbuild.config.mjs production",
+    "embed:hugerte": "node tools/embed-hugerte-assets.mjs",
     "embed:gzh-skill": "node tools/embed-gzh-skill.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -14,6 +15,7 @@
   "dependencies": {
     "dompurify": "3.4.12",
     "fflate": "0.8.3",
+    "hugerte": "1.0.12",
     "mdast-util-from-markdown": "2.0.3",
     "mdast-util-gfm": "3.1.0",
     "micromark-extension-gfm": "3.0.0",

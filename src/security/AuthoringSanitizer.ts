@@ -178,6 +178,23 @@ const PURIFY_CONFIG: Config = {
   RETURN_TRUSTED_TYPE: false
 };
 
+const DOCUMENT_ONLY_TAGS = new Set(["html", "head", "body", "title", "meta"]);
+const HUGERTE_GLOBAL_ATTRIBUTES = [
+  ...GLOBAL_ATTRIBUTES,
+  "aria-*",
+  ...GALLEY_ATTRIBUTES
+];
+
+export const HUGERTE_VALID_ELEMENTS = [
+  `@[${HUGERTE_GLOBAL_ATTRIBUTES.join("|")}]`,
+  ...ALLOWED_TAGS.filter((tag) => !DOCUMENT_ONLY_TAGS.has(tag)).map((tag) => {
+    const attributes = TAG_ATTRIBUTES[tag];
+    return attributes?.size
+      ? `${tag}[${[...attributes].join("|")}]`
+      : tag;
+  })
+].join(",");
+
 export function sanitizeAuthoringDocument(html: string): SanitizedDocument {
   const source = html.trim();
   locateHtmlDocument(source, {
