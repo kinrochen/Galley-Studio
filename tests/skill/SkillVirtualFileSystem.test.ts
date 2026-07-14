@@ -29,7 +29,13 @@ it.each([
   "..",
   "../secret",
   "/etc/passwd",
+  "C:secret",
   "C:\\Windows\\system.ini",
+  "file:secret",
+  "data:text/plain,x",
+  "https:/host/x",
+  "git+ssh:host/x",
+  "a.b-c:value",
   "https://example.com/x",
   "file:///etc/passwd",
   "references/../../x",
@@ -48,6 +54,17 @@ it("rejects valid but unregistered paths", () => {
   );
 });
 
+it.each([
+  "C:secret",
+  "file:secret",
+  "data:text/plain,x",
+  "https:/host/x"
+])("rejects drive and scheme path %j at the read boundary", (path) => {
+  const vfs = new SkillVirtualFileSystem(files);
+
+  expect(() => vfs.read(path)).toThrow(/Invalid skill path/);
+});
+
 it("copies the allowlist so callers cannot mutate the virtual filesystem", () => {
   const mutableFiles = new Map(files);
   const vfs = new SkillVirtualFileSystem(mutableFiles);
@@ -61,4 +78,15 @@ it("rejects non-normalized allowlist entries", () => {
   expect(
     () => new SkillVirtualFileSystem(new Map([["./SKILL.md", "workflow"]]))
   ).toThrow(/registered path must be normalized/);
+});
+
+it.each([
+  "C:secret",
+  "file:secret",
+  "data:text/plain,x",
+  "https:/host/x"
+])("rejects drive and scheme path %j at registration", (path) => {
+  expect(
+    () => new SkillVirtualFileSystem(new Map([[path, "untrusted"]]))
+  ).toThrow(/Invalid skill path/);
 });

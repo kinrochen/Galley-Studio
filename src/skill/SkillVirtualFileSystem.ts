@@ -3,8 +3,8 @@ export function normalizeSkillPath(input: string): string {
   if (
     !value ||
     value.startsWith("/") ||
-    /^[a-z]+:\/\//i.test(value) ||
-    /^[a-z]:\//i.test(value)
+    /^[a-z]:/i.test(value) ||
+    /^[a-z][a-z0-9+.-]*:/i.test(value)
   ) {
     throw new Error(`Invalid skill path: ${input}`);
   }

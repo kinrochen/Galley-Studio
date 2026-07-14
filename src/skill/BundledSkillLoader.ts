@@ -6,6 +6,10 @@ import { normalizeSkillPath } from "./SkillVirtualFileSystem";
 
 export const PINNED_GZH_DESIGN_VERSION =
   "ba1f4175519b481cb3566616c9e5178705067904";
+const TRUSTED_ARCHIVE_SHA256 =
+  "8b8b521997cf4e7c3073a390c1fe0a4af19580835edfb4e024670457e46fdc00";
+const TRUSTED_MANIFEST_SHA256 =
+  "bd1395a87faabebada1681560aaa1ac6fd47d7b3d4c3acbbd91bde88b391824f";
 
 export interface EmbeddedSkillPackage {
   readonly id: string;
@@ -72,6 +76,14 @@ export class BundledSkillLoader {
 
   async load(): Promise<SkillPackage> {
     const manifest = validateManifest(this.#data);
+    const manifestBytes = new TextEncoder().encode(JSON.stringify(manifest));
+    if ((await sha256(manifestBytes)) !== TRUSTED_MANIFEST_SHA256) {
+      throw new Error("Bundled Skill does not match trusted manifest digest");
+    }
+    if (this.#data.archiveSha256 !== TRUSTED_ARCHIVE_SHA256) {
+      throw new Error("Bundled Skill does not match trusted archive hash");
+    }
+
     let archive: Uint8Array<ArrayBuffer>;
     try {
       archive = decodeBase64(this.#data.archiveBase64);
@@ -79,7 +91,7 @@ export class BundledSkillLoader {
       throw new Error("Bundled Skill integrity check failed");
     }
 
-    if ((await sha256(archive)) !== this.#data.archiveSha256) {
+    if ((await sha256(archive)) !== TRUSTED_ARCHIVE_SHA256) {
       throw new Error("Bundled Skill integrity check failed");
     }
 

@@ -1,9 +1,36 @@
+import { strToU8, unzipSync, zipSync } from "fflate";
 import { expect, it } from "vitest";
 import { BUNDLED_SKILL } from "../../src/generated/bundledSkill";
 import {
   BundledSkillLoader,
+  type EmbeddedSkillPackage,
   PINNED_GZH_DESIGN_VERSION
 } from "../../src/skill/BundledSkillLoader";
+
+async function sha256(bytes: Uint8Array): Promise<string> {
+  const stableBytes = Uint8Array.from(bytes);
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", stableBytes);
+  return [...new Uint8Array(digest)]
+    .map((value) => value.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+async function replacementDescriptor(
+  files: Record<string, Uint8Array>
+): Promise<EmbeddedSkillPackage> {
+  const archive = zipSync(files, {
+    level: 9,
+    mtime: new Date(1980, 0, 1, 0, 0, 0)
+  });
+
+  return {
+    id: BUNDLED_SKILL.id,
+    version: BUNDLED_SKILL.version,
+    archiveSha256: await sha256(archive),
+    files: Object.keys(files).sort(),
+    archiveBase64: Buffer.from(archive).toString("base64")
+  };
+}
 
 it("loads the complete pinned gzh-design package as text", async () => {
   const skill = await new BundledSkillLoader().load();
@@ -30,6 +57,28 @@ it("rejects archive bytes that do not match the package hash", async () => {
   );
 });
 
+it("rejects a self-consistent replacement archive under the pinned identity", async () => {
+  const replacementFiles = unzipSync(
+    Buffer.from(BUNDLED_SKILL.archiveBase64, "base64")
+  );
+  replacementFiles["SKILL.md"] = strToU8("replacement workflow");
+  const replacement = await replacementDescriptor(replacementFiles);
+
+  await expect(new BundledSkillLoader(replacement).load()).rejects.toThrow(
+    /trusted archive hash/
+  );
+});
+
+it("rejects a self-consistent replacement manifest and archive", async () => {
+  const replacement = await replacementDescriptor({
+    "SKILL.md": strToU8("replacement workflow")
+  });
+
+  await expect(new BundledSkillLoader(replacement).load()).rejects.toThrow(
+    /trusted manifest digest/
+  );
+});
+
 it("rejects a manifest that does not register every archive entry", async () => {
   const incompleteManifest = {
     ...BUNDLED_SKILL,
@@ -38,7 +87,7 @@ it("rejects a manifest that does not register every archive entry", async () => 
 
   await expect(
     new BundledSkillLoader(incompleteManifest).load()
-  ).rejects.toThrow(/manifest does not match archive/);
+  ).rejects.toThrow(/trusted manifest digest/);
 });
 
 it("rejects a package with a different version", async () => {
