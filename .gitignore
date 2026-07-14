@@ -1,0 +1,8 @@
+.DS_Store
+.superpowers/
+node_modules/
+dist/
+main.js
+*.log
+coverage/
+
