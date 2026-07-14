@@ -68,6 +68,8 @@ export interface TransactionRecord {
   readonly blobs: readonly StoredTransactionBlob[];
   readonly createdAt: string;
   readonly updatedAt: string;
+  readonly committedManifestChecksum?: string;
+  readonly committedAggregateDigest?: string;
   readonly checksum: string;
 }
 
@@ -86,6 +88,24 @@ export interface VerifiedTransactionReceipt extends TransactionReceiptPlan {
   readonly transactionId: string;
   readonly manifestChecksum: string;
   readonly aggregateDigest: string;
+  readonly checksum: string;
+}
+
+export interface TransactionQuarantineEvidence {
+  readonly path: string;
+  readonly state: "absent" | "present" | "unreadable";
+  readonly sha256?: string;
+  readonly byteLength?: number;
+}
+
+export interface VerifiedTransactionQuarantine {
+  readonly schemaVersion: 2;
+  readonly transactionId: string;
+  readonly reason: "target-drift";
+  readonly manifestChecksum: string;
+  readonly aggregateDigest: string;
+  readonly evidence: readonly TransactionQuarantineEvidence[];
+  readonly quarantinedAt: string;
   readonly checksum: string;
 }
 
@@ -179,6 +199,8 @@ interface TransactionManifest {
   blobs: ManifestBlob[];
   createdAt: string;
   updatedAt: string;
+  committedManifestChecksum?: string;
+  committedAggregateDigest?: string;
   checksum: string;
 }
 
@@ -199,6 +221,8 @@ interface QuarantineData {
   quarantinedAt: string;
   checksum: string;
 }
+
+interface TargetQuarantineData extends VerifiedTransactionQuarantine {}
 
 interface OwnedStoredTransactionBlob extends StoredTransactionBlob {
   readonly ownership: VaultOwnedFile;
@@ -245,6 +269,7 @@ const MAX_SCOPE_PATH = 1024;
 const DEFAULT_SNAPSHOT_ATTEMPTS = 4;
 const SHA256 = /^[a-f0-9]{64}$/u;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const HISTORY_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 const NEXT_PHASE: Readonly<Partial<Record<TransactionPhase, TransactionPhase>>> = {
   prepared: "applying",
   applying: "committed",
@@ -456,6 +481,22 @@ export class ObsidianTransactionStore {
     return records.sort((left, right) => compareText(left.id, right.id));
   }
 
+  async listAll(signal?: AbortSignal): Promise<TransactionRecord[]> {
+    throwIfAborted(signal);
+    const entries = await this.files.list(TRANSACTION_ROOT, signal);
+    const records: TransactionRecord[] = [];
+    for (const entry of entries) {
+      if (entry.kind !== "folder" || !UUID.test(entry.name)) continue;
+      try {
+        if ((await this.files.list(entry.path, signal)).length === 0) continue;
+        records.push(await this.open(entry.name, signal));
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") throw error;
+      }
+    }
+    return records.sort((left, right) => compareText(left.id, right.id));
+  }
+
   async transition(
     record: TransactionRecord,
     next: TransactionPhase,
@@ -464,6 +505,31 @@ export class ObsidianTransactionStore {
     const current = await this.#currentFor(record, signal);
     if (NEXT_PHASE[current.record.phase] !== next || !isPhase(next)) {
       throw new TransactionPhaseInvalidError();
+    }
+    let commitBinding: {
+      committedManifestChecksum: string;
+      committedAggregateDigest: string;
+    } | undefined;
+    if (next === "completed") {
+      const receiptOwned = await this.files.readTextStable(
+        `${transactionFolder(current.record.id)}/${RECEIPT_NAME}`,
+        signal
+      );
+      if (receiptOwned) {
+        const receipt = await parseReceiptEnvelope(
+          receiptOwned.text,
+          current.record.id
+        );
+        if (
+          receipt.manifestChecksum === current.record.checksum &&
+          receipt.aggregateDigest === current.aggregateDigest
+        ) {
+          commitBinding = {
+            committedManifestChecksum: receipt.manifestChecksum,
+            committedAggregateDigest: receipt.aggregateDigest
+          };
+        }
+      }
     }
     const manifest = await signed({
       schemaVersion: 1 as const,
@@ -478,7 +544,8 @@ export class ObsidianTransactionStore {
         sha256
       })),
       createdAt: current.record.createdAt,
-      updatedAt: validTimestamp(this.#now())
+      updatedAt: validTimestamp(this.#now()),
+      ...(commitBinding ?? {})
     });
     const result = await this.files.modifyOwned(
       current.manifestOwnership,
@@ -625,9 +692,64 @@ export class ObsidianTransactionStore {
     }
   }
 
-  async cleanup(
+  async quarantineTargetDrift(
+    record: TransactionRecord,
+    evidence: readonly TransactionQuarantineEvidence[],
+    signal?: AbortSignal
+  ): Promise<VerifiedTransactionQuarantine> {
+    const current = await this.#currentFor(record, signal);
+    const checked = validQuarantineEvidence(evidence);
+    const metadata = await signed({
+      schemaVersion: 2 as const,
+      transactionId: current.record.id,
+      reason: "target-drift" as const,
+      manifestChecksum: current.record.checksum,
+      aggregateDigest: current.aggregateDigest,
+      evidence: checked,
+      quarantinedAt: validTimestamp(this.#now())
+    });
+    const path = `${transactionFolder(current.record.id)}/${QUARANTINE_NAME}`;
+    const result = await this.files.createExclusive(
+      path,
+      serializeCanonical(metadata),
+      signal
+    );
+    if (result.status === "collision") {
+      const existing = await this.readTargetQuarantine(record, signal);
+      if (!existing) throw new TransactionWriteConflictError();
+      return existing;
+    }
+    if (result.status === "ambiguous") {
+      throw new TransactionWriteAmbiguousError(
+        current.record.id,
+        result.outcome === "applied" ? "applied" : "unknown",
+        result
+      );
+    }
+    const closing = await this.#currentFor(record, signal);
+    if (!sameAggregate(current, closing)) {
+      throw new TransactionWriteConflictError();
+    }
+    return freezeTargetQuarantine(metadata);
+  }
+
+  async readTargetQuarantine(
     record: TransactionRecord,
     signal?: AbortSignal
+  ): Promise<VerifiedTransactionQuarantine | null> {
+    const current = await this.#currentFor(record, signal);
+    const path = `${transactionFolder(current.record.id)}/${QUARANTINE_NAME}`;
+    const owned = await this.files.readTextStable(path, signal);
+    if (!owned) return null;
+    return freezeTargetQuarantine(
+      await parseTargetQuarantine(owned.text, current)
+    );
+  }
+
+  async cleanup(
+    record: TransactionRecord,
+    signal?: AbortSignal,
+    allowIncomplete = false
   ): Promise<
     | { status: "cleaned"; directory: "retained" }
     | { status: "conflict" }
@@ -646,7 +768,7 @@ export class ObsidianTransactionStore {
       }
       throw error;
     }
-    if (currentRecord.record.phase !== "completed") {
+    if (!allowIncomplete && currentRecord.record.phase !== "completed") {
       throw new TransactionPhaseInvalidError();
     }
     const known: VaultOwnedFile[] = [
@@ -686,7 +808,7 @@ export class ObsidianTransactionStore {
             return { status: "conflict" };
           }
         } else {
-          await parseQuarantine(owned.text, currentRecord.record.id);
+          await parseAnyQuarantine(owned.text, currentRecord);
         }
       } catch (error) {
         if (
@@ -831,6 +953,12 @@ export class ObsidianTransactionStore {
       blobs: storedBlobs.map(({ ownership: _ownership, ...blob }) => blob),
       createdAt: manifest.createdAt,
       updatedAt: manifest.updatedAt,
+      ...(manifest.committedManifestChecksum === undefined
+        ? {}
+        : {
+            committedManifestChecksum: manifest.committedManifestChecksum,
+            committedAggregateDigest: manifest.committedAggregateDigest
+          }),
       checksum: manifest.checksum
     };
     const aggregateDigest = await transactionAggregateDigest(
@@ -906,6 +1034,12 @@ export class ObsidianTransactionStore {
       blobs: storedBlobs.map(({ ownership: _ownership, ...blob }) => blob),
       createdAt: manifest.createdAt,
       updatedAt: manifest.updatedAt,
+      ...(manifest.committedManifestChecksum === undefined
+        ? {}
+        : {
+            committedManifestChecksum: manifest.committedManifestChecksum,
+            committedAggregateDigest: manifest.committedAggregateDigest
+          }),
       checksum: manifest.checksum
     };
     const aggregateDigest = await transactionAggregateDigest(
@@ -1002,8 +1136,22 @@ function freezeReceipt(
   return Object.freeze({ ...receipt, pair, historyHashes });
 }
 
+function freezeTargetQuarantine(
+  quarantine: TargetQuarantineData
+): VerifiedTransactionQuarantine {
+  return Object.freeze({
+    ...quarantine,
+    evidence: Object.freeze(
+      quarantine.evidence.map((item) => Object.freeze({ ...item }))
+    )
+  });
+}
+
 async function parseManifest(text: string, expectedId: string): Promise<TransactionManifest> {
   const value = parseObject(text);
+  const hasCommitBinding =
+    value.committedManifestChecksum !== undefined ||
+    value.committedAggregateDigest !== undefined;
   exactKeys(value, [
     "schemaVersion",
     "transactionId",
@@ -1013,6 +1161,9 @@ async function parseManifest(text: string, expectedId: string): Promise<Transact
     "blobs",
     "createdAt",
     "updatedAt",
+    ...(hasCommitBinding
+      ? ["committedManifestChecksum", "committedAggregateDigest"]
+      : []),
     "checksum"
   ]);
   if (value.schemaVersion !== 1 || value.transactionId !== expectedId) {
@@ -1055,6 +1206,19 @@ async function parseManifest(text: string, expectedId: string): Promise<Transact
   }
   const createdAt = validIsoString(value.createdAt);
   const updatedAt = validIsoString(value.updatedAt);
+  let committedManifestChecksum: string | undefined;
+  let committedAggregateDigest: string | undefined;
+  if (hasCommitBinding) {
+    committedManifestChecksum = stringValue(value.committedManifestChecksum);
+    committedAggregateDigest = stringValue(value.committedAggregateDigest);
+    if (
+      phase !== "completed" ||
+      !SHA256.test(committedManifestChecksum) ||
+      !SHA256.test(committedAggregateDigest)
+    ) {
+      throw new TransactionRecordInvalidError();
+    }
+  }
   const checksum = stringValue(value.checksum);
   const unsigned = {
     schemaVersion: 1 as const,
@@ -1064,7 +1228,13 @@ async function parseManifest(text: string, expectedId: string): Promise<Transact
     scope,
     blobs,
     createdAt,
-    updatedAt
+    updatedAt,
+    ...(committedManifestChecksum === undefined
+      ? {}
+      : {
+          committedManifestChecksum,
+          committedAggregateDigest: committedAggregateDigest!
+        })
   };
   if (!SHA256.test(checksum) || checksum !== (await sha256Text(canonicalJson(unsigned)))) {
     throw new TransactionRecordInvalidError();
@@ -1080,9 +1250,19 @@ async function parseReceipt(
   expected: TransactionReceiptPlan
 ): Promise<ReceiptData> {
   const receipt = await parseReceiptEnvelope(text, transaction.record.id);
+  const expectedManifestChecksum =
+    transaction.record.phase === "completed" &&
+    transaction.record.committedManifestChecksum !== undefined
+      ? transaction.record.committedManifestChecksum
+      : transaction.record.checksum;
+  const expectedAggregateDigest =
+    transaction.record.phase === "completed" &&
+    transaction.record.committedAggregateDigest !== undefined
+      ? transaction.record.committedAggregateDigest
+      : transaction.aggregateDigest;
   if (
-    receipt.manifestChecksum !== transaction.record.checksum ||
-    receipt.aggregateDigest !== transaction.aggregateDigest ||
+    receipt.manifestChecksum !== expectedManifestChecksum ||
+    receipt.aggregateDigest !== expectedAggregateDigest ||
     canonicalJson({ pair: receipt.pair, historyHashes: receipt.historyHashes }) !==
       canonicalJson(expected)
   ) {
@@ -1185,6 +1365,77 @@ async function parseQuarantine(
   }
 }
 
+async function parseAnyQuarantine(
+  text: string,
+  transaction: OpenedTransaction
+): Promise<QuarantineData | TargetQuarantineData> {
+  let version: unknown;
+  try {
+    version = (JSON.parse(text) as { schemaVersion?: unknown }).schemaVersion;
+  } catch {
+    throw new TransactionRecordInvalidError();
+  }
+  return version === 2
+    ? parseTargetQuarantine(text, transaction)
+    : parseQuarantine(text, transaction.record.id);
+}
+
+async function parseTargetQuarantine(
+  text: string,
+  transaction: OpenedTransaction
+): Promise<TargetQuarantineData> {
+  try {
+    const value = parseObject(text);
+    exactKeys(value, [
+      "schemaVersion",
+      "transactionId",
+      "reason",
+      "manifestChecksum",
+      "aggregateDigest",
+      "evidence",
+      "quarantinedAt",
+      "checksum"
+    ]);
+    if (
+      value.schemaVersion !== 2 ||
+      value.transactionId !== transaction.record.id ||
+      value.reason !== "target-drift"
+    ) {
+      throw new TransactionRecordInvalidError();
+    }
+    const manifestChecksum = stringValue(value.manifestChecksum);
+    const aggregateDigest = stringValue(value.aggregateDigest);
+    const evidence = validQuarantineEvidence(
+      value.evidence as TransactionQuarantineEvidence[]
+    );
+    const quarantinedAt = validIsoString(value.quarantinedAt);
+    const checksum = stringValue(value.checksum);
+    const unsigned = {
+      schemaVersion: 2 as const,
+      transactionId: transaction.record.id,
+      reason: "target-drift" as const,
+      manifestChecksum,
+      aggregateDigest,
+      evidence,
+      quarantinedAt
+    };
+    const metadata = { ...unsigned, checksum };
+    if (
+      manifestChecksum !== transaction.record.checksum ||
+      aggregateDigest !== transaction.aggregateDigest ||
+      !SHA256.test(checksum) ||
+      checksum !== (await sha256Text(canonicalJson(unsigned))) ||
+      text !== serializeCanonical(metadata)
+    ) {
+      throw new TransactionRecordInvalidError();
+    }
+    return metadata;
+  } catch (error) {
+    if (error instanceof TransactionRecordInvalidError) throw error;
+    throw new TransactionRecordInvalidError();
+  }
+}
+
 function validScope(scope: TransactionScope): TransactionScope {
   const value = objectValue(scope);
   const allowed = ["pair", ...(value.historyDocumentId === undefined ? [] : ["historyDocumentId"] )];
@@ -1201,7 +1452,7 @@ function validScope(scope: TransactionScope): TransactionScope {
     pair: { html, sidecar },
     ...(historyDocumentId === undefined
       ? {}
-      : { historyDocumentId: canonicalUuid(stringValue(historyDocumentId)) })
+      : { historyDocumentId: canonicalHistoryUuid(stringValue(historyDocumentId)) })
   };
 }
 
@@ -1249,6 +1500,59 @@ function validReceiptPlan(plan: TransactionReceiptPlan): TransactionReceiptPlan 
     pair: { htmlPath, sidecarPath, htmlHash, sidecarHash },
     historyHashes
   };
+}
+
+function validQuarantineEvidence(
+  evidence: readonly TransactionQuarantineEvidence[]
+): TransactionQuarantineEvidence[] {
+  if (!Array.isArray(evidence) || evidence.length > 256) {
+    throw new TransactionRecordInvalidError();
+  }
+  const checked = evidence.map((item) => {
+    const value = objectValue(item);
+    const state = stringValue(value.state);
+    if (state !== "absent" && state !== "present" && state !== "unreadable") {
+      throw new TransactionRecordInvalidError();
+    }
+    const expectedKeys = [
+      "path",
+      "state",
+      ...(state === "present" ? ["sha256", "byteLength"] : [])
+    ];
+    exactKeys(value, expectedKeys);
+    const path = canonicalVaultPath(stringValue(value.path));
+    if (state !== "present") {
+      return {
+        path,
+        state: state as "absent" | "unreadable"
+      } satisfies TransactionQuarantineEvidence;
+    }
+    const sha256 = stringValue(value.sha256);
+    const byteLength = numberValue(value.byteLength);
+    if (
+      !SHA256.test(sha256) ||
+      !Number.isSafeInteger(byteLength) ||
+      byteLength < 0 ||
+      byteLength > MAX_BLOB_BYTES
+    ) {
+      throw new TransactionRecordInvalidError();
+    }
+    return {
+      path,
+      state: "present" as const,
+      sha256,
+      byteLength
+    } satisfies TransactionQuarantineEvidence;
+  });
+  if (
+    new Set(checked.map(({ path }) => path)).size !== checked.length ||
+    checked.some(
+      (item, index) => index > 0 && compareText(checked[index - 1]!.path, item.path) >= 0
+    )
+  ) {
+    throw new TransactionRecordInvalidError();
+  }
+  return checked;
 }
 
 async function signed<T extends Record<string, unknown>>(
@@ -1334,6 +1638,12 @@ function canonicalUuid(value: string): string {
 function requireCanonicalUuid(value: string): string {
   if (!UUID.test(value)) throw new TransactionRecordInvalidError();
   return value;
+}
+
+function canonicalHistoryUuid(value: string): string {
+  const canonical = value.toLowerCase();
+  if (!HISTORY_UUID.test(canonical)) throw new TransactionRecordInvalidError();
+  return canonical;
 }
 
 function transactionFolder(id: string): string {
