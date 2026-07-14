@@ -21,6 +21,12 @@ export interface HtmlShellOptions {
   allowSurroundingContent: boolean;
 }
 
+export interface HtmlShellTokenCounts {
+  doctypes: number;
+  htmlStarts: number;
+  htmlEnds: number;
+}
+
 type HtmlToken =
   | {
       kind: "text";
@@ -127,6 +133,25 @@ export function containsDocumentShellToken(source: string): boolean {
       ((token.kind === "startTag" || token.kind === "endTag") &&
         SHELL_NAMES.has(token.name))
   );
+}
+
+export function inspectHtmlShellTokens(source: string): HtmlShellTokenCounts {
+  let tokens: HtmlToken[];
+  try {
+    tokens = scanHtml(source);
+  } catch (error) {
+    throw documentError(errorMessage(error));
+  }
+
+  return {
+    doctypes: tokens.filter((token) => token.kind === "doctype").length,
+    htmlStarts: tokens.filter(
+      (token) => token.kind === "startTag" && token.name === "html"
+    ).length,
+    htmlEnds: tokens.filter(
+      (token) => token.kind === "endTag" && token.name === "html"
+    ).length
+  };
 }
 
 export function assertShellFreeHtmlFragment(

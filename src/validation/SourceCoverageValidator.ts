@@ -1,4 +1,5 @@
 import type { AnnotatedSource } from "../source/SourceAnnotator";
+import { findAuthoringArticleRoot } from "./AuthoringContractValidator";
 import type { ValidationIssue } from "./ValidationIssue";
 
 export function validateSourceCoverage(
@@ -19,13 +20,50 @@ export function validateSourceCoverage(
     ];
   }
 
-  const actual = [...document.querySelectorAll("[data-galley-source]")].map(
+  const article = findAuthoringArticleRoot(document);
+  const allMarkerElements = [
+    ...document.querySelectorAll("[data-galley-source]")
+  ];
+  const actual = [
+    ...(article?.querySelectorAll("[data-galley-source]") ?? [])
+  ].map(
     (element) => element.getAttribute("data-galley-source") ?? ""
   );
   const expectedSet = new Set(expected);
   const counts = countIds(actual);
   const uniqueActual = uniqueInOrder(actual);
   const issues: ValidationIssue[] = [];
+
+  if (!article) {
+    issues.push({
+      code: "source_article_root",
+      severity: "error",
+      message:
+        "Source coverage requires exactly one article as the sole Authoring content root under body."
+    });
+  } else if (article.hasAttribute("data-galley-source")) {
+    const sourceId = article.getAttribute("data-galley-source") ?? "";
+    issues.push({
+      code: "source_article_marker",
+      severity: "error",
+      message:
+        "The article content root cannot carry data-galley-source; place the marker on its rendered source block.",
+      sourceId
+    });
+  }
+
+  for (const element of allMarkerElements) {
+    if (article && (element === article || article.contains(element))) {
+      continue;
+    }
+    const sourceId = element.getAttribute("data-galley-source") ?? "";
+    issues.push({
+      code: "source_outside_article",
+      severity: "error",
+      message: `Source marker ${quoted(sourceId)} is outside the valid Authoring article content root.`,
+      sourceId
+    });
+  }
 
   for (const sourceId of uniqueInOrder(expected)) {
     if (!counts.has(sourceId)) {

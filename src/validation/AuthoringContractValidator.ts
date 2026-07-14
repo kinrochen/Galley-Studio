@@ -1,4 +1,7 @@
-import { locateHtmlDocument } from "../documents/HtmlShellScanner";
+import {
+  inspectHtmlShellTokens,
+  locateHtmlDocument
+} from "../documents/HtmlShellScanner";
 import type { ValidationIssue } from "./ValidationIssue";
 
 const STYLESHEET_SELECTOR =
@@ -73,7 +76,7 @@ export function validateAuthoringContract(html: string): ValidationIssue[] {
     );
   }
 
-  if (!hasSingleArticleRoot(document.body)) {
+  if (!findAuthoringArticleRoot(document)) {
     issues.push(
       issue(
         "document_article_root",
@@ -126,6 +129,25 @@ function validateShell(
     }
 
     try {
+      const counts = inspectHtmlShellTokens(html.trim());
+      if (counts.doctypes !== 1) {
+        return issue(
+          "document_doctype",
+          "Authoring document must contain exactly one valid HTML5 doctype."
+        );
+      }
+      if (counts.htmlStarts !== 1 || counts.htmlEnds !== 1) {
+        return issue(
+          "document_html",
+          "Authoring document must contain exactly one explicit html root.",
+          "html"
+        );
+      }
+    } catch {
+      // The scanner's original structural error is classified below.
+    }
+
+    try {
       locateHtmlDocument(html.trim(), {
         requireHead: false,
         allowSurroundingContent: false
@@ -172,20 +194,25 @@ function validateShell(
   }
 }
 
-function hasSingleArticleRoot(body: HTMLElement): boolean {
+export function findAuthoringArticleRoot(
+  document: Document
+): HTMLElement | undefined {
+  const body = document.body;
   if (
     body.children.length !== 1 ||
     body.firstElementChild?.localName !== "article"
   ) {
-    return false;
+    return undefined;
   }
 
-  return [...body.childNodes].every(
+  const article = body.firstElementChild as HTMLElement;
+  const isSoleContentRoot = [...body.childNodes].every(
     (node) =>
-      node === body.firstElementChild ||
+      node === article ||
       node.nodeType === Node.COMMENT_NODE ||
       (node.nodeType === Node.TEXT_NODE && !node.textContent?.trim())
   );
+  return isSoleContentRoot ? article : undefined;
 }
 
 function issue(

@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import type { SanitizedDocument } from "../../src/security/AuthoringSanitizer";
+import {
+  sanitizeAuthoringDocument,
+  type SanitizedDocument
+} from "../../src/security/AuthoringSanitizer";
 import type {
   AnnotatedSource,
   SourceBlock
@@ -33,7 +36,7 @@ describe("validateSecurity", () => {
     ]);
   });
 
-  it("turns unsafe sanitizer removals into actionable de-duplicated errors", () => {
+  it("turns every non-benign sanitizer removal into an actionable de-duplicated error", () => {
     const issues = validateSecurity([
       { kind: "element", name: "script" },
       { kind: "element", name: "script" },
@@ -45,7 +48,7 @@ describe("validateSecurity", () => {
       { kind: "attribute", name: "data-secret" }
     ]);
 
-    expect(issues).toHaveLength(5);
+    expect(issues).toHaveLength(6);
     expect(issues.every(({ code }) => code === "unsafe_content_removed")).toBe(
       true
     );
@@ -54,17 +57,61 @@ describe("validateSecurity", () => {
       expect.stringContaining("form"),
       expect.stringContaining("onclick"),
       expect.stringContaining("href"),
-      expect.stringContaining("background-image")
+      expect.stringContaining("background-image"),
+      expect.stringContaining("data-secret")
     ]);
   });
 
-  it("does not treat blank-target hardening or benign attribute normalization as unsafe content", () => {
+  it("treats only the sanitizer's invalid-target removal as benign", () => {
     expect(
-      validateSecurity([
-        { kind: "attribute", name: "target" },
-        { kind: "attribute", name: "data-secret" }
-      ])
+      validateSecurity([{ kind: "attribute", name: "target" }])
     ).toEqual([]);
+  });
+
+  it("covers actual sanitizer removals without drifting from its element, URL, or CSS policy", () => {
+    const document = sanitizeAuthoringDocument(
+      validHtml().replace(
+        "</article>",
+        '<details href="javascript:x()"><summary>one</summary>detail</details><details><summary>two</summary>detail</details><dialog open>dialog</dialog><p style="clip-path: url(https://evil.example/clip.svg)">styled</p><a href="javascript:x()">bad URL</a><script>alert(1)</script></article>'
+      )
+    );
+    const repairKeys = [
+      ...new Set(
+        document.removed
+          .filter(
+            ({ kind, name }) =>
+              !(kind === "attribute" && name === "target")
+          )
+          .map(({ kind, name }) => `${kind}:${name}`)
+      )
+    ];
+
+    expect(repairKeys).toEqual(
+      expect.arrayContaining([
+        "attribute:href",
+        "attribute:open",
+        "attribute:clip-path",
+        "url:href",
+        "element:details",
+        "element:summary",
+        "element:dialog",
+        "element:script"
+      ])
+    );
+    expect(
+      document.removed.filter(
+        ({ kind, name }) => kind === "element" && name === "details"
+      ).length
+    ).toBeGreaterThan(1);
+
+    const issues = validateSecurity(document).filter(
+      ({ code }) => code === "unsafe_content_removed"
+    );
+    expect(issues).toHaveLength(repairKeys.length);
+    for (const key of repairKeys) {
+      const name = key.slice(key.indexOf(":") + 1);
+      expect(issues.some(({ message }) => message.includes(name))).toBe(true);
+    }
   });
 });
 
@@ -158,6 +205,23 @@ describe("validateAuthoringContract", () => {
     );
   });
 
+  it("maps duplicate doctypes to the doctype contract", () => {
+    const html = validHtml().replace(
+      "<!DOCTYPE html>",
+      "<!DOCTYPE html><!DOCTYPE html>"
+    );
+
+    expect(validateAuthoringContract(html)[0]?.code).toBe(
+      "document_doctype"
+    );
+  });
+
+  it("keeps duplicate html roots mapped to the html contract", () => {
+    const html = `${validHtml()}<html><head></head><body></body></html>`;
+
+    expect(validateAuthoringContract(html)[0]?.code).toBe("document_html");
+  });
+
   it("requires exactly one article as the sole Authoring content root under body", () => {
     const nested = validHtml()
       .replace("<body><article>", "<body><main><article>")
@@ -175,14 +239,29 @@ describe("validateAuthoringContract", () => {
     );
   });
 
-  it("rejects stylesheet links and non-inline style blocks", () => {
+  it("rejects an external stylesheet link", () => {
     const html = validHtml().replace(
       "<title>Article</title>",
-      '<title>Article</title><link rel="stylesheet" href="theme.css"><style>article { color: red; }</style>'
+      '<title>Article</title><link rel="stylesheet" href="theme.css">'
     );
     const issues = validateAuthoringContract(html);
 
     expect(issues).toContainEqual(
+      expect.objectContaining({
+        code: "document_styles_inline",
+        severity: "error",
+        selector: expect.stringContaining("style")
+      })
+    );
+  });
+
+  it("rejects a non-inline style block", () => {
+    const html = validHtml().replace(
+      "<title>Article</title>",
+      "<title>Article</title><style>article { color: red; }</style>"
+    );
+
+    expect(validateAuthoringContract(html)).toContainEqual(
       expect.objectContaining({
         code: "document_styles_inline",
         severity: "error",
@@ -231,6 +310,131 @@ describe("validateAuthoringDocument", () => {
       "source_missing",
       "source_order"
     ]);
+  });
+
+  it.each(["html", "head", "body"] as const)(
+    "does not let a marker on %s satisfy full document coverage",
+    (location) => {
+      const html = moveMarker(validHtml(), "heading-001", location);
+      const report = validateAuthoringDocument({
+        source: validSource(),
+        document: sanitized(html)
+      });
+
+      expect(report.valid).toBe(false);
+      expect(report.issues.map(({ code, sourceId }) => [code, sourceId])).toEqual(
+        expect.arrayContaining([
+          ["source_outside_article", "heading-001"],
+          ["source_missing", "heading-001"]
+        ])
+      );
+    }
+  );
+
+  it("keeps contract and source errors when a marker sits in an invalid outside-root sibling", () => {
+    const document = parseValidHtml();
+    const heading = document.querySelector(
+      '[data-galley-source="heading-001"]'
+    );
+    const aside = document.createElement("aside");
+    heading?.removeAttribute("data-galley-source");
+    aside.setAttribute("data-galley-source", "heading-001");
+    document.body.append(aside);
+
+    const report = validateAuthoringDocument({
+      source: validSource(),
+      document: sanitized(serializeDocument(document))
+    });
+
+    expect(report.issues.map(({ code, sourceId }) => [code, sourceId])).toEqual(
+      expect.arrayContaining([
+        ["document_article_root", undefined],
+        ["source_article_root", undefined],
+        ["source_outside_article", "heading-001"],
+        ["source_missing", "heading-001"]
+      ])
+    );
+  });
+
+  it("reports an empty article as missing all source blocks", () => {
+    const document = parseValidHtml();
+    document.querySelector("article")?.replaceChildren();
+
+    const report = validateAuthoringDocument({
+      source: validSource(),
+      document: sanitized(serializeDocument(document))
+    });
+
+    expect(report.issues.map(({ code, sourceId }) => [code, sourceId])).toEqual([
+      ["source_missing", "heading-001"],
+      ["source_missing", "paragraph-001"],
+      ["source_order", undefined]
+    ]);
+  });
+
+  it("does not let the article root impersonate a rendered source block", () => {
+    const document = parseValidHtml();
+    document
+      .querySelector('[data-galley-source="heading-001"]')
+      ?.removeAttribute("data-galley-source");
+    document
+      .querySelector("article")
+      ?.setAttribute("data-galley-source", "heading-001");
+
+    const report = validateAuthoringDocument({
+      source: validSource(),
+      document: sanitized(serializeDocument(document))
+    });
+
+    expect(report.issues.map(({ code, sourceId }) => [code, sourceId])).toEqual([
+      ["source_article_marker", "heading-001"],
+      ["source_missing", "heading-001"],
+      ["source_order", undefined]
+    ]);
+  });
+
+  it("rejects a duplicate outside copy without reporting an in-article duplicate", () => {
+    const document = parseValidHtml();
+    document.head.setAttribute("data-galley-source", "heading-001");
+
+    const report = validateAuthoringDocument({
+      source: validSource(),
+      document: sanitized(serializeDocument(document))
+    });
+
+    expect(report.issues.map(({ code, sourceId }) => [code, sourceId])).toEqual([
+      ["source_outside_article", "heading-001"]
+    ]);
+  });
+
+  it("preserves security, contract, and article-boundary order byte-for-byte", () => {
+    const document = parseValidHtml();
+    document.title = " ";
+    document
+      .querySelector('[data-galley-source="paragraph-001"]')
+      ?.removeAttribute("data-galley-source");
+    document.documentElement.setAttribute(
+      "data-galley-source",
+      "paragraph-001"
+    );
+    const input = {
+      source: validSource(),
+      document: sanitized(serializeDocument(document), [
+        { kind: "element", name: "script" }
+      ])
+    };
+
+    const first = validateAuthoringDocument(input);
+    const second = validateAuthoringDocument(input);
+
+    expect(first.issues.map(({ code, sourceId }) => [code, sourceId])).toEqual([
+      ["unsafe_content_removed", undefined],
+      ["document_title", undefined],
+      ["source_outside_article", "paragraph-001"],
+      ["source_missing", "paragraph-001"],
+      ["source_order", undefined]
+    ]);
+    expect(JSON.stringify(second)).toBe(JSON.stringify(first));
   });
 
   it("produces byte-identical JSON on repeated validation", () => {
@@ -300,6 +504,28 @@ function sourceWithIds(ids: readonly string[]): AnnotatedSource {
 
 function validHtml(): string {
   return '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Article</title></head><body><article><h1 data-galley-source="heading-001">Article</h1><p data-galley-source="paragraph-001">Body</p></article></body></html>';
+}
+
+function moveMarker(
+  html: string,
+  sourceId: string,
+  location: "html" | "head" | "body"
+): string {
+  const document = new DOMParser().parseFromString(html, "text/html");
+  const marker = [...document.querySelectorAll("[data-galley-source]")].find(
+    (element) => element.getAttribute("data-galley-source") === sourceId
+  );
+  marker?.removeAttribute("data-galley-source");
+  document.querySelector(location)?.setAttribute("data-galley-source", sourceId);
+  return serializeDocument(document);
+}
+
+function parseValidHtml(): Document {
+  return new DOMParser().parseFromString(validHtml(), "text/html");
+}
+
+function serializeDocument(document: Document): string {
+  return `<!DOCTYPE html>${document.documentElement.outerHTML}`;
 }
 
 function sanitized(

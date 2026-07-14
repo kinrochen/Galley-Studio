@@ -154,6 +154,114 @@ describe("validateSourceCoverage", () => {
     expect(JSON.stringify(second)).toBe(JSON.stringify(first));
   });
 
+  it.each(["html", "head", "body"] as const)(
+    "does not count an expected marker placed on %s outside the article",
+    (location) => {
+      const issues = validateSourceCoverage(
+        sourceWithIds(["paragraph-001"]),
+        documentWithLayout({
+          outside: [{ location, sourceId: "paragraph-001" }]
+        })
+      );
+
+      expect(issues.map(({ code, sourceId }) => [code, sourceId])).toEqual([
+        ["source_outside_article", "paragraph-001"],
+        ["source_missing", "paragraph-001"],
+        ["source_order", undefined]
+      ]);
+    }
+  );
+
+  it("does not count a marker placed on the article root itself", () => {
+    const issues = validateSourceCoverage(
+      sourceWithIds(["paragraph-001"]),
+      documentWithLayout({ articleSourceId: "paragraph-001" })
+    );
+
+    expect(issues.map(({ code, sourceId }) => [code, sourceId])).toEqual([
+      ["source_article_marker", "paragraph-001"],
+      ["source_missing", "paragraph-001"],
+      ["source_order", undefined]
+    ]);
+  });
+
+  it("reports every expected block missing from an empty article", () => {
+    const issues = validateSourceCoverage(
+      sourceWithIds(["heading-001", "paragraph-001"]),
+      documentWithLayout({})
+    );
+
+    expect(issues.map(({ code, sourceId }) => [code, sourceId])).toEqual([
+      ["source_missing", "heading-001"],
+      ["source_missing", "paragraph-001"],
+      ["source_order", undefined]
+    ]);
+  });
+
+  it("rejects an outside copy without treating it as an in-article duplicate", () => {
+    const issues = validateSourceCoverage(
+      sourceWithIds(["paragraph-001"]),
+      documentWithLayout({
+        outside: [{ location: "head", sourceId: "paragraph-001" }],
+        inside: ["paragraph-001"]
+      })
+    );
+
+    expect(issues.map(({ code, sourceId }) => [code, sourceId])).toEqual([
+      ["source_outside_article", "paragraph-001"]
+    ]);
+  });
+
+  it("fails closed and keeps source diagnostics when the article root is invalid", () => {
+    const html = documentWithLayout({
+      inside: ["paragraph-001"],
+      invalidRoot: true
+    });
+
+    expect(() =>
+      validateSourceCoverage(sourceWithIds(["paragraph-001"]), html)
+    ).not.toThrow();
+    expect(
+      validateSourceCoverage(
+        sourceWithIds(["paragraph-001"]),
+        html
+      ).map(({ code, sourceId }) => [code, sourceId])
+    ).toEqual([
+      ["source_article_root", undefined],
+      ["source_outside_article", "paragraph-001"],
+      ["source_missing", "paragraph-001"],
+      ["source_order", undefined]
+    ]);
+  });
+
+  it("keeps article-boundary diagnostics in byte-identical DOM order", () => {
+    const source = sourceWithIds(["heading-001", "paragraph-001"]);
+    const html = documentWithLayout({
+      articleSourceId: "article-root",
+      outside: [
+        { location: "html", sourceId: "outside-html" },
+        { location: "head", sourceId: "outside-head" },
+        { location: "body", sourceId: "" }
+      ],
+      inside: ["heading-001", "heading-001", "invented-001"]
+    });
+
+    const first = validateSourceCoverage(source, html);
+    const second = validateSourceCoverage(source, html);
+
+    expect(first.map(({ code, sourceId }) => [code, sourceId])).toEqual([
+      ["source_article_marker", "article-root"],
+      ["source_outside_article", "outside-html"],
+      ["source_outside_article", "outside-head"],
+      ["source_outside_article", ""],
+      ["source_missing", "paragraph-001"],
+      ["source_duplicate", "heading-001"],
+      ["source_unexpected", "invented-001"],
+      ["source_order", undefined]
+    ]);
+    expect(JSON.stringify(second)).toBe(JSON.stringify(first));
+  });
+
   it("treats adversarial marker values as opaque DOM attributes", () => {
     const adversarialId = `quote'\"] [onclick] \\ slash > marker`;
 
@@ -191,6 +299,22 @@ function sourceWithIds(ids: readonly string[]): AnnotatedSource {
 }
 
 function documentWithMarkers(markers: readonly string[]): string {
+  return documentWithLayout({ inside: markers });
+}
+
+type MarkerLocation = "html" | "head" | "body";
+
+interface DocumentLayout {
+  articleSourceId?: string;
+  inside?: readonly string[];
+  invalidRoot?: boolean;
+  outside?: ReadonlyArray<{
+    location: MarkerLocation;
+    sourceId: string;
+  }>;
+}
+
+function documentWithLayout(layout: DocumentLayout): string {
   const document = new DOMParser().parseFromString(
     "<!DOCTYPE html><html><head></head><body><article></article></body></html>",
     "text/html"
@@ -199,11 +323,24 @@ function documentWithMarkers(markers: readonly string[]): string {
   if (!article) {
     throw new Error("Test document is missing its article element");
   }
-  for (const marker of markers) {
+  if (layout.articleSourceId !== undefined) {
+    article.setAttribute("data-galley-source", layout.articleSourceId);
+  }
+  for (const marker of layout.inside ?? []) {
     const block = document.createElement("p");
     block.setAttribute("data-galley-source", marker);
     block.textContent = marker || "empty marker";
     article.append(block);
+  }
+  for (const { location, sourceId } of layout.outside ?? []) {
+    document
+      .querySelector(location)
+      ?.setAttribute("data-galley-source", sourceId);
+  }
+  if (layout.invalidRoot) {
+    const main = document.createElement("main");
+    main.append(...article.childNodes);
+    article.replaceWith(main);
   }
   return `<!DOCTYPE html>${document.documentElement.outerHTML}`;
 }
