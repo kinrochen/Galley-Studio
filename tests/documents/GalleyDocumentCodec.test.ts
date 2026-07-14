@@ -103,6 +103,30 @@ describe("GalleyDocumentCodec", () => {
   });
 
   it.each([
+    ["an abrupt comment close", "<!--><body>HIDDEN</body>-->"],
+    ["a bang comment close", "<!--x--!><body>HIDDEN</body>-->"],
+    [
+      "a double quote in an unquoted attribute",
+      '<p x=a">HIDDEN</body></html>" >'
+    ],
+    [
+      "a single quote in an unquoted attribute",
+      "<p x=a'>HIDDEN</body></html>' >"
+    ]
+  ])("rejects shell markup concealed by %s in a body fragment", (_label, bodyHtml) => {
+    const document: GalleyDocument = {
+      doctype: "<!DOCTYPE html>",
+      lang: "en",
+      headHtml: "<title>x</title>",
+      bodyHtml
+    };
+
+    expect(() => GalleyDocumentCodec.serialize(document)).toThrow(
+      /fragment|shell|context|comment/i
+    );
+  });
+
+  it.each([
     "<article>fragment</article>",
     "<html><head></head><body>x</body></html>",
     "<!doctype html><head></head><body>x</body>",
@@ -114,7 +138,11 @@ describe("GalleyDocumentCodec", () => {
     '<!doctype html><html><head></head><body><p title="fake </body></html>',
     "<!doctype html><html><head></head><body><script>fake </body></html>",
     "<!doctype html><html><head></head><body>x<body>y</body></html>",
-    "<!doctype html><html><head></head><body>x</head></body></html>"
+    "<!doctype html><html><head></head><body>x</head></body></html>",
+    "<!doctype html><html><head></head><body><script><!--<script></script></body></html>",
+    "<!doctype html><html><head></head><body><noscript><body>hidden</body></noscript></body></html>",
+    "<!doctype html><html><head></head><!--><body>hidden</body>--><body>real</body></html>",
+    '<!doctype html><html><head></head><body><p x=a">hidden</body></html>" ></body></html>'
   ])("rejects a missing, malformed, or repeated shell: %s", (html) => {
     expect(() => GalleyDocumentCodec.parse(html)).toThrow(/document|doctype|shell/i);
   });

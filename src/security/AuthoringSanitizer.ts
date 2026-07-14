@@ -294,13 +294,15 @@ function isSafeUrl(value: string, attribute: string, tag: string): boolean {
 }
 
 function decodeUrlSecurityViews(value: string): string[] | undefined {
+  if (/%(?![0-9a-f]{2})/i.test(value)) {
+    return undefined;
+  }
+
   const views = [value];
   let current = value;
   for (let pass = 0; pass < MAX_URL_DECODE_PASSES; pass += 1) {
-    let decoded: string;
-    try {
-      decoded = decodeURIComponent(current);
-    } catch {
+    const decoded = decodePercentTripletRuns(current);
+    if (decoded === undefined) {
       return undefined;
     }
     if (decoded === current) {
@@ -310,11 +312,21 @@ function decodeUrlSecurityViews(value: string): string[] | undefined {
     current = decoded;
   }
 
-  try {
-    return decodeURIComponent(current) === current ? views : undefined;
-  } catch {
-    return undefined;
-  }
+  const decoded = decodePercentTripletRuns(current);
+  return decoded === current ? views : undefined;
+}
+
+function decodePercentTripletRuns(value: string): string | undefined {
+  let invalidEncoding = false;
+  const decoded = value.replace(/(?:%[0-9a-f]{2})+/gi, (sequence) => {
+    try {
+      return decodeURIComponent(sequence);
+    } catch {
+      invalidEncoding = true;
+      return sequence;
+    }
+  });
+  return invalidEncoding ? undefined : decoded;
 }
 
 function isSafeUrlView(

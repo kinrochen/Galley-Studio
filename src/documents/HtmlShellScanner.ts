@@ -38,7 +38,6 @@ const RAW_TEXT_NAMES = new Set([
   "iframe",
   "noembed",
   "noframes",
-  "noscript",
   "script",
   "style",
   "title",
@@ -193,11 +192,7 @@ function readMarkupToken(
   start: number
 ): HtmlToken | undefined {
   if (source.startsWith("<!--", start)) {
-    const endMarker = source.indexOf("-->", start + 4);
-    if (endMarker < 0) {
-      throw new Error("unterminated HTML comment");
-    }
-    const end = endMarker + 3;
+    const end = findCommentEnd(source, start);
     return {
       kind: "comment",
       start,
@@ -215,6 +210,29 @@ function readMarkupToken(
     return undefined;
   }
   return readTag(source, start);
+}
+
+function findCommentEnd(source: string, start: number): number {
+  const contentStart = start + 4;
+  if (source[contentStart] === ">") {
+    return contentStart + 1;
+  }
+  if (source[contentStart] === "-" && source[contentStart + 1] === ">") {
+    return contentStart + 2;
+  }
+
+  for (let index = contentStart; index < source.length; index += 1) {
+    if (source.startsWith("<!--", index)) {
+      throw new Error("nested HTML comment opener is ambiguous");
+    }
+    if (source.startsWith("-->", index)) {
+      return index + 3;
+    }
+    if (source.startsWith("--!>", index)) {
+      return index + 4;
+    }
+  }
+  throw new Error("unterminated HTML comment");
 }
 
 function readDeclaration(source: string, start: number): HtmlToken {
@@ -262,19 +280,34 @@ function readTag(
     throw new Error("tag is missing a name");
   }
 
-  let quote = "";
+  type AttributeState =
+    | "beforeName"
+    | "name"
+    | "afterName"
+    | "beforeValue"
+    | "doubleQuotedValue"
+    | "singleQuotedValue"
+    | "unquotedValue"
+    | "afterQuotedValue";
+
+  let state: AttributeState = "beforeName";
   for (let index = cursor; index < source.length; index += 1) {
     const character = source[index] ?? "";
-    if (quote) {
-      if (character === quote) {
-        quote = "";
+
+    if (state === "doubleQuotedValue") {
+      if (character === '"') {
+        state = "afterQuotedValue";
       }
       continue;
     }
-    if (character === '"' || character === "'") {
-      quote = character;
+
+    if (state === "singleQuotedValue") {
+      if (character === "'") {
+        state = "afterQuotedValue";
+      }
       continue;
     }
+
     if (character === ">") {
       const end = index + 1;
       const raw = source.slice(start, end);
@@ -287,9 +320,66 @@ function readTag(
         selfClosing: /\/\s*>$/.test(raw)
       };
     }
+
+    if (state === "unquotedValue") {
+      if (isHtmlWhitespace(character)) {
+        state = "beforeName";
+      }
+      continue;
+    }
+
+    if (state === "beforeValue") {
+      if (isHtmlWhitespace(character)) {
+        continue;
+      }
+      if (character === '"') {
+        state = "doubleQuotedValue";
+      } else if (character === "'") {
+        state = "singleQuotedValue";
+      } else {
+        state = "unquotedValue";
+      }
+      continue;
+    }
+
+    if (state === "name") {
+      if (isHtmlWhitespace(character)) {
+        state = "afterName";
+      } else if (character === "=") {
+        state = "beforeValue";
+      } else if (character === "/") {
+        state = "afterName";
+      }
+      continue;
+    }
+
+    if (state === "afterName") {
+      if (isHtmlWhitespace(character) || character === "/") {
+        continue;
+      }
+      if (character === "=") {
+        state = "beforeValue";
+      } else {
+        state = "name";
+      }
+      continue;
+    }
+
+    if (state === "afterQuotedValue") {
+      if (isHtmlWhitespace(character) || character === "/") {
+        state = "beforeName";
+      } else {
+        state = "name";
+      }
+      continue;
+    }
+
+    if (!isHtmlWhitespace(character) && character !== "/") {
+      state = "name";
+    }
   }
   throw new Error(
-    quote
+    state === "doubleQuotedValue" || state === "singleQuotedValue"
       ? `unterminated quote in <${name}> tag`
       : `unterminated <${name}> tag`
   );
@@ -313,6 +403,12 @@ function findRawTextClosing(
     if (source[candidate + 1] === "/") {
       const token = readMarkupToken(source, candidate);
       if (token?.kind === "endTag" && token.name === name) {
+        if (
+          name === "script" &&
+          source.slice(start, candidate).includes("<!--")
+        ) {
+          throw new Error("ambiguous escaped content in <script> element");
+        }
         return token;
       }
     }
@@ -495,6 +591,10 @@ function assertPlainShellEndTag(
 
 function isTagNameCharacter(character: string | undefined): boolean {
   return Boolean(character && !/[\t\n\f\r />]/.test(character));
+}
+
+function isHtmlWhitespace(character: string): boolean {
+  return /[\t\n\f\r ]/.test(character);
 }
 
 function documentError(message: string): Error {

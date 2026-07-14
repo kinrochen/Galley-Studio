@@ -91,6 +91,30 @@ describe("extractHtmlDocument", () => {
     [
       "a stray shell end tag",
       "<!doctype html><html><body>x</head></body></html>"
+    ],
+    [
+      "a script double-escape sequence that consumes the apparent shell",
+      "<!doctype html><html><head></head><body><script><!--<script></script></body></html>"
+    ],
+    [
+      "shell tags hidden by scripting-disabled noscript handling",
+      "<!doctype html><html><head></head><body><noscript><body>hidden</body></noscript></body></html>"
+    ],
+    [
+      "shell tags after an abruptly closed comment",
+      "<!doctype html><html><head></head><!--><body>hidden</body>--><body>real</body></html>"
+    ],
+    [
+      "shell tags after a bang-closed comment",
+      "<!doctype html><html><head></head><!--x--!><body>hidden</body>--><body>real</body></html>"
+    ],
+    [
+      "shell tags concealed by a quote in an unquoted attribute value",
+      '<!doctype html><html><head></head><body><p x=a">hidden</body></html>" ></body></html>'
+    ],
+    [
+      "shell tags concealed by a single quote in an unquoted attribute value",
+      "<!doctype html><html><head></head><body><p x=a'>hidden</body></html>' ></body></html>"
     ]
   ])("rejects %s", (_label, value) => {
     expect(() => extractHtmlDocument(value)).toThrow(/complete|single|fence/i);

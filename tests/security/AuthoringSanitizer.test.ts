@@ -11,6 +11,19 @@ describe("sanitizeAuthoringDocument", () => {
     expect(result.removed.length).toBeGreaterThan(0);
   });
 
+  it("scans an ordinary script and reports its DOMPurify removal", () => {
+    const result = sanitizeAuthoringDocument(
+      "<!doctype html><html><head></head><body><script>alert(1)</script><p>safe</p></body></html>"
+    );
+
+    expect(result.html).toContain("<p>safe</p>");
+    expect(result.html).not.toContain("<script");
+    expect(result.removed).toContainEqual({
+      kind: "element",
+      name: "script"
+    });
+  });
+
   it("preserves semantic article content, safe styles, and Galley contracts", () => {
     const result = sanitizeAuthoringDocument(
       '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>文章</title></head><body><article class="story" data-galley-role="story"><section data-galley-source="paragraph-001" data-galley-slot="content" style="color: #123; padding: 12px; position: fixed"><figure><img src="assets/封面.png" alt="封面" width="640"><figcaption><strong>说明</strong></figcaption></figure><table><tbody><tr><th>甲</th><td>乙</td></tr></tbody></table></section></article></body></html>'
@@ -105,7 +118,7 @@ describe("sanitizeAuthoringDocument", () => {
 
   it("classifies percent-decoded URL views without rewriting safe encoded paths", () => {
     const result = sanitizeAuthoringDocument(
-      '<!doctype html><html><head></head><body><a id="encoded-colon" href="javascript%3Aalert(1)">x</a><a id="encoded-name" href="jav%61script:alert(1)">x</a><a id="encoded-control" href="%0Ajavascript:alert(1)">x</a><a id="encoded-network" href="%2f%2fevil.example/x">x</a><img id="double-encoded" src="%252f%252fevil.example/x"><a id="malformed-encoding" href="images/bad%2">x</a><a id="too-deep" href="%252525252F%252525252Fevil.example/x">x</a><img id="safe-encoded" src="images/a%20b.png"></body></html>'
+      '<!doctype html><html><head></head><body><a id="encoded-colon" href="javascript%3Aalert(1)">x</a><a id="encoded-name" href="jav%61script:alert(1)">x</a><a id="encoded-control" href="%0Ajavascript:alert(1)">x</a><a id="encoded-network" href="%2f%2fevil.example/x">x</a><img id="double-encoded" src="%252f%252fevil.example/x"><a id="malformed-encoding" href="images/bad%2">x</a><a id="too-deep" href="%252525252F%252525252Fevil.example/x">x</a><img id="safe-encoded" src="images/a%20b.png"><img id="safe-percent" src="images/100%25.png"></body></html>'
     );
     const parsed = new DOMParser().parseFromString(result.html, "text/html");
 
@@ -124,6 +137,9 @@ describe("sanitizeAuthoringDocument", () => {
     );
     expect(parsed.querySelector("#safe-encoded")?.getAttribute("src")).toBe(
       "images/a%20b.png"
+    );
+    expect(parsed.querySelector("#safe-percent")?.getAttribute("src")).toBe(
+      "images/100%25.png"
     );
     expect(result.removed.filter(({ kind }) => kind === "url")).toEqual([
       { kind: "url", name: "href" },
@@ -173,7 +189,13 @@ describe("sanitizeAuthoringDocument", () => {
     '<!doctype html><html><head></head><body><p title="fake </body></html>',
     "<!doctype html><html><head></head><body><style>fake </body></html>",
     "<!doctype html><html><head></head><body>x<body>y</body></html>",
-    "<!doctype html><html><head></head><body>x</head></body></html>"
+    "<!doctype html><html><head></head><body>x</head></body></html>",
+    "<!doctype html><html><head></head><body><script><!--<script></script></body></html>",
+    "<!doctype html><html><head></head><body><noscript><body>hidden</body></noscript></body></html>",
+    "<!doctype html><html><head></head><!--><body>hidden</body>--><body>real</body></html>",
+    "<!doctype html><html><head></head><!---><body>hidden</body>--><body>real</body></html>",
+    '<!doctype html><html><head></head><body><p x=a">hidden</body></html>" ></body></html>',
+    "<!doctype html><html><head></head><body><p x=a'>hidden</body></html>' ></body></html>"
   ])("rejects input without a complete standalone document shell", (html) => {
     expect(() => sanitizeAuthoringDocument(html)).toThrow(/document|doctype|body/i);
   });
