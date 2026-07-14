@@ -321,10 +321,41 @@ it("decodes streamed content and fragmented tool-call arguments", async () => {
     toolCalls: [
       { id: "call_1", name: "echo", argumentsJson: '{"value":1}' }
     ],
-    finishReason: "tool_calls"
+    finishReason: "tool_calls",
+    streamed: true
   });
   expect(post).not.toHaveBeenCalled();
   expect(stream.mock.calls[0]?.[2]).toMatchObject({ stream: true });
+});
+
+it("preserves the receiver for a stateful stream transport", async () => {
+  class StatefulTransport implements HttpTransport {
+    readonly post = vi.fn();
+    private readonly frame =
+      'data: {"choices":[{"delta":{"content":"stateful"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n';
+
+    async *stream(): AsyncIterable<string> {
+      yield this.frame;
+    }
+  }
+
+  const transport = new StatefulTransport();
+  const client = new OpenAiCompatibleClient(transport, () => "secret", {
+    delay: vi.fn().mockResolvedValue(undefined)
+  });
+
+  await expect(
+    client.complete(
+      {
+        baseUrl: "https://api.example/v1",
+        model: "m",
+        messages: [],
+        stream: true
+      },
+      signal()
+    )
+  ).resolves.toMatchObject({ content: "stateful", streamed: true });
+  expect(transport.post).not.toHaveBeenCalled();
 });
 
 it("rejects an unsafe Base URL before resolving a secret or sending", async () => {

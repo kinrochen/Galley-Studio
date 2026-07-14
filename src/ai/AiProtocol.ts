@@ -31,6 +31,7 @@ export interface ChatTurnResult {
   content: string;
   toolCalls: ChatToolCall[];
   finishReason: string | null;
+  streamed?: boolean;
 }
 
 export interface ChatClient {

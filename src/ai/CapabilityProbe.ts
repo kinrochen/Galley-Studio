@@ -68,25 +68,12 @@ export class CapabilityProbe {
             ],
             stream: true
           },
-          signal
+          signal,
+          (result) => result.streamed === true
         )
       : false;
 
-    const vision = options.vision
-      ? await this.probeOne(
-          {
-            ...target,
-            messages: [
-              {
-                role: "user",
-                content:
-                  "Galley vision capability probe: acknowledge the supplied visual input."
-              }
-            ]
-          },
-          signal
-        )
-      : false;
+    const vision = false;
 
     return {
       tools,

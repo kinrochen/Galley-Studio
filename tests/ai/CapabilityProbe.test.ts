@@ -74,16 +74,13 @@ it("does not accept a different returned tool call as proof", async () => {
   ).resolves.toMatchObject({ tools: false });
 });
 
-it("runs opted-in streaming and vision requests independently", async () => {
+it("requires explicit stream evidence before reporting streaming", async () => {
   const requests: ChatRequest[] = [];
   const client: ChatClient = {
     complete: vi.fn(async (chatRequest) => {
       requests.push(chatRequest);
-      if (chatRequest.messages[0]?.content.includes("vision")) {
-        throw new Error("vision unsupported");
-      }
       if (chatRequest.stream) {
-        return completed({ content: "stream-ok" });
+        return completed({ content: "non-stream fallback" });
       }
       return completed({
         toolCalls: [
@@ -99,22 +96,41 @@ it("runs opted-in streaming and vision requests independently", async () => {
   const probe = new CapabilityProbe(client);
 
   const capabilities = await probe.probe(request, signal(), {
-    streaming: true,
-    vision: true
+    streaming: true
   });
 
   expect(capabilities).toMatchObject({
     tools: true,
-    streaming: true,
+    streaming: false,
     vision: false
   });
-  expect(requests).toHaveLength(3);
+  expect(requests).toHaveLength(2);
   expect(requests.some((chatRequest) => chatRequest.stream === true)).toBe(true);
-  expect(
-    requests.some((chatRequest) =>
-      chatRequest.messages[0]?.content.includes("vision")
+});
+
+it("reports streaming when the result carries explicit stream evidence", async () => {
+  const client: ChatClient = {
+    complete: vi.fn(async (chatRequest) =>
+      chatRequest.stream
+        ? completed({ content: "stream-ok", streamed: true })
+        : completed()
     )
-  ).toBe(true);
+  };
+
+  await expect(
+    new CapabilityProbe(client).probe(request, signal(), { streaming: true })
+  ).resolves.toMatchObject({ streaming: true });
+});
+
+it("keeps vision false without sending a misleading text-only probe", async () => {
+  const client: ChatClient = {
+    complete: vi.fn().mockResolvedValue(completed())
+  };
+
+  await expect(
+    new CapabilityProbe(client).probe(request, signal(), { vision: true })
+  ).resolves.toMatchObject({ vision: false });
+  expect(client.complete).toHaveBeenCalledTimes(1);
 });
 
 it("keeps one unsupported capability from suppressing other probes", async () => {
@@ -123,7 +139,7 @@ it("keeps one unsupported capability from suppressing other probes", async () =>
       if (chatRequest.tools) {
         throw new Error("tools unsupported");
       }
-      return completed({ content: "supported" });
+      return completed({ content: "supported", streamed: true });
     })
   };
 
@@ -132,7 +148,8 @@ it("keeps one unsupported capability from suppressing other probes", async () =>
       streaming: true,
       vision: true
     })
-  ).resolves.toMatchObject({ tools: false, streaming: true, vision: true });
+  ).resolves.toMatchObject({ tools: false, streaming: true, vision: false });
+  expect(client.complete).toHaveBeenCalledTimes(2);
 });
 
 it("propagates caller cancellation instead of reporting it as unsupported", async () => {

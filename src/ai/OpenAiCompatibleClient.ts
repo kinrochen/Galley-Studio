@@ -170,7 +170,13 @@ export class OpenAiCompatibleClient {
     };
 
     try {
-      for await (const chunk of stream(url, headers, body, signal)) {
+      for await (const chunk of stream.call(
+        this.transport,
+        url,
+        headers,
+        body,
+        signal
+      )) {
         consume(decoder.push(chunk));
       }
       consume(decoder.finish());
@@ -194,7 +200,12 @@ export class OpenAiCompatibleClient {
         return toolCall;
       });
 
-    return { content, toolCalls: normalizedTools, finishReason };
+    return {
+      content,
+      toolCalls: normalizedTools,
+      finishReason,
+      streamed: true
+    };
   }
 
   private async runWithTimeout<T>(
