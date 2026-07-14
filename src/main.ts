@@ -25,6 +25,7 @@ import {
   ArtifactRepository,
   type ArtifactVault
 } from "./documents/ArtifactRepository";
+import { isNormalizedVaultRelativePath } from "./documents/GalleySidecar";
 import { BUNDLED_SKILL } from "./generated/bundledSkill";
 import { GenerationPipeline } from "./generation/GenerationPipeline";
 import {
@@ -231,6 +232,9 @@ export class ObsidianArtifactVault
     if (!(await this.owns(handle))) {
       throw new Error("Galley temporary artifact ownership was lost.");
     }
+    if (!isNormalizedVaultRelativePath(finalPath)) {
+      throw new Error("Galley final artifact path is not normalized.");
+    }
     if (signal?.aborted) {
       throw new DOMException("Aborted", "AbortError");
     }
@@ -238,7 +242,11 @@ export class ObsidianArtifactVault
       return { status: "collision" };
     }
 
-    const observer = observeFinalFile(this.vault, finalPath);
+    const observer = observeFinalFile(
+      this.vault,
+      finalPath,
+      handle.contents
+    );
     try {
       await this.vault.adapter.copy(handle.path, finalPath);
     } catch (error) {
@@ -276,39 +284,38 @@ interface FinalFileObserver {
   dispose(): void;
 }
 
-function observeFinalFile(vault: Vault, finalPath: string): FinalFileObserver {
-  let observed: TFile | null = null;
-  let resolveWait: ((file: TFile) => void) | null = null;
+function observeFinalFile(
+  vault: Vault,
+  finalPath: string,
+  expectedContents: string
+): FinalFileObserver {
+  let armed = false;
+  let enqueueCandidate: ((file: TFile) => void) | null = null;
   const eventRef: EventRef = vault.on("create", (file) => {
     const created = asTFile(file);
-    if (file.path !== finalPath || !created) {
+    if (!armed || file.path !== finalPath || !created) {
       return;
     }
-    observed = created;
-    resolveWait?.(created);
+    enqueueCandidate?.(created);
   });
 
   return {
     async wait(signal) {
-      const indexed = asTFile(vault.getAbstractFileByPath(finalPath));
-      if (indexed) {
-        return indexed;
-      }
-      if (observed) {
-        return observed;
-      }
       if (signal?.aborted) {
         throw new DOMException("Aborted", "AbortError");
       }
 
       return new Promise<TFile>((resolve, reject) => {
         let settled = false;
+        let verifying = false;
+        const candidates: TFile[] = [];
         const finish = (action: () => void): void => {
           if (settled) return;
           settled = true;
+          armed = false;
           window.clearTimeout(timeout);
           signal?.removeEventListener("abort", onAbort);
-          resolveWait = null;
+          enqueueCandidate = null;
           action();
         };
         const onAbort = (): void => {
@@ -321,21 +328,77 @@ function observeFinalFile(vault: Vault, finalPath: string): FinalFileObserver {
             )
           );
         }, FINAL_IDENTITY_TIMEOUT_MS);
-        resolveWait = (file) => finish(() => resolve(file));
+        const verifyCandidates = async (): Promise<void> => {
+          if (verifying || settled) return;
+          verifying = true;
+          try {
+            while (candidates.length > 0 && !settled) {
+              const candidate = candidates.shift();
+              if (
+                candidate &&
+                (await verifiesFinalFile(
+                  vault,
+                  finalPath,
+                  expectedContents,
+                  candidate
+                ))
+              ) {
+                finish(() => resolve(candidate));
+              }
+            }
+          } finally {
+            verifying = false;
+            if (candidates.length > 0 && !settled) {
+              void verifyCandidates();
+            }
+          }
+        };
+        enqueueCandidate = (file) => {
+          candidates.push(file);
+          void verifyCandidates();
+        };
         signal?.addEventListener("abort", onAbort, { once: true });
+        armed = true;
 
-        const current =
-          observed ?? asTFile(vault.getAbstractFileByPath(finalPath));
+        const current = asTFile(vault.getAbstractFileByPath(finalPath));
         if (current) {
-          finish(() => resolve(current));
+          enqueueCandidate(current);
         }
       });
     },
     dispose() {
-      resolveWait = null;
+      armed = false;
+      enqueueCandidate = null;
       vault.offref(eventRef);
     }
   };
+}
+
+async function verifiesFinalFile(
+  vault: Vault,
+  finalPath: string,
+  expectedContents: string,
+  candidate: TFile
+): Promise<boolean> {
+  if (
+    candidate.path !== finalPath ||
+    vault.getAbstractFileByPath(finalPath) !== candidate
+  ) {
+    return false;
+  }
+
+  let actualContents: string;
+  try {
+    actualContents = await vault.adapter.read(finalPath);
+  } catch {
+    return false;
+  }
+
+  return (
+    actualContents === expectedContents &&
+    candidate.path === finalPath &&
+    vault.getAbstractFileByPath(finalPath) === candidate
+  );
 }
 
 function asTFile(file: TAbstractFile | null): TFile | null {

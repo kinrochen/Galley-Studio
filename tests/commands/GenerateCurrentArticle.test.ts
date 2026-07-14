@@ -440,6 +440,10 @@ describe("plugin command registration", () => {
       "generated/note.galley.html",
       "generated/note.galley.json"
     ]);
+    expect(harness.adapterReadCalls).toEqual([
+      "generated/note.galley.html",
+      "generated/note.galley.json"
+    ]);
   });
 
   it("uses exclusive adapter copies when a production destination appears between pair probe and commit", async () => {
@@ -530,6 +534,7 @@ describe("plugin command registration", () => {
     ]);
     expect(harness.createCalls).toEqual([".first.tmp", ".second.tmp"]);
     expect(harness.renameCalls.count).toBe(0);
+    expect(harness.adapterReadCalls).toEqual(["shared.galley.html"]);
     expect(harness.contents.get("shared.galley.html")).toBe(winner);
     expect(await sha256(harness.contents.get("shared.galley.html") ?? "")).toBe(
       await sha256(winner)
@@ -582,6 +587,84 @@ describe("plugin command registration", () => {
     expect(harness.copyCalls).toEqual([
       { from: ".delayed.tmp", to: "delayed.galley.html" }
     ]);
+    expect(harness.adapterReadCalls).toEqual(["delayed.galley.html"]);
+    expect(harness.renameCalls.count).toBe(0);
+  });
+
+  it("does not return a pair when different external bytes are indexed before copied-final binding", async () => {
+    vi.useFakeTimers();
+    const markdown = "# Replacement race\n";
+    const harness = makeProductionPluginApp(markdown, {
+      replaceBeforeIndexFor: "note.galley.html",
+      replacementBytes: "external replacement bytes"
+    });
+    const repository = new ArtifactRepository(
+      new ObsidianArtifactVault(harness.app.vault),
+      {
+        now: () => new Date("2026-07-14T00:00:00.000Z"),
+        randomUUID: () => UUID
+      }
+    );
+    const write = repository
+      .writeNew({
+        sourcePath: "note.md",
+        markdown,
+        document: makeDocument("verified"),
+        model: "test-model"
+      })
+      .then(
+        (paths) => ({ paths, error: null }),
+        (error: unknown) => ({ paths: null, error })
+    );
+    await vi.waitFor(() => {
+      expect(harness.copyCalls.length).toBeGreaterThanOrEqual(1);
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    const outcome = await write;
+    expect(outcome.paths).toBeNull();
+    expect(outcome.error).toEqual(
+      expect.objectContaining({
+        message: "Galley final artifact identity was not observed."
+      })
+    );
+    expect(harness.contents.get("note.galley.html")).toBe(
+      "external replacement bytes"
+    );
+    expect(harness.contents.has("note.galley.json")).toBe(false);
+    expect(harness.copyCalls).toEqual([
+      expect.objectContaining({ to: "note.galley.html" })
+    ]);
+    expect(harness.adapterReadCalls).toContain("note.galley.html");
+    expect(harness.deleteCalls).not.toContain("note.galley.html");
+  });
+
+  it("rejects and preserves a candidate whose TFile identity swaps during exact adapter read", async () => {
+    vi.useFakeTimers();
+    const harness = makeProductionPluginApp("", {
+      swapDuringReadFor: "swapped.galley.html",
+      replacementBytes: "replacement during read"
+    });
+    const artifacts = new ObsidianArtifactVault(harness.app.vault);
+    const temp = await artifacts.createOwned(".swapped.tmp", "expected bytes");
+    const commit = artifacts
+      .commitOwned(temp, "swapped.galley.html")
+      .catch((error: unknown) => error);
+    await vi.waitFor(() => {
+      expect(harness.copyCalls).toHaveLength(1);
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(await commit).toEqual(
+      expect.objectContaining({
+        message: "Galley final artifact identity was not observed."
+      })
+    );
+    expect(harness.adapterReadCalls).toContain("swapped.galley.html");
+    expect(harness.contents.get("swapped.galley.html")).toBe(
+      "replacement during read"
+    );
+    expect(harness.deleteCalls).toEqual([]);
     expect(harness.renameCalls.count).toBe(0);
   });
 
@@ -731,6 +814,9 @@ function makeProductionPluginApp(
     coordinateCopiesTo?: string;
     suppressCopyIndexFor?: string;
     delayCopyIndexFor?: string;
+    replaceBeforeIndexFor?: string;
+    swapDuringReadFor?: string;
+    replacementBytes?: string;
   } = {}
 ): {
   app: App;
@@ -740,6 +826,7 @@ function makeProductionPluginApp(
   copyCalls: Array<{ from: string; to: string }>;
   copyInitialPresence: boolean[];
   deleteCalls: string[];
+  adapterReadCalls: string[];
 } {
   type MemoryObsidianFile = {
     path: string;
@@ -761,8 +848,10 @@ function makeProductionPluginApp(
   const copyCalls: Array<{ from: string; to: string }> = [];
   const copyInitialPresence: boolean[] = [];
   const deleteCalls: string[] = [];
+  const adapterReadCalls: string[] = [];
   const createListeners = new Map<object, (file: MemoryObsidianFile) => unknown>();
   let racedFirstHtmlFinal = false;
+  let swappedDuringRead = false;
   let coordinatedCopyCount = 0;
   let releaseCoordinatedCopies: (() => void) | undefined;
   const coordinatedCopies = new Promise<void>((resolve) => {
@@ -776,6 +865,22 @@ function makeProductionPluginApp(
   const vault = {
     adapter: {
       exists: async (path: string) => contents.has(path),
+      read: async (path: string) => {
+        adapterReadCalls.push(path);
+        const value = contents.get(path);
+        if (value === undefined) throw new Error("Missing adapter read path");
+        if (path === options.swapDuringReadFor && !swappedDuringRead) {
+          swappedDuringRead = true;
+          const replacement = {
+            path,
+            name: path.slice(path.lastIndexOf("/") + 1)
+          };
+          files.set(path, replacement);
+          contents.set(path, options.replacementBytes ?? "replacement");
+          emitCreate(replacement);
+        }
+        return value;
+      },
       copy: async (from: string, to: string) => {
         copyCalls.push({ from, to });
         copyInitialPresence.push(contents.has(to));
@@ -803,6 +908,16 @@ function makeProductionPluginApp(
         if (value === undefined) throw new Error("Missing copy source");
         contents.set(to, value);
         if (to === options.suppressCopyIndexFor) return;
+        if (to === options.replaceBeforeIndexFor) {
+          const replacement = {
+            path: to,
+            name: to.slice(to.lastIndexOf("/") + 1)
+          };
+          files.set(to, replacement);
+          contents.set(to, options.replacementBytes ?? "replacement");
+          emitCreate(replacement);
+          return;
+        }
         const indexCopy = (): void => {
           const file = {
             path: to,
@@ -889,7 +1004,8 @@ function makeProductionPluginApp(
     createCalls,
     copyCalls,
     copyInitialPresence,
-    deleteCalls
+    deleteCalls,
+    adapterReadCalls
   };
 }
 
