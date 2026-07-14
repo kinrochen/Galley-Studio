@@ -9,6 +9,7 @@ export interface MemoryVaultStat {
 
 export class MemoryVault {
   readonly #files: Map<string, MemoryVaultFile>;
+  readonly #folders = new Set<string>();
   readonly #failRename: boolean;
 
   constructor(
@@ -73,6 +74,14 @@ export class MemoryVault {
     this.#files.delete(normalizeVaultPath(path));
   }
 
+  async ensureFolder(path: string): Promise<void> {
+    const normalized = normalizeVaultPath(path);
+    const segments = normalized.split("/");
+    for (let index = 1; index <= segments.length; index += 1) {
+      this.#folders.add(segments.slice(0, index).join("/"));
+    }
+  }
+
   async stat(path: string): Promise<MemoryVaultStat | null> {
     const contents = this.#files.get(normalizeVaultPath(path));
     if (contents === undefined) {
@@ -97,6 +106,10 @@ export class MemoryVault {
     const paths = [...this.#files.keys()].sort();
     Object.freeze(paths);
     return paths;
+  }
+
+  folders(): string[] {
+    return [...this.#folders].sort();
   }
 
   snapshot(): Readonly<Record<string, MemoryVaultFile>> {
