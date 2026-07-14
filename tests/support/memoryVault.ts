@@ -7,8 +7,15 @@ export interface MemoryVaultStat {
   size: number;
 }
 
+export interface MemoryVaultOwnedHandle {
+  readonly path: string;
+  readonly identity: object;
+  readonly contents: MemoryVaultFile;
+}
+
 export class MemoryVault {
   readonly #files: Map<string, MemoryVaultFile>;
+  readonly #identities = new Map<string, object>();
   readonly #folders = new Set<string>();
   readonly #failRename: boolean;
 
@@ -22,6 +29,9 @@ export class MemoryVault {
         copyContents(contents)
       ])
     );
+    for (const path of this.#files.keys()) {
+      this.#identities.set(path, {});
+    }
     this.#failRename = failRename;
   }
 
@@ -46,6 +56,7 @@ export class MemoryVault {
       throw new Error(`Vault file already exists: ${normalized}`);
     }
     this.#files.set(normalized, copyContents(contents));
+    this.#identities.set(normalized, {});
   }
 
   async modify(path: string, contents: MemoryVaultFile): Promise<void> {
@@ -63,15 +74,67 @@ export class MemoryVault {
     const normalizedFrom = normalizeVaultPath(from);
     const normalizedTo = normalizeVaultPath(to);
     const contents = this.requiredFile(normalizedFrom);
+    const identity = this.#identities.get(normalizedFrom);
     if (this.#files.has(normalizedTo)) {
       throw new Error(`Vault file already exists: ${normalizedTo}`);
     }
     this.#files.set(normalizedTo, contents);
+    if (identity) {
+      this.#identities.set(normalizedTo, identity);
+    }
     this.#files.delete(normalizedFrom);
+    this.#identities.delete(normalizedFrom);
   }
 
   async remove(path: string): Promise<void> {
-    this.#files.delete(normalizeVaultPath(path));
+    const normalized = normalizeVaultPath(path);
+    this.#files.delete(normalized);
+    this.#identities.delete(normalized);
+  }
+
+  async createOwned(
+    path: string,
+    contents: MemoryVaultFile
+  ): Promise<MemoryVaultOwnedHandle> {
+    await this.create(path, contents);
+    const normalized = normalizeVaultPath(path);
+    const identity = this.#identities.get(normalized);
+    if (!identity) {
+      throw new Error(`Vault ownership identity is missing: ${normalized}`);
+    }
+    return {
+      path: normalized,
+      identity,
+      contents: copyContents(contents)
+    };
+  }
+
+  async commitOwned(
+    handle: MemoryVaultOwnedHandle,
+    finalPath: string
+  ): Promise<
+    | { status: "committed"; handle: MemoryVaultOwnedHandle }
+    | { status: "collision" }
+  > {
+    if (!(await this.owns(handle))) {
+      throw new Error("Owned temporary file was replaced before commit");
+    }
+    const normalized = normalizeVaultPath(finalPath);
+    if (this.#files.has(normalized)) {
+      return { status: "collision" };
+    }
+    const committed = await this.createOwned(normalized, handle.contents);
+    return { status: "committed", handle: committed };
+  }
+
+  async owns(handle: MemoryVaultOwnedHandle): Promise<boolean> {
+    return this.#identities.get(handle.path) === handle.identity;
+  }
+
+  async removeOwned(handle: MemoryVaultOwnedHandle): Promise<void> {
+    if (await this.owns(handle)) {
+      await this.remove(handle.path);
+    }
   }
 
   async ensureFolder(path: string): Promise<void> {

@@ -5,12 +5,20 @@ import {
   type GalleySidecarV1
 } from "./GalleySidecar";
 
-export interface ArtifactVault {
+export type ArtifactCommitResult<Handle> =
+  | { status: "committed"; handle: Handle }
+  | { status: "collision" };
+
+export interface ArtifactVault<Handle> {
   exists(path: string): Promise<boolean>;
   ensureFolder(path: string): Promise<void>;
-  create(path: string, contents: string): Promise<void>;
-  rename(from: string, to: string): Promise<void>;
-  remove(path: string): Promise<void>;
+  createOwned(path: string, contents: string): Promise<Handle>;
+  commitOwned(
+    handle: Handle,
+    finalPath: string
+  ): Promise<ArtifactCommitResult<Handle>>;
+  owns(handle: Handle): Promise<boolean>;
+  removeOwned(handle: Handle): Promise<void>;
 }
 
 export interface ArtifactPaths {
@@ -41,11 +49,11 @@ export class ArtifactConfigurationError extends Error {
   }
 }
 
-interface WriteState {
-  htmlTempCreated: boolean;
-  sidecarTempCreated: boolean;
-  htmlFinalCreated: boolean;
-  sidecarFinalCreated: boolean;
+interface AttemptHandles<Handle> {
+  htmlTemp: Handle | null;
+  sidecarTemp: Handle | null;
+  htmlFinal: Handle | null;
+  sidecarFinal: Handle | null;
 }
 
 interface AttemptPaths extends ArtifactPaths {
@@ -55,21 +63,24 @@ interface AttemptPaths extends ArtifactPaths {
 
 const MARKDOWN_EXTENSION = /\.md$/i;
 
-export class ArtifactRepository {
+class PairCollision extends Error {}
+
+export class ArtifactRepository<Handle> {
   readonly #outputFolder: string;
   readonly #now: () => Date;
   readonly #randomUUID: () => string;
   readonly #serialize: (value: GalleySidecarV1) => string;
 
   constructor(
-    private readonly vault: ArtifactVault,
+    private readonly vault: ArtifactVault<Handle>,
     options: ArtifactRepositoryOptions = {}
   ) {
     this.#outputFolder = validateConfiguredOutputFolder(
       options.outputFolder ?? ""
     );
     this.#now = options.now ?? (() => new Date());
-    this.#randomUUID = options.randomUUID ?? (() => globalThis.crypto.randomUUID());
+    this.#randomUUID =
+      options.randomUUID ?? (() => globalThis.crypto.randomUUID());
     this.#serialize =
       options.serialize ?? ((value) => `${JSON.stringify(value, null, 2)}\n`);
   }
@@ -80,10 +91,7 @@ export class ArtifactRepository {
   ): Promise<ArtifactPaths> {
     throwIfAborted(signal);
     const sourcePath = validateSourcePath(input.sourcePath);
-    const outputDirectory = validateOutputDirectory(
-      this.#outputFolder,
-      sourceDirectory(sourcePath)
-    );
+    const outputDirectory = this.#outputFolder || sourceDirectory(sourcePath);
     await this.prepare(signal);
     throwIfAborted(signal);
 
@@ -119,44 +127,53 @@ export class ArtifactRepository {
           `.${pair.stem}.galley-tmp-${tempToken}-${attemptNumber}.json`
         )
       };
-      const state: WriteState = {
-        htmlTempCreated: false,
-        sidecarTempCreated: false,
-        htmlFinalCreated: false,
-        sidecarFinalCreated: false
+      const handles: AttemptHandles<Handle> = {
+        htmlTemp: null,
+        sidecarTemp: null,
+        htmlFinal: null,
+        sidecarFinal: null
       };
 
       try {
-        await this.vault.create(paths.htmlTemp, input.document.html);
-        state.htmlTempCreated = true;
+        handles.htmlTemp = await this.vault.createOwned(
+          paths.htmlTemp,
+          input.document.html
+        );
         throwIfAborted(signal);
-        await this.vault.create(paths.sidecarTemp, sidecarJson);
-        state.sidecarTempCreated = true;
+        handles.sidecarTemp = await this.vault.createOwned(
+          paths.sidecarTemp,
+          sidecarJson
+        );
         throwIfAborted(signal);
 
-        await this.vault.rename(paths.htmlTemp, paths.html);
-        state.htmlTempCreated = false;
-        state.htmlFinalCreated = true;
+        handles.htmlFinal = await commitOrCollide(
+          this.vault,
+          handles.htmlTemp,
+          paths.html
+        );
+        await this.vault.removeOwned(handles.htmlTemp);
+        handles.htmlTemp = null;
         throwIfAborted(signal);
-        await this.vault.rename(paths.sidecarTemp, paths.sidecar);
-        state.sidecarTempCreated = false;
-        state.sidecarFinalCreated = true;
+
+        handles.sidecarFinal = await commitOrCollide(
+          this.vault,
+          handles.sidecarTemp,
+          paths.sidecar
+        );
+        await this.vault.removeOwned(handles.sidecarTemp);
+        handles.sidecarTemp = null;
         throwIfAborted(signal);
 
         if (
-          !(await this.vault.exists(paths.html)) ||
-          !(await this.vault.exists(paths.sidecar))
+          !(await this.vault.owns(handles.htmlFinal)) ||
+          !(await this.vault.owns(handles.sidecarFinal))
         ) {
-          throw new Error("Galley artifact commit did not produce both files.");
+          throw new Error("Galley artifact commit lost an owned final file.");
         }
         return { html: paths.html, sidecar: paths.sidecar };
       } catch (error) {
-        const raced =
-          (!state.htmlFinalCreated && (await safelyExists(this.vault, paths.html))) ||
-          (!state.sidecarFinalCreated &&
-            (await safelyExists(this.vault, paths.sidecar)));
-        await cleanupAttempt(this.vault, paths, state);
-        if (raced && !isAbortError(error, signal)) {
+        await cleanupAttempt(this.vault, handles);
+        if (error instanceof PairCollision && !isAbortError(error, signal)) {
           candidateNumber += 1;
           continue;
         }
@@ -206,30 +223,37 @@ export class ArtifactRepository {
   }
 }
 
-async function cleanupAttempt(
-  vault: ArtifactVault,
-  paths: AttemptPaths,
-  state: WriteState
-): Promise<void> {
-  const cleanupPaths: string[] = [];
-  if (state.htmlTempCreated) cleanupPaths.push(paths.htmlTemp);
-  if (state.sidecarTempCreated) cleanupPaths.push(paths.sidecarTemp);
-  if (state.htmlFinalCreated) cleanupPaths.push(paths.html);
-  if (state.sidecarFinalCreated) cleanupPaths.push(paths.sidecar);
-  for (const path of cleanupPaths) {
-    try {
-      await vault.remove(path);
-    } catch {
-      // Best-effort cleanup must never replace the original failure.
-    }
+async function commitOrCollide<Handle>(
+  vault: ArtifactVault<Handle>,
+  handle: Handle,
+  finalPath: string
+): Promise<Handle> {
+  const result = await vault.commitOwned(handle, finalPath);
+  if (result.status === "collision") {
+    throw new PairCollision();
   }
+  return result.handle;
 }
 
-async function safelyExists(vault: ArtifactVault, path: string): Promise<boolean> {
-  try {
-    return await vault.exists(path);
-  } catch {
-    return false;
+async function cleanupAttempt<Handle>(
+  vault: ArtifactVault<Handle>,
+  handles: AttemptHandles<Handle>
+): Promise<void> {
+  const owned = [
+    handles.htmlTemp,
+    handles.sidecarTemp,
+    handles.htmlFinal,
+    handles.sidecarFinal
+  ];
+  for (const handle of owned) {
+    if (handle === null) {
+      continue;
+    }
+    try {
+      await vault.removeOwned(handle);
+    } catch {
+      // Cleanup is conditional and best-effort; preserve the original failure.
+    }
   }
 }
 
@@ -242,13 +266,6 @@ function validateSourcePath(sourcePath: string): string {
     throw new Error("Invalid source path: expected a normalized Markdown path.");
   }
   return sourcePath;
-}
-
-function validateOutputDirectory(configured: string, fallback: string): string {
-  if (!configured) {
-    return fallback;
-  }
-  return configured;
 }
 
 function validateConfiguredOutputFolder(configured: string): string {

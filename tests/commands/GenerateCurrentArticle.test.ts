@@ -9,6 +9,7 @@ import {
 } from "../../src/commands/GenerateCurrentArticle";
 import { ArtifactRepository } from "../../src/documents/ArtifactRepository";
 import { ArtifactConfigurationError } from "../../src/documents/ArtifactRepository";
+import { GalleySidecarV1Schema } from "../../src/documents/GalleySidecar";
 import type { GeneratedDocument } from "../../src/generation/GenerationPipeline";
 import GalleyPlugin from "../../src/main";
 import { normalizeSettings } from "../../src/settings/GalleySettings";
@@ -19,6 +20,7 @@ import {
 } from "../support/generationFixtures";
 import { memoryVault } from "../support/memoryVault";
 import { TEST_PACKAGE_HASH } from "../support/phase1Factories";
+import { validateSourceCoverage } from "../../src/validation/SourceCoverageValidator";
 import {
   notices,
   Platform,
@@ -287,6 +289,50 @@ describe("generateCurrentArticle", () => {
     expect(sidecar.sourceHash).toBe(await sha256(markdown));
     expect(sidecar.htmlHash).toBe(await sha256(await vault.read(paths.html)));
   });
+
+  it("saves a real empty-marker validator report as an unmistakable unverified pair", async () => {
+    const markdown = "# Empty marker\n";
+    const document = makeEmptyMarkerDocument(markdown);
+    const vault = memoryVault({ "folder/source.md": markdown });
+    const repository = new ArtifactRepository(vault, {
+      now: () => new Date("2026-07-14T00:00:00.000Z"),
+      randomUUID: () => UUID
+    });
+    const noticesSeen: string[] = [];
+    const context = makeContext({
+      read: async () => vault.read("folder/source.md"),
+      getActiveFile: () => ({ path: "folder/source.md", extension: "md" }),
+      createPipeline: async () => ({
+        model: "test-model",
+        pipeline: { generate: async () => document }
+      }),
+      createRepository: () => repository,
+      notice: (message) => noticesSeen.push(message)
+    });
+
+    const paths = await generateCurrentArticle(
+      context,
+      new AbortController().signal
+    );
+
+    expect(paths).toEqual({
+      html: "folder/source.unverified.galley.html",
+      sidecar: "folder/source.unverified.galley.json"
+    });
+    const html = await vault.read(paths.html);
+    const sidecar = GalleySidecarV1Schema.parse(
+      JSON.parse(await vault.read(paths.sidecar))
+    );
+    expect(await vault.read("folder/source.md")).toBe(markdown);
+    expect(sidecar.sourceHash).toBe(await sha256(markdown));
+    expect(sidecar.htmlHash).toBe(await sha256(html));
+    expect(sidecar.validation.issues).toContainEqual({
+      code: "source_invalid",
+      severity: "error",
+      message: "A generated source marker is invalid."
+    });
+    expect(noticesSeen.at(-1)).toContain("UNVERIFIED DRAFT");
+  });
 });
 
 describe("plugin command registration", () => {
@@ -384,6 +430,53 @@ describe("plugin command registration", () => {
     expect(notices.at(-1)).toBe(
       "Galley: Generated generated/note.galley.html and generated/note.galley.json."
     );
+    expect(harness.renameCalls.count).toBe(0);
+  });
+
+  it("uses exclusive final creates when a production destination races an overwrite-permitting rename", async () => {
+    const markdown = "# Production race\n";
+    const source = annotateMarkdown(markdown);
+    const harness = makeProductionPluginApp(markdown, {
+      raceFirstHtmlFinal: true
+    });
+    const providerResponses = [
+      openAiContent("tool calls not available"),
+      openAiContent(
+        JSON.stringify({
+          themeId: "graphite-minimal",
+          articleType: "tutorial",
+          reason: "Matches the article."
+        })
+      ),
+      openAiContent(validAuthoringHtml(source))
+    ];
+    setRequestUrlHandler(async () => {
+      const response = providerResponses.shift();
+      if (!response) throw new Error("Unexpected provider request");
+      return response;
+    });
+    const plugin = new GalleyPlugin(harness.app, {} as PluginManifest);
+    await plugin.onload();
+    plugin.settings = normalizeSettings({
+      baseUrl: "https://api.example/v1",
+      model: "production-model",
+      secretId: "secret-id",
+      outputFolder: "generated"
+    });
+    const command = commandEntries(plugin).find(
+      ({ id }) => id === "generate-current-article"
+    );
+
+    await command?.callback?.();
+
+    expect(harness.renameCalls.count).toBe(0);
+    expect(harness.contents.get("generated/note.galley.html")).toBe(
+      "replacement HTML"
+    );
+    expect(harness.contents.get("generated/note-2.galley.html")).toBe(
+      validAuthoringHtml(source)
+    );
+    expect(harness.contents.has("generated/note-2.galley.json")).toBe(true);
   });
 });
 
@@ -442,9 +535,24 @@ function makeDocument(status: GeneratedDocument["status"]): GeneratedDocument {
       skillVersion: "test-version",
       packageHash: TEST_PACKAGE_HASH,
       loadMode: "injected",
-      files: ["SKILL.md"]
+      files: ["SKILL.md", "references/theme-index.md"]
     },
     diagnostics: []
+  };
+}
+
+function makeEmptyMarkerDocument(markdown: string): GeneratedDocument {
+  const source = annotateMarkdown(markdown);
+  const html =
+    '<!DOCTYPE html><html><head><title>Article</title></head><body><article><section data-galley-source="">empty</section></article></body></html>';
+  return {
+    ...makeDocument("unverified"),
+    html,
+    source,
+    validation: {
+      valid: false,
+      issues: validateSourceCoverage(source, html)
+    }
   };
 }
 
@@ -488,9 +596,13 @@ function makePluginApp(): App {
   } as unknown as App;
 }
 
-function makeProductionPluginApp(markdown: string): {
+function makeProductionPluginApp(
+  markdown: string,
+  options: { raceFirstHtmlFinal?: boolean } = {}
+): {
   app: App;
   contents: Map<string, string>;
+  renameCalls: { count: number };
 } {
   type MemoryObsidianFile = {
     path: string;
@@ -507,6 +619,8 @@ function makeProductionPluginApp(markdown: string): {
   };
   const files = new Map<string, MemoryObsidianFile>([[source.path, source]]);
   const contents = new Map<string, string>([[source.path, markdown]]);
+  const renameCalls = { count: 0 };
+  let racedFirstHtmlFinal = false;
   const vault = {
     getAbstractFileByPath: (path: string) => files.get(path) ?? null,
     read: async (file: MemoryObsidianFile) => {
@@ -515,6 +629,17 @@ function makeProductionPluginApp(markdown: string): {
       return value;
     },
     create: async (path: string, value: string) => {
+      if (
+        options.raceFirstHtmlFinal &&
+        !racedFirstHtmlFinal &&
+        path === "generated/note.galley.html"
+      ) {
+        racedFirstHtmlFinal = true;
+        const replacement = { path, name: "note.galley.html" };
+        files.set(path, replacement);
+        contents.set(path, "replacement HTML");
+        throw new Error("Destination raced exclusive create");
+      }
       if (files.has(path)) throw new Error("Exists");
       const file = {
         path,
@@ -535,7 +660,9 @@ function makeProductionPluginApp(markdown: string): {
       return folder;
     },
     rename: async (file: MemoryObsidianFile, to: string) => {
-      if (files.has(to)) throw new Error("Exists");
+      renameCalls.count += 1;
+      files.delete(to);
+      contents.delete(to);
       const value = contents.get(file.path);
       files.delete(file.path);
       contents.delete(file.path);
@@ -558,7 +685,7 @@ function makeProductionPluginApp(markdown: string): {
     workspace: { getActiveFile: () => source },
     vault
   } as unknown as App;
-  return { app, contents };
+  return { app, contents, renameCalls };
 }
 
 function openAiContent(content: string): { status: number; json: unknown } {

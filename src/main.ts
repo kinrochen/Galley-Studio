@@ -4,6 +4,7 @@ import {
   Platform,
   Plugin,
   type TAbstractFile,
+  type TFile,
   type Vault
 } from "obsidian";
 import { AiError } from "./ai/AiError";
@@ -178,7 +179,13 @@ async function createProductionGeneration(
   };
 }
 
-class ObsidianArtifactVault implements ArtifactVault {
+interface ObsidianOwnedArtifact {
+  readonly path: string;
+  readonly file: TFile;
+  readonly contents: string;
+}
+
+class ObsidianArtifactVault implements ArtifactVault<ObsidianOwnedArtifact> {
   constructor(private readonly vault: Vault) {}
 
   async exists(path: string): Promise<boolean> {
@@ -200,28 +207,45 @@ class ObsidianArtifactVault implements ArtifactVault {
     }
   }
 
-  async create(path: string, contents: string): Promise<void> {
-    if (this.vault.getAbstractFileByPath(path)) {
-      throw new Error("Galley artifact path already exists.");
-    }
-    await this.vault.create(path, contents);
+  async createOwned(
+    path: string,
+    contents: string
+  ): Promise<ObsidianOwnedArtifact> {
+    const file = await this.vault.create(path, contents);
+    return { path, file, contents };
   }
 
-  async rename(from: string, to: string): Promise<void> {
-    const source = this.vault.getAbstractFileByPath(from);
-    if (!source) {
-      throw new Error("Galley temporary artifact is missing.");
+  async commitOwned(
+    handle: ObsidianOwnedArtifact,
+    finalPath: string
+  ): Promise<
+    | { status: "committed"; handle: ObsidianOwnedArtifact }
+    | { status: "collision" }
+  > {
+    if (!(await this.owns(handle))) {
+      throw new Error("Galley temporary artifact ownership was lost.");
     }
-    if (this.vault.getAbstractFileByPath(to)) {
-      throw new Error("Galley artifact path already exists.");
+    try {
+      const file = await this.vault.create(finalPath, handle.contents);
+      return {
+        status: "committed",
+        handle: { path: finalPath, file, contents: handle.contents }
+      };
+    } catch (error) {
+      if (this.vault.getAbstractFileByPath(finalPath)) {
+        return { status: "collision" };
+      }
+      throw error;
     }
-    await this.vault.rename(source, to);
   }
 
-  async remove(path: string): Promise<void> {
-    const file = this.vault.getAbstractFileByPath(path);
-    if (file) {
-      await this.vault.delete(file, true);
+  async owns(handle: ObsidianOwnedArtifact): Promise<boolean> {
+    return this.vault.getAbstractFileByPath(handle.path) === handle.file;
+  }
+
+  async removeOwned(handle: ObsidianOwnedArtifact): Promise<void> {
+    if (await this.owns(handle)) {
+      await this.vault.delete(handle.file, true);
     }
   }
 }
