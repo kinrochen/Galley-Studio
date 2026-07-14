@@ -9,7 +9,9 @@ import type { GalleySettings } from "./GalleySettings";
 
 export interface GalleySettingsPlugin extends Plugin {
   settings: GalleySettings;
+  readonly canGenerate: boolean;
   saveSettings(): Promise<void>;
+  checkModelConnectionAndSkillLoading(): Promise<void>;
 }
 
 export class GalleySettingTab extends PluginSettingTab {
@@ -100,5 +102,21 @@ export class GalleySettingTab extends PluginSettingTab {
           await this.galley.saveSettings();
         })
       );
+
+    if (this.galley.canGenerate) {
+      new Setting(this.containerEl)
+        .setName("Connection and Skill diagnostic")
+        .setDesc(
+          "Check the configured model and audit loading of the bundled Skill."
+        )
+        .addButton((component) =>
+          component
+            .setButtonText("Check model connection and Skill loading")
+            .setCta()
+            .onClick(() =>
+              this.galley.checkModelConnectionAndSkillLoading()
+            )
+        );
+    }
   }
 }

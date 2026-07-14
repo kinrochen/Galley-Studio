@@ -2,6 +2,65 @@ export const Platform = {
   isMobileApp: false
 };
 
+export interface RequestUrlParam {
+  url: string;
+  method?: string;
+  body?: string | ArrayBuffer;
+  headers?: Record<string, string>;
+  throw?: boolean;
+}
+
+export interface RequestUrlResponse {
+  status: number;
+  json: unknown;
+}
+
+type RequestUrlHandler = (
+  request: RequestUrlParam | string
+) => Promise<RequestUrlResponse>;
+
+let requestUrlHandler: RequestUrlHandler = async () => {
+  throw new Error("Unexpected requestUrl call");
+};
+
+export function setRequestUrlHandler(handler: RequestUrlHandler): void {
+  requestUrlHandler = handler;
+}
+
+export function resetRequestUrlHandler(): void {
+  requestUrlHandler = async () => {
+    throw new Error("Unexpected requestUrl call");
+  };
+}
+
+export function requestUrl(
+  request: RequestUrlParam | string
+): Promise<RequestUrlResponse> {
+  return requestUrlHandler(request);
+}
+
+export const notices: string[] = [];
+export const openedModals: Modal[] = [];
+
+export class Notice {
+  constructor(message: string | DocumentFragment) {
+    notices.push(
+      typeof message === "string" ? message : message.textContent ?? ""
+    );
+  }
+}
+
+export class Modal {
+  readonly titleEl = document.createElement("div");
+  readonly contentEl = document.createElement("div");
+
+  constructor(readonly app: unknown) {}
+
+  open(): void {
+    openedModals.push(this);
+  }
+}
+
 export class Plugin {
   readonly app: unknown;
   readonly manifest: unknown;
@@ -78,8 +137,36 @@ export class Setting {
     return this;
   }
 
+  addButton(callback: (component: ButtonComponent) => unknown): this {
+    callback(new ButtonComponent(this.controlEl));
+    return this;
+  }
+
   addComponent<T>(callback: (containerEl: HTMLElement) => T): this {
     callback(this.controlEl);
+    return this;
+  }
+}
+
+export class ButtonComponent {
+  readonly buttonEl: HTMLButtonElement;
+
+  constructor(containerEl: HTMLElement) {
+    this.buttonEl = document.createElement("button");
+    containerEl.append(this.buttonEl);
+  }
+
+  setButtonText(value: string): this {
+    this.buttonEl.textContent = value;
+    return this;
+  }
+
+  setCta(): this {
+    return this;
+  }
+
+  onClick(callback: () => unknown): this {
+    this.buttonEl.addEventListener("click", () => callback());
     return this;
   }
 }
