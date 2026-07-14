@@ -1,5 +1,6 @@
 import {
   DocumentCommitVerificationError,
+  DocumentPostCommitError,
   type ArtifactPaths,
   type DocumentObservation,
   type DocumentPairSnapshot,
@@ -15,6 +16,7 @@ import {
   type GalleySidecarV1
 } from "./GalleySidecar";
 import { sanitizeAuthoringDocument } from "../security/AuthoringSanitizer";
+import type { PreparedHistorySnapshot } from "./HistoryRepository";
 
 export interface DocumentSessionState {
   dirty: boolean;
@@ -28,12 +30,17 @@ export interface DocumentSessionState {
 export type SaveReason = "auto" | "explicit" | "overwrite";
 
 export interface DocumentHistory {
-  store(
+  prepare(
     documentId: string,
     html: string,
     timestamp: Date,
     signal?: AbortSignal
+  ): Promise<PreparedHistorySnapshot>;
+  commit(
+    prepared: PreparedHistorySnapshot,
+    signal?: AbortSignal
   ): Promise<unknown>;
+  rollback(prepared: PreparedHistorySnapshot): Promise<void>;
 }
 
 export interface DocumentSessionDependencies<Observation, Ownership> {
@@ -181,7 +188,6 @@ export class DocumentSession<Observation, Ownership> {
       const targetHtml = sanitizeAuthoringDocument(this.#currentHtml).html;
       const targetDocument = GalleyDocumentCodec.parse(targetHtml);
       assertSameShell(this.#currentDocument, targetDocument);
-      const savedRevision = this.#revision;
       const targetHash = await sha256Text(targetHtml);
       throwIfAborted(signal);
 
@@ -195,42 +201,85 @@ export class DocumentSession<Observation, Ownership> {
         throw new DocumentConflictError();
       }
 
+      // Overwrite adopts the latest valid sidecar as the identity/provenance
+      // owner. Normal saves retain the sidecar validated when the session loaded.
+      const baseSidecar =
+        reason === "overwrite"
+          ? parseSidecar(current.sidecarJson)
+          : this.#sidecar;
       const nextSidecar = GalleySidecarV1Schema.parse({
-        ...this.#sidecar,
+        ...baseSidecar,
         htmlHash: targetHash
       });
       const sidecarJson = serializeSidecar(nextSidecar);
       const savedAt = this.#now();
-      await this.#history.store(
-        this.#sidecar.documentId,
+      const nextSourceChanged = await sourceChanged(
+        this.#repository,
+        nextSidecar,
+        signal
+      );
+      const preparedHistory = await this.#history.prepare(
+        nextSidecar.documentId,
         current.html,
         savedAt,
         signal
       );
-      throwIfAborted(signal);
 
-      const result = await this.#repository.replacePair(
-        this.#paths,
-        current.observation,
-        { html: targetHtml, sidecarJson },
-        signal
-      );
+      let result;
+      try {
+        throwIfAborted(signal);
+        result = await this.#repository.replacePair(
+          this.#paths,
+          current.observation,
+          { html: targetHtml, sidecarJson },
+          signal
+        );
+      } catch (error) {
+        if (error instanceof DocumentPostCommitError) {
+          await this.#finishPostCommitFailure(
+            error,
+            preparedHistory,
+            targetHtml,
+            targetDocument,
+            nextSidecar,
+            nextSourceChanged,
+            savedAt
+          );
+          throw postCommitCause(error);
+        }
+        await this.#history.rollback(preparedHistory);
+        throw error;
+      }
       if (result.status === "conflict") {
+        await this.#history.rollback(preparedHistory);
         this.#conflict = true;
         throw new DocumentConflictError();
       }
       verifyCommittedSnapshot(result.snapshot, nextSidecar);
-
-      this.#observation = result.snapshot.observation;
-      this.#sidecar = nextSidecar;
-      this.#savedHtml = targetHtml;
-      this.#savedDocument = targetDocument;
-      this.#htmlHash = targetHash;
-      this.#lastSavedAt = validClockIso(savedAt);
-      this.#conflict = false;
-      this.#dirty = !(
-        this.#revision === savedRevision && this.#currentHtml === targetHtml
+      try {
+        await this.#history.commit(preparedHistory);
+      } catch (error) {
+        this.#applyCommitted(
+          result.snapshot,
+          targetHtml,
+          targetDocument,
+          nextSidecar,
+          nextSourceChanged,
+          savedAt
+        );
+        this.#conflict = true;
+        this.#dirty = true;
+        throw error;
+      }
+      this.#applyCommitted(
+        result.snapshot,
+        targetHtml,
+        targetDocument,
+        nextSidecar,
+        nextSourceChanged,
+        savedAt
       );
+      this.#conflict = false;
     } finally {
       this.#saving = false;
     }
@@ -265,7 +314,10 @@ export class DocumentSession<Observation, Ownership> {
       const htmlHash = await sha256Text(copyHtml);
       throwIfAborted(signal);
       const copyDocumentId = this.#randomUUID();
-      if (copyDocumentId === this.#sidecar.documentId) {
+      if (
+        canonicalDocumentId(copyDocumentId) ===
+        canonicalDocumentId(this.#sidecar.documentId)
+      ) {
         throw new Error("A Galley copy requires a new document ID.");
       }
       const sidecar = GalleySidecarV1Schema.parse({
@@ -302,6 +354,77 @@ export class DocumentSession<Observation, Ownership> {
       throw error;
     }
   }
+
+  async #finishPostCommitFailure(
+    error: DocumentPostCommitError<Observation>,
+    preparedHistory: PreparedHistorySnapshot,
+    targetHtml: string,
+    targetDocument: GalleyDocument,
+    nextSidecar: GalleySidecarV1,
+    nextSourceChanged: boolean,
+    savedAt: Date
+  ): Promise<void> {
+    let historyFinalizationFailed = false;
+    let historyFinalizationError: unknown;
+    try {
+      await this.#history.commit(preparedHistory);
+    } catch (error) {
+      historyFinalizationFailed = true;
+      historyFinalizationError = error;
+    }
+    let snapshot = error.snapshot;
+    if (!snapshot) {
+      try {
+        const observed = await this.#repository.readPair(this.#paths);
+        if (observed) {
+          verifyCommittedSnapshot(observed, nextSidecar);
+          if (
+            observed.html === targetHtml &&
+            observed.sidecarJson === serializeSidecar(nextSidecar)
+          ) {
+            snapshot = observed;
+          }
+        }
+      } catch {
+        // The operation remains ambiguous and is marked conflicted/dirty below.
+      }
+    }
+    if (snapshot) {
+      this.#applyCommitted(
+        snapshot,
+        targetHtml,
+        targetDocument,
+        nextSidecar,
+        nextSourceChanged,
+        savedAt
+      );
+    } else {
+      this.#dirty = true;
+    }
+    // Any exceptional post-commit path remains explicitly actionable even if a
+    // reconciliation read found the intended bytes.
+    this.#dirty = true;
+    this.#conflict = true;
+    if (historyFinalizationFailed) throw historyFinalizationError;
+  }
+
+  #applyCommitted(
+    snapshot: DocumentPairSnapshot<Observation>,
+    targetHtml: string,
+    targetDocument: GalleyDocument,
+    nextSidecar: GalleySidecarV1,
+    nextSourceChanged: boolean,
+    savedAt: Date
+  ): void {
+    this.#observation = snapshot.observation;
+    this.#sidecar = nextSidecar;
+    this.#savedHtml = targetHtml;
+    this.#savedDocument = targetDocument;
+    this.#htmlHash = snapshot.htmlHash;
+    this.#sourceChanged = nextSourceChanged;
+    this.#lastSavedAt = validClockIso(savedAt);
+    this.#dirty = this.#currentHtml !== targetHtml;
+  }
 }
 
 async function loadDocument<Observation, Ownership>(
@@ -317,11 +440,18 @@ async function loadDocument<Observation, Ownership>(
     throw new Error("Galley sidecar HTML hash does not match the exact document.");
   }
   const document = GalleyDocumentCodec.parse(snapshot.html);
-  const source = await repository.readText(sidecar.sourcePath, signal);
-  const sourceChanged =
-    source === null || (await sha256Text(source)) !== sidecar.sourceHash;
+  const changed = await sourceChanged(repository, sidecar, signal);
   throwIfAborted(signal);
-  return { snapshot, sidecar, document, sourceChanged };
+  return { snapshot, sidecar, document, sourceChanged: changed };
+}
+
+async function sourceChanged<Observation, Ownership>(
+  repository: GalleyDocumentRepository<Observation, Ownership>,
+  sidecar: GalleySidecarV1,
+  signal?: AbortSignal
+): Promise<boolean> {
+  const source = await repository.readText(sidecar.sourcePath, signal);
+  return source === null || (await sha256Text(source)) !== sidecar.sourceHash;
 }
 
 function parseSidecar(value: string): GalleySidecarV1 {
@@ -367,6 +497,17 @@ function validClockIso(date: Date): string {
     throw new Error("Galley save clock returned an invalid date.");
   }
   return date.toISOString();
+}
+
+function canonicalDocumentId(documentId: string): string {
+  return GalleySidecarV1Schema.shape.documentId.parse(documentId).toLowerCase();
+}
+
+function postCommitCause(error: DocumentPostCommitError<unknown>): unknown {
+  return error.operationError instanceof DOMException &&
+    error.operationError.name === "AbortError"
+    ? error.operationError
+    : error;
 }
 
 function throwIfAborted(signal?: AbortSignal): void {

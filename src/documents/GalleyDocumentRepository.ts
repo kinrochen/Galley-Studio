@@ -1,7 +1,9 @@
 import {
+  GalleySidecarV1Schema,
   isNormalizedVaultRelativePath,
   sha256Text
 } from "./GalleySidecar";
+import { GalleyDocumentCodec } from "./GalleyDocumentCodec";
 
 export interface ArtifactPaths {
   html: string;
@@ -22,7 +24,7 @@ export type VaultCreatePairResult<Observation, Ownership> =
   | {
       status: "created";
       observation: Observation;
-      ownership: Ownership;
+      ownership: readonly [Ownership, Ownership];
     }
   | { status: "collision" };
 
@@ -38,18 +40,18 @@ export interface GalleyDocumentVault<Observation, Ownership> {
   ): Promise<VaultPairSnapshot<Observation> | null>;
   readText(path: string, signal?: AbortSignal): Promise<string | null>;
   samePairObservation(left: Observation, right: Observation): boolean;
-  replacePairAtomically(
+  replacePairTransactional(
     paths: ArtifactPaths,
     expected: Observation,
     next: { html: string; sidecarJson: string },
     signal?: AbortSignal
   ): Promise<VaultReplacePairResult<Observation>>;
-  createPairAtomically(
+  createPairTransactional(
     paths: ArtifactPaths,
     contents: { html: string; sidecarJson: string },
     signal?: AbortSignal
   ): Promise<VaultCreatePairResult<Observation, Ownership>>;
-  removeCreatedPair(ownership: Ownership): Promise<void>;
+  removeCreatedMember(ownership: Ownership): Promise<void>;
 }
 
 const OBSERVATION = Symbol("GalleyDocumentObservation");
@@ -84,6 +86,20 @@ export class DocumentCommitVerificationError extends Error {
   constructor() {
     super("Galley could not verify the complete committed document pair.");
     this.name = "DocumentCommitVerificationError";
+  }
+}
+
+export class DocumentPostCommitError<Observation>
+  extends DocumentCommitVerificationError
+{
+  readonly committed = true;
+
+  constructor(
+    readonly snapshot: DocumentPairSnapshot<Observation> | null,
+    readonly operationError: unknown
+  ) {
+    super();
+    this.name = "DocumentPostCommitError";
   }
 }
 
@@ -146,25 +162,29 @@ export class GalleyDocumentRepository<Observation, Ownership> {
     signal?: AbortSignal
   ): Promise<ReplacePairResult<Observation>> {
     validatePairPaths(paths);
+    await validatePairContents(next);
     const expectedData = this.#observationData(expected);
     throwIfAborted(signal);
-    const result = await this.vault.replacePairAtomically(
+    const result = await this.vault.replacePairTransactional(
       paths,
       expectedData.vault,
       next,
       signal
     );
-    throwIfAborted(signal);
     if (result.status === "conflict") return result;
-    return {
-      status: "committed",
-      snapshot: await this.#verifyCommitted(
-        paths,
-        next,
-        result.observation,
-        signal
-      )
-    };
+    let snapshot: DocumentPairSnapshot<Observation>;
+    try {
+      snapshot = await this.#verifyCommitted(paths, next, result.observation);
+    } catch (error) {
+      throw new DocumentPostCommitError<Observation>(null, error);
+    }
+    if (signal?.aborted) {
+      throw new DocumentPostCommitError<Observation>(
+        snapshot,
+        new DOMException("Aborted", "AbortError")
+      );
+    }
+    return { status: "committed", snapshot };
   }
 
   async createNumberedCopy(
@@ -173,6 +193,7 @@ export class GalleyDocumentRepository<Observation, Ownership> {
     signal?: AbortSignal
   ): Promise<CreatedDocumentPair<Observation>> {
     validatePairPaths(currentPaths);
+    await validatePairContents(contents);
     const { directory, stem, unverified } = copyStem(currentPaths);
     let number = 2;
 
@@ -185,7 +206,7 @@ export class GalleyDocumentRepository<Observation, Ownership> {
         html: joinPath(directory, `${numbered}.galley.html`),
         sidecar: joinPath(directory, `${numbered}.galley.json`)
       };
-      const result = await this.vault.createPairAtomically(
+      const result = await this.vault.createPairTransactional(
         paths,
         contents,
         signal
@@ -205,10 +226,12 @@ export class GalleyDocumentRepository<Observation, Ownership> {
         );
         return { paths, snapshot };
       } catch (error) {
-        try {
-          await this.vault.removeCreatedPair(result.ownership);
-        } catch {
-          // Preserve the operation/verification error. Cleanup is identity-safe.
+        for (const ownership of result.ownership) {
+          try {
+            await this.vault.removeCreatedMember(ownership);
+          } catch {
+            // Preserve the operation/verification error. Cleanup is identity-safe.
+          }
         }
         throw error;
       }
@@ -233,6 +256,10 @@ export class GalleyDocumentRepository<Observation, Ownership> {
     ) {
       throw new DocumentCommitVerificationError();
     }
+    await validatePairContents({
+      html: verified.html,
+      sidecarJson: verified.sidecarJson
+    });
     return verified;
   }
 
@@ -245,6 +272,25 @@ export class GalleyDocumentRepository<Observation, Ownership> {
       throw new Error("Galley document observation belongs to another repository.");
     }
     return data;
+  }
+}
+
+async function validatePairContents(contents: {
+  html: string;
+  sidecarJson: string;
+}): Promise<void> {
+  let sidecar;
+  try {
+    GalleyDocumentCodec.parse(contents.html);
+    sidecar = GalleySidecarV1Schema.parse(
+      JSON.parse(contents.sidecarJson) as unknown
+    );
+  } catch {
+    throw new Error("Galley pair failed strict HTML or sidecar semantic validation.");
+  }
+  const htmlHash = await sha256Text(contents.html);
+  if (sidecar.htmlHash !== htmlHash) {
+    throw new Error("Galley sidecar hash does not match the exact HTML.");
   }
 }
 

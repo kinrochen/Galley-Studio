@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import { DocumentSession } from "../../src/documents/DocumentSession";
+import { GalleyDocumentRepository } from "../../src/documents/GalleyDocumentRepository";
 import { GalleyDocumentCodec } from "../../src/documents/GalleyDocumentCodec";
+import { HistoryRepository } from "../../src/documents/HistoryRepository";
 import {
   GalleySidecarV1Schema,
   sha256Text
@@ -11,6 +13,7 @@ import {
   TEST_COPY_ID,
   TEST_NOW,
   TEST_PATHS,
+  type MemoryFaultStage,
   type MemoryWorkbenchHooks
 } from "../support/workbenchFixtures";
 
@@ -228,6 +231,10 @@ describe("DocumentSession", () => {
     });
     expect(fixture.vault.read(TEST_PATHS.html)).toContain("raced");
     expect(session.state()).toMatchObject({ dirty: true, conflict: true });
+    expect(await fixture.history.list(fixture.sidecar.documentId)).toEqual([]);
+    expect(fixture.vault.paths().some((path) => path.endsWith(".pending"))).toBe(
+      false
+    );
   });
 
   it("overwrite snapshots the latest external HTML and replaces it with the local pair", async () => {
@@ -247,6 +254,70 @@ describe("DocumentSession", () => {
     expect(session.state()).toMatchObject({ dirty: false, conflict: false });
   });
 
+  it("overwrite adopts the latest valid sidecar identity and provenance policy", async () => {
+    const fixture = await makeSessionDeps();
+    const session = await DocumentSession.open(fixture.dependencies);
+    session.updateBody("<article><p>local overwrite</p></article>");
+    const localHtml = session.html();
+    const latestDocumentId = "01890f8e-7b6d-7cc0-98c4-dc0c0c07398f";
+    const latestSourcePath = "notes/relinked.md";
+    const latestSource = "# Relinked source\n";
+    const latestSidecar = GalleySidecarV1Schema.parse({
+      ...fixture.sidecar,
+      documentId: latestDocumentId,
+      sourcePath: latestSourcePath,
+      sourceHash: await sha256Text(latestSource),
+      model: "external/provenance-v2"
+    });
+    fixture.vault.writeExternally(latestSourcePath, latestSource);
+    fixture.vault.writeExternally(
+      TEST_PATHS.sidecar,
+      `${JSON.stringify(latestSidecar, null, 2)}\n`
+    );
+
+    await session.save("overwrite");
+
+    const savedSidecar = GalleySidecarV1Schema.parse(
+      JSON.parse(fixture.vault.read(TEST_PATHS.sidecar) ?? "")
+    );
+    expect(savedSidecar).toEqual({
+      ...latestSidecar,
+      htmlHash: await sha256Text(localHtml)
+    });
+    expect(
+      (await fixture.history.list(latestDocumentId)).map(({ html }) => html)
+    ).toEqual([fixture.html]);
+    expect(await fixture.history.list(fixture.sidecar.documentId)).toEqual([]);
+    expect(session.state()).toMatchObject({
+      dirty: false,
+      conflict: false,
+      sourceChanged: false
+    });
+  });
+
+  it.each([
+    "123E4567-E89B-42D3-A456-426614174000",
+    "01890f8e-7b6d-7cc0-98c4-dc0c0c07398f",
+    "01890f8e-7b6d-8cc0-98c4-dc0c0c07398f",
+    "00000000-0000-0000-0000-000000000000"
+  ])("opens and saves sidecar-valid document ID %s", async (documentId) => {
+    const fixture = await makeSessionDeps({ documentId });
+    const session = await DocumentSession.open(fixture.dependencies);
+    session.updateBody("<article><p>uuid compatible</p></article>");
+
+    await session.save("explicit");
+
+    expect(
+      (await fixture.history.list(documentId)).map(({ html }) => html)
+    ).toEqual([fixture.html]);
+    expect(
+      fixture.vault
+        .paths()
+        .filter((path) => path.startsWith(".galley/history/"))
+        .every((path) => path.includes(`/${documentId.toLowerCase()}/`))
+    ).toBe(true);
+  });
+
   it("keeps the old matching pair and dirty state after an injected atomic commit failure", async () => {
     const hooks: MemoryWorkbenchHooks = { failReplace: true };
     const fixture = await makeSessionDeps({ hooks });
@@ -263,6 +334,92 @@ describe("DocumentSession", () => {
     );
     expect(sidecar.htmlHash).toBe(await sha256Text(fixture.html));
     expect(session.state()).toMatchObject({ dirty: true, saving: false });
+    expect(await fixture.history.list(fixture.sidecar.documentId)).toEqual([]);
+  });
+
+  it.each([
+    ["after HTML write", ["replace_after_html"]],
+    ["after sidecar write", ["replace_after_sidecar"]],
+    [
+      "during HTML rollback",
+      ["replace_after_sidecar", "replace_rollback_html"]
+    ],
+    [
+      "during sidecar rollback",
+      ["replace_after_sidecar", "replace_rollback_sidecar"]
+    ]
+  ] as const)(
+    "the transactional reference adapter recovers a matching old pair on failure %s",
+    async (_label, stages) => {
+      const hooks: MemoryWorkbenchHooks = {
+        faultStages: new Set<MemoryFaultStage>(stages)
+      };
+      const fixture = await makeSessionDeps({ hooks });
+      const session = await DocumentSession.open(fixture.dependencies);
+      session.updateBody("<article><p>transactional replacement</p></article>");
+
+      await expect(session.save("explicit")).rejects.toThrow(/injected/i);
+
+      await expectMatchingPair(fixture.vault, TEST_PATHS);
+      expect(fixture.vault.read(TEST_PATHS.html)).toBe(fixture.html);
+      expect(await fixture.history.list(fixture.sidecar.documentId)).toEqual([]);
+      expect(
+        fixture.vault.paths().some((path) => path.endsWith(".pending"))
+      ).toBe(false);
+      expect(fixture.vault.journalCount()).toBe(0);
+    }
+  );
+
+  it.each(["replace_after_html", "replace_after_sidecar"] as const)(
+    "the transactional reference adapter recovers the old pair on abort at %s",
+    async (stage) => {
+      const controller = new AbortController();
+      const fixture = await makeSessionDeps({
+        hooks: {
+          abortAtStage: stage,
+          abortController: controller
+        }
+      });
+      const session = await DocumentSession.open(fixture.dependencies);
+      session.updateBody("<article><p>abort transaction</p></article>");
+
+      await expect(
+        session.save("explicit", controller.signal)
+      ).rejects.toMatchObject({ name: "AbortError" });
+
+      await expectMatchingPair(fixture.vault, TEST_PATHS);
+      expect(fixture.vault.read(TEST_PATHS.html)).toBe(fixture.html);
+      expect(await fixture.history.list(fixture.sidecar.documentId)).toEqual([]);
+      expect(fixture.vault.journalCount()).toBe(0);
+    }
+  );
+
+  it("rejects semantically mismatched caller contents at the repository boundary before writing", async () => {
+    const fixture = await makeSessionDeps();
+    const observed = await fixture.repository.readPair(TEST_PATHS);
+    expect(observed).not.toBeNull();
+    const changedHtml = GalleyDocumentCodec.serialize({
+      ...GalleyDocumentCodec.parse(fixture.html),
+      bodyHtml: "<article><p>repository direct</p></article>"
+    });
+    const mismatchedSidecar = GalleySidecarV1Schema.parse({
+      ...fixture.sidecar,
+      htmlHash: fixture.sidecar.htmlHash
+    });
+
+    await expect(
+      fixture.repository.replacePair(
+        TEST_PATHS,
+        observed!.observation,
+        {
+          html: changedHtml,
+          sidecarJson: `${JSON.stringify(mismatchedSidecar, null, 2)}\n`
+        }
+      )
+    ).rejects.toThrow(/hash|sidecar|semantic/i);
+
+    expect(fixture.vault.read(TEST_PATHS.html)).toBe(fixture.html);
+    expect(fixture.vault.replaceCalls).toBe(0);
   });
 
   it("fails closed on post-commit verification while leaving a matching new pair", async () => {
@@ -283,7 +440,16 @@ describe("DocumentSession", () => {
       JSON.parse(fixture.vault.read(TEST_PATHS.sidecar) ?? "")
     );
     expect(sidecar.htmlHash).toBe(await sha256Text(html));
-    expect(session.state()).toMatchObject({ dirty: true, saving: false });
+    expect(session.state()).toMatchObject({
+      dirty: true,
+      saving: false,
+      conflict: true
+    });
+    expect(
+      (await fixture.history.list(fixture.sidecar.documentId)).map(({ html }) =>
+        html
+      )
+    ).toEqual([fixture.html]);
   });
 
   it("reload discards local content only after a valid reread and refreshes source status", async () => {
@@ -390,6 +556,55 @@ describe("DocumentSession", () => {
     expect(session.state()).toMatchObject({ dirty: true, saving: false });
   });
 
+  it.each([
+    ["after HTML create", ["create_after_html"]],
+    ["after sidecar create", ["create_after_sidecar"]],
+    [
+      "during HTML cleanup",
+      ["create_after_sidecar", "create_cleanup_html"]
+    ],
+    [
+      "during sidecar cleanup",
+      ["create_after_sidecar", "create_cleanup_sidecar"]
+    ]
+  ] as const)(
+    "the transactional reference adapter leaves no owned copy member on failure %s",
+    async (_label, stages) => {
+      const fixture = await makeSessionDeps({
+        hooks: { faultStages: new Set<MemoryFaultStage>(stages) }
+      });
+      const session = await DocumentSession.open(fixture.dependencies);
+      session.updateBody("<article><p>transactional copy</p></article>");
+
+      await expect(session.saveCopy()).rejects.toThrow(/injected/i);
+
+      expect(fixture.vault.read("notes/article-2.galley.html")).toBeNull();
+      expect(fixture.vault.read("notes/article-2.galley.json")).toBeNull();
+      await expectMatchingPair(fixture.vault, TEST_PATHS);
+      expect(fixture.vault.journalCount()).toBe(0);
+    }
+  );
+
+  it.each(["create_after_html", "create_after_sidecar"] as const)(
+    "the transactional reference adapter cleans a copy on abort at %s",
+    async (stage) => {
+      const controller = new AbortController();
+      const fixture = await makeSessionDeps({
+        hooks: { abortAtStage: stage, abortController: controller }
+      });
+      const session = await DocumentSession.open(fixture.dependencies);
+      session.updateBody("<article><p>abort copy</p></article>");
+
+      await expect(session.saveCopy(controller.signal)).rejects.toMatchObject({
+        name: "AbortError"
+      });
+
+      expect(fixture.vault.read("notes/article-2.galley.html")).toBeNull();
+      expect(fixture.vault.read("notes/article-2.galley.json")).toBeNull();
+      expect(fixture.vault.journalCount()).toBe(0);
+    }
+  );
+
   it("saveCopy conditionally cleans its owned pair after verification failure", async () => {
     const hooks: MemoryWorkbenchHooks = {};
     const fixture = await makeSessionDeps({ hooks });
@@ -405,7 +620,7 @@ describe("DocumentSession", () => {
 
     expect(fixture.vault.paths()).not.toContain("notes/article-2.galley.html");
     expect(fixture.vault.paths()).not.toContain("notes/article-2.galley.json");
-    expect(fixture.vault.removePairCalls).toBe(1);
+    expect(fixture.vault.removePairCalls).toBe(2);
   });
 
   it("saveCopy preserves an ABA replacement that appears before cleanup", async () => {
@@ -436,9 +651,47 @@ describe("DocumentSession", () => {
     );
   });
 
-  it("saveCopy rejects an unchanged document ID before creating files", async () => {
+  it.each(["html", "sidecar"] as const)(
+    "saveCopy removes the still-owned counterpart after a %s-only cleanup replacement",
+    async (member) => {
+      const hooks: MemoryWorkbenchHooks = {};
+      const fixture = await makeSessionDeps({ hooks });
+      const session = await DocumentSession.open(fixture.dependencies);
+      session.updateBody("<article><p>copy</p></article>");
+      hooks.beforeCreatePair = () => {
+        hooks.verifyReadOverride = null;
+      };
+      hooks.beforeRemovePair = (ownership) => {
+        const path =
+          member === "html" ? ownership.paths.html : ownership.paths.sidecar;
+        fixture.vault.writeExternally(path, `external ${member}`);
+      };
+
+      await expect(session.saveCopy()).rejects.toMatchObject({
+        code: "document_commit_verification"
+      });
+
+      expect(
+        fixture.vault.read(
+          member === "html"
+            ? "notes/article-2.galley.html"
+            : "notes/article-2.galley.json"
+        )
+      ).toBe(`external ${member}`);
+      expect(
+        fixture.vault.read(
+          member === "html"
+            ? "notes/article-2.galley.json"
+            : "notes/article-2.galley.html"
+        )
+      ).toBeNull();
+      expect(fixture.vault.removePairCalls).toBe(2);
+    }
+  );
+
+  it("saveCopy rejects a case-only duplicate document ID before creating files", async () => {
     const fixture = await makeSessionDeps({
-      randomUUID: () => "123e4567-e89b-42d3-a456-426614174000"
+      randomUUID: () => "123E4567-E89B-42D3-A456-426614174000"
     });
     const session = await DocumentSession.open(fixture.dependencies);
     session.updateBody("<article><p>copy</p></article>");
@@ -472,6 +725,252 @@ describe("DocumentSession", () => {
       saving: false,
       htmlHash: await sha256Text(firstHtml)
     });
+  });
+
+  it("derives clean state from exact content after B to C to B during save", async () => {
+    const gate = deferred<void>();
+    const fixture = await makeSessionDeps({
+      hooks: { beforeReplace: () => gate.promise }
+    });
+    const session = await DocumentSession.open(fixture.dependencies);
+    session.updateBody("<article><p>target B</p></article>");
+    const targetBody = session.bodyHtml();
+
+    const saving = session.save("explicit");
+    await Promise.resolve();
+    session.updateBody("<article><p>intermediate C</p></article>");
+    session.updateBody(targetBody);
+    gate.resolve();
+    await saving;
+
+    expect(session.state()).toMatchObject({ dirty: false, conflict: false });
+    expect(fixture.vault.historyCreateCalls).toBe(1);
+    await session.save("explicit");
+    expect(fixture.vault.historyCreateCalls).toBe(1);
+    expect(fixture.vault.replaceCalls).toBe(1);
+  });
+
+  it("reconciles edit-back state conservatively after post-commit verification failure", async () => {
+    const gate = deferred<void>();
+    const hooks: MemoryWorkbenchHooks = {
+      beforeReplace: async () => {
+        await gate.promise;
+        hooks.verifyReadOverride = null;
+      }
+    };
+    const fixture = await makeSessionDeps({ hooks });
+    const session = await DocumentSession.open(fixture.dependencies);
+    const originalBody = session.bodyHtml();
+    session.updateBody("<article><p>committed B</p></article>");
+    const committedHtml = session.html();
+
+    const saving = session.save("explicit");
+    await Promise.resolve();
+    session.updateBody(originalBody);
+    expect(session.state().dirty).toBe(false);
+    gate.resolve();
+    await expect(saving).rejects.toMatchObject({
+      code: "document_commit_verification"
+    });
+
+    expect(fixture.vault.read(TEST_PATHS.html)).toBe(committedHtml);
+    expect(session.html()).toBe(fixture.html);
+    expect(session.state()).toMatchObject({ dirty: true, conflict: true });
+    expect(
+      (await fixture.history.list(fixture.sidecar.documentId)).map(({ html }) =>
+        html
+      )
+    ).toEqual([fixture.html]);
+  });
+
+  it("reconciles edit-back state and propagates abort after the pair commit", async () => {
+    const gate = deferred<void>();
+    const controller = new AbortController();
+    const hooks: MemoryWorkbenchHooks = {
+      beforeReplace: () => gate.promise,
+      afterReplaceCommitted: () => controller.abort()
+    };
+    const fixture = await makeSessionDeps({ hooks });
+    const session = await DocumentSession.open(fixture.dependencies);
+    const originalBody = session.bodyHtml();
+    session.updateBody("<article><p>committed B</p></article>");
+    const committedHtml = session.html();
+
+    const saving = session.save("explicit", controller.signal);
+    await Promise.resolve();
+    session.updateBody(originalBody);
+    gate.resolve();
+    await expect(saving).rejects.toMatchObject({ name: "AbortError" });
+
+    expect(fixture.vault.read(TEST_PATHS.html)).toBe(committedHtml);
+    expect(session.html()).toBe(fixture.html);
+    expect(session.state()).toMatchObject({ dirty: true, saving: false });
+    expect(
+      (await fixture.history.list(fixture.sidecar.documentId)).map(({ html }) =>
+        html
+      )
+    ).toEqual([fixture.html]);
+  });
+
+  it("rolls back provisional history when aborted after history creation but before pair commit", async () => {
+    const controller = new AbortController();
+    const hooks: MemoryWorkbenchHooks = {
+      beforeReplace: () => controller.abort()
+    };
+    const fixture = await makeSessionDeps({ hooks });
+    const session = await DocumentSession.open(fixture.dependencies);
+    session.updateBody("<article><p>abort after history</p></article>");
+
+    await expect(
+      session.save("explicit", controller.signal)
+    ).rejects.toMatchObject({ name: "AbortError" });
+
+    expect(fixture.vault.read(TEST_PATHS.html)).toBe(fixture.html);
+    expect(await fixture.history.list(fixture.sidecar.documentId)).toEqual([]);
+    expect(fixture.vault.paths().some((path) => path.endsWith(".pending"))).toBe(
+      false
+    );
+  });
+
+  it("rolls back provisional history when cancellation is observed immediately after prepare", async () => {
+    const controller = new AbortController();
+    const fixture = await makeSessionDeps();
+    const history = fixture.history;
+    const session = await DocumentSession.open({
+      ...fixture.dependencies,
+      history: {
+        async prepare(documentId, html, timestamp, signal) {
+          const prepared = await history.prepare(
+            documentId,
+            html,
+            timestamp,
+            signal
+          );
+          controller.abort();
+          return prepared;
+        },
+        commit: (prepared, signal) => history.commit(prepared, signal),
+        rollback: (prepared) => history.rollback(prepared)
+      }
+    });
+    session.updateBody("<article><p>abort after prepare returns</p></article>");
+
+    await expect(
+      session.save("explicit", controller.signal)
+    ).rejects.toMatchObject({ name: "AbortError" });
+
+    expect(fixture.vault.replaceCalls).toBe(0);
+    expect(await history.list(fixture.sidecar.documentId)).toEqual([]);
+    expect(fixture.vault.paths().some((path) => path.endsWith(".pending"))).toBe(
+      false
+    );
+  });
+
+  it("keeps the session dirty and rolls back recognized history when post-commit pruning fails", async () => {
+    const hooks: MemoryWorkbenchHooks = {};
+    const fixture = await makeSessionDeps({ hooks });
+    for (let index = 0; index < 20; index += 1) {
+      await fixture.history.store(
+        fixture.sidecar.documentId,
+        `retained-${index}`,
+        new Date(1_700_000_000_000 + index)
+      );
+    }
+    const session = await DocumentSession.open(fixture.dependencies);
+    session.updateBody("<article><p>pair commits before prune</p></article>");
+    const committedHtml = session.html();
+    hooks.failHistoryRemove = true;
+
+    await expect(session.save("explicit")).rejects.toThrow(
+      "injected history prune failure"
+    );
+
+    expect(fixture.vault.read(TEST_PATHS.html)).toBe(committedHtml);
+    await expectMatchingPair(fixture.vault, TEST_PATHS);
+    expect(await fixture.history.list(fixture.sidecar.documentId)).toHaveLength(
+      20
+    );
+    expect(fixture.vault.paths().some((path) => path.endsWith(".pending"))).toBe(
+      false
+    );
+    expect(session.state()).toMatchObject({
+      dirty: true,
+      conflict: true,
+      saving: false
+    });
+  });
+
+  it("marks ambiguous post-commit state dirty even when history finalization also fails", async () => {
+    const gate = deferred<void>();
+    const hooks: MemoryWorkbenchHooks = {
+      beforeReplace: async () => {
+        await gate.promise;
+        hooks.verifyReadOverride = null;
+      }
+    };
+    const fixture = await makeSessionDeps({ hooks });
+    for (let index = 0; index < 20; index += 1) {
+      await fixture.history.store(
+        fixture.sidecar.documentId,
+        `retained-${index}`,
+        new Date(1_700_000_000_000 + index)
+      );
+    }
+    const session = await DocumentSession.open(fixture.dependencies);
+    const originalBody = session.bodyHtml();
+    session.updateBody("<article><p>committed before two failures</p></article>");
+    const committedHtml = session.html();
+
+    const saving = session.save("explicit");
+    await Promise.resolve();
+    session.updateBody(originalBody);
+    hooks.failHistoryRemove = true;
+    gate.resolve();
+    await expect(saving).rejects.toThrow("injected history prune failure");
+
+    expect(fixture.vault.read(TEST_PATHS.html)).toBe(committedHtml);
+    await expectMatchingPair(fixture.vault, TEST_PATHS);
+    expect(session.html()).toBe(fixture.html);
+    expect(session.state()).toMatchObject({
+      dirty: true,
+      conflict: true,
+      saving: false
+    });
+  });
+
+  it("keeps history only for the CAS winner across two independent sessions and repositories", async () => {
+    const fixture = await makeSessionDeps();
+    const repositoryB = new GalleyDocumentRepository(fixture.vault);
+    const historyB = new HistoryRepository(fixture.vault, 20);
+    const sessionA = await DocumentSession.open(fixture.dependencies);
+    const sessionB = await DocumentSession.open({
+      ...fixture.dependencies,
+      repository: repositoryB,
+      history: historyB
+    });
+    sessionA.updateBody("<article><p>winner A</p></article>");
+    sessionB.updateBody("<article><p>loser B</p></article>");
+
+    const results = await Promise.allSettled([
+      sessionA.save("explicit"),
+      sessionB.save("explicit")
+    ]);
+
+    expect(results.filter(({ status }) => status === "fulfilled")).toHaveLength(
+      1
+    );
+    expect(results.filter(({ status }) => status === "rejected")).toHaveLength(
+      1
+    );
+    expect(
+      (await fixture.history.list(fixture.sidecar.documentId)).map(({ html }) =>
+        html
+      )
+    ).toEqual([fixture.html]);
+    expect(fixture.vault.paths().some((path) => path.endsWith(".pending"))).toBe(
+      false
+    );
+    await expectMatchingPair(fixture.vault, TEST_PATHS);
   });
 
   it("rejects a concurrent save deterministically while the first save completes", async () => {
@@ -517,4 +1016,17 @@ function deferred<T>() {
     resolve = resolvePromise;
   });
   return { promise, resolve };
+}
+
+async function expectMatchingPair(
+  vault: { read(path: string): string | null },
+  paths: { html: string; sidecar: string }
+): Promise<void> {
+  const html = vault.read(paths.html);
+  const sidecarJson = vault.read(paths.sidecar);
+  expect(html).not.toBeNull();
+  expect(sidecarJson).not.toBeNull();
+  GalleyDocumentCodec.parse(html ?? "");
+  const sidecar = GalleySidecarV1Schema.parse(JSON.parse(sidecarJson ?? ""));
+  expect(sidecar.htmlHash).toBe(await sha256Text(html ?? ""));
 }

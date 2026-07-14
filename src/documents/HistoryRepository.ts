@@ -1,8 +1,15 @@
+import { GalleySidecarV1Schema } from "./GalleySidecar";
+
 export interface HistoryFile<Observation> {
   path: string;
   html: string;
   observation: Observation;
 }
+
+export type HistoryPromotionResult<Observation> =
+  | { status: "created"; file: HistoryFile<Observation> }
+  | { status: "collision" }
+  | { status: "lost" };
 
 export interface HistoryVault<Observation> {
   ensureFolder(path: string, signal?: AbortSignal): Promise<void>;
@@ -18,10 +25,16 @@ export interface HistoryVault<Observation> {
     | { status: "created"; file: HistoryFile<Observation> }
     | { status: "collision" }
   >;
+  promoteObserved(
+    provisional: HistoryFile<Observation>,
+    finalPath: string,
+    signal?: AbortSignal
+  ): Promise<HistoryPromotionResult<Observation>>;
   removeObserved(
     file: HistoryFile<Observation>,
     signal?: AbortSignal
   ): Promise<boolean>;
+  removePrepared(file: HistoryFile<Observation>): Promise<boolean>;
 }
 
 export interface HistorySnapshot {
@@ -43,14 +56,31 @@ export class HistoryPruneConflictError extends Error {
   }
 }
 
-const DOCUMENT_ID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const UUID_PATTERN = DOCUMENT_ID_PATTERN;
+const PREPARED = Symbol("PreparedHistorySnapshot");
+
+type PreparationState = "pending" | "recognized" | "committed" | "rolled-back";
+
+interface PreparationData<Observation> {
+  readonly repository: symbol;
+  readonly folder: string;
+  readonly timestampMs: number;
+  file: HistoryFile<Observation>;
+  state: PreparationState;
+}
+
+export interface PreparedHistorySnapshot {
+  readonly documentId: string;
+  readonly html: string;
+  readonly [PREPARED]: PreparationData<unknown>;
+}
+
 const HISTORY_ROOT = ".galley/history";
 const TIMESTAMP_WIDTH = 16;
 const SEQUENCE_WIDTH = 8;
+const MAX_PRUNE_RETRIES = 128;
 
 export class HistoryRepository<Observation> {
+  readonly #identity = Symbol("HistoryRepository");
   readonly #randomUUID: () => string;
   readonly #queues = new Map<string, Promise<void>>();
   #sequence = 0;
@@ -67,95 +97,177 @@ export class HistoryRepository<Observation> {
       options.randomUUID ?? (() => globalThis.crypto.randomUUID());
   }
 
+  async prepare(
+    documentId: string,
+    html: string,
+    timestamp: Date,
+    signal?: AbortSignal
+  ): Promise<PreparedHistorySnapshot> {
+    const canonicalId = canonicalDocumentId(documentId);
+    const folder = `${HISTORY_ROOT}/${canonicalId}`;
+    const timestampMs = validTimestamp(timestamp);
+    throwIfAborted(signal);
+    await this.vault.ensureFolder(folder, signal);
+
+    while (true) {
+      throwIfAborted(signal);
+      const path = `${folder}/${this.#newSnapshotStem(timestampMs)}.pending`;
+      const result = await this.vault.createFileExclusive(path, html, signal);
+      if (result.status === "collision") continue;
+      const data: PreparationData<Observation> = {
+        repository: this.#identity,
+        folder,
+        timestampMs,
+        file: result.file,
+        state: "pending"
+      };
+      return {
+        documentId: canonicalId,
+        html,
+        [PREPARED]: data as PreparationData<unknown>
+      };
+    }
+  }
+
+  async commit(
+    prepared: PreparedHistorySnapshot,
+    signal?: AbortSignal
+  ): Promise<HistorySnapshot> {
+    const data = this.#preparationData(prepared);
+    if (data.state === "committed") {
+      const snapshot = parseSnapshotFile(data.folder, data.file);
+      if (!snapshot) throw new Error("Committed Galley history path is invalid.");
+      return snapshot;
+    }
+    if (data.state !== "pending") {
+      throw new Error("Galley history preparation is no longer active.");
+    }
+
+    return this.#serialize(data.folder, async () => {
+      throwIfAborted(signal);
+      while (true) {
+        const finalPath = `${data.folder}/${this.#newSnapshotStem(
+          data.timestampMs
+        )}.html`;
+        const promoted = await this.vault.promoteObserved(
+          data.file,
+          finalPath,
+          signal
+        );
+        if (promoted.status === "collision") continue;
+        if (promoted.status === "lost") {
+          data.state = "rolled-back";
+          throw new HistoryPruneConflictError();
+        }
+        data.file = promoted.file;
+        data.state = "recognized";
+        break;
+      }
+
+      try {
+        await this.#pruneConverging(data.folder, signal);
+      } catch (error) {
+        await this.vault.removePrepared(data.file);
+        data.state = "rolled-back";
+        throw error;
+      }
+
+      data.state = "committed";
+      const snapshot = parseSnapshotFile(data.folder, data.file);
+      if (!snapshot) {
+        throw new Error("Committed Galley history path is invalid.");
+      }
+      return snapshot;
+    });
+  }
+
+  async rollback(prepared: PreparedHistorySnapshot): Promise<void> {
+    const data = this.#preparationData(prepared);
+    if (data.state === "committed" || data.state === "rolled-back") return;
+    await this.vault.removePrepared(data.file);
+    data.state = "rolled-back";
+  }
+
   async store(
     documentId: string,
     html: string,
     timestamp: Date,
     signal?: AbortSignal
   ): Promise<HistorySnapshot> {
-    const folder = historyFolder(documentId);
-    const milliseconds = timestamp.getTime();
-    if (!Number.isSafeInteger(milliseconds) || milliseconds < 0) {
-      throw new Error("Galley history timestamp must be a valid non-negative date.");
+    const prepared = await this.prepare(documentId, html, timestamp, signal);
+    try {
+      return await this.commit(prepared, signal);
+    } catch (error) {
+      await this.rollback(prepared);
+      throw error;
     }
-    throwIfAborted(signal);
-
-    return this.#serialize(documentId, async () => {
-      throwIfAborted(signal);
-      await this.vault.ensureFolder(folder, signal);
-      throwIfAborted(signal);
-
-      let created: HistoryFile<Observation>;
-      while (true) {
-        const uniqueId = this.#randomUUID();
-        if (!UUID_PATTERN.test(uniqueId)) {
-          throw new Error("Galley history UUID must be a lowercase UUID.");
-        }
-        this.#sequence += 1;
-        const path = `${folder}/${snapshotFileName(
-          milliseconds,
-          uniqueId,
-          this.#sequence
-        )}`;
-        const result = await this.vault.createFileExclusive(path, html, signal);
-        if (result.status === "created") {
-          created = result.file;
-          break;
-        }
-        throwIfAborted(signal);
-      }
-
-      await this.#prune(folder, signal);
-      const parsed = parseSnapshotFile(folder, created);
-      if (!parsed) {
-        throw new Error("Created Galley history snapshot has an invalid path.");
-      }
-      return parsed;
-    });
   }
 
   async list(
     documentId: string,
     signal?: AbortSignal
   ): Promise<HistorySnapshot[]> {
-    const folder = historyFolder(documentId);
+    const folder = `${HISTORY_ROOT}/${canonicalDocumentId(documentId)}`;
     throwIfAborted(signal);
     const files = await this.vault.listFiles(folder, signal);
     throwIfAborted(signal);
     return parsedFiles(folder, files).map(({ snapshot }) => snapshot);
   }
 
-  async #prune(folder: string, signal?: AbortSignal): Promise<void> {
-    const files = parsedFiles(
-      folder,
-      await this.vault.listFiles(folder, signal)
-    );
-    const removeCount = Math.max(0, files.length - this.limit);
-    for (let index = 0; index < removeCount; index += 1) {
+  async #pruneConverging(folder: string, signal?: AbortSignal): Promise<void> {
+    for (let attempt = 0; attempt < MAX_PRUNE_RETRIES; attempt += 1) {
       throwIfAborted(signal);
-      const candidate = files[index];
-      if (!candidate) continue;
-      if (!(await this.vault.removeObserved(candidate.file, signal))) {
+      const files = parsedFiles(
+        folder,
+        await this.vault.listFiles(folder, signal)
+      );
+      if (files.length <= this.limit) return;
+      const candidate = files[0];
+      if (!candidate) return;
+      if (await this.vault.removeObserved(candidate.file, signal)) continue;
+
+      const refreshed = parsedFiles(
+        folder,
+        await this.vault.listFiles(folder, signal)
+      );
+      if (refreshed.some(({ snapshot }) => snapshot.path === candidate.snapshot.path)) {
         throw new HistoryPruneConflictError();
       }
     }
+    throw new Error("Galley history retention did not converge.");
   }
 
-  async #serialize<T>(documentId: string, operation: () => Promise<T>): Promise<T> {
-    const previous = this.#queues.get(documentId) ?? Promise.resolve();
+  #newSnapshotStem(timestampMs: number): string {
+    const uniqueId = canonicalDocumentId(this.#randomUUID());
+    this.#sequence += 1;
+    return `${String(timestampMs).padStart(TIMESTAMP_WIDTH, "0")}-${uniqueId}-${String(
+      this.#sequence
+    ).padStart(SEQUENCE_WIDTH, "0")}`;
+  }
+
+  #preparationData(
+    prepared: PreparedHistorySnapshot
+  ): PreparationData<Observation> {
+    const data = prepared[PREPARED] as PreparationData<Observation>;
+    if (data.repository !== this.#identity) {
+      throw new Error("Galley history preparation belongs to another repository.");
+    }
+    return data;
+  }
+
+  async #serialize<T>(key: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.#queues.get(key) ?? Promise.resolve();
     let release!: () => void;
     const current = new Promise<void>((resolve) => {
       release = resolve;
     });
-    this.#queues.set(documentId, current);
+    this.#queues.set(key, current);
     await previous;
     try {
       return await operation();
     } finally {
       release();
-      if (this.#queues.get(documentId) === current) {
-        this.#queues.delete(documentId);
-      }
+      if (this.#queues.get(key) === current) this.#queues.delete(key);
     }
   }
 }
@@ -180,12 +292,6 @@ function parsedFiles<Observation>(
     );
 }
 
-function comparePaths(left: string, right: string): number {
-  if (left < right) return -1;
-  if (left > right) return 1;
-  return 0;
-}
-
 function parseSnapshotFile<Observation>(
   folder: string,
   file: HistoryFile<Observation>
@@ -204,7 +310,12 @@ function parseHistoryFile<Observation>(
   const match = new RegExp(
     `^([0-9]{${TIMESTAMP_WIDTH}})-([0-9a-f-]{36})-([0-9]{${SEQUENCE_WIDTH},})\\.html$`
   ).exec(name);
-  if (!match?.[1] || !match[2] || !UUID_PATTERN.test(match[2])) return null;
+  if (!match?.[1] || !match[2]) return null;
+  try {
+    canonicalDocumentId(match[2]);
+  } catch {
+    return null;
+  }
   const timestampMs = Number(match[1]);
   if (!Number.isSafeInteger(timestampMs)) return null;
   const timestamp = new Date(timestampMs);
@@ -220,21 +331,26 @@ function parseHistoryFile<Observation>(
   };
 }
 
-function snapshotFileName(
-  timestampMs: number,
-  uniqueId: string,
-  sequence: number
-): string {
-  return `${String(timestampMs).padStart(TIMESTAMP_WIDTH, "0")}-${uniqueId}-${String(
-    sequence
-  ).padStart(SEQUENCE_WIDTH, "0")}.html`;
+function canonicalDocumentId(documentId: string): string {
+  try {
+    return GalleySidecarV1Schema.shape.documentId.parse(documentId).toLowerCase();
+  } catch {
+    throw new Error("Galley history document ID must be a sidecar-valid UUID.");
+  }
 }
 
-function historyFolder(documentId: string): string {
-  if (!DOCUMENT_ID_PATTERN.test(documentId)) {
-    throw new Error("Galley history document ID must be a lowercase UUID.");
+function validTimestamp(timestamp: Date): number {
+  const milliseconds = timestamp.getTime();
+  if (!Number.isSafeInteger(milliseconds) || milliseconds < 0) {
+    throw new Error("Galley history timestamp must be a valid non-negative date.");
   }
-  return `${HISTORY_ROOT}/${documentId}`;
+  return milliseconds;
+}
+
+function comparePaths(left: string, right: string): number {
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
 }
 
 function throwIfAborted(signal?: AbortSignal): void {

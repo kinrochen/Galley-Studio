@@ -71,8 +71,7 @@ describe("HistoryRepository", () => {
     "notes/id",
     "123e4567-e89b-42d3-a456-426614174000/../../escape",
     "not-a-uuid",
-    "",
-    "123E4567-E89B-42D3-A456-426614174000"
+    ""
   ])("rejects unsafe document id %j before touching the vault", async (id) => {
     const vault = memoryHistoryVault();
     const repository = new HistoryRepository(vault);
@@ -81,6 +80,42 @@ describe("HistoryRepository", () => {
       /document id/i
     );
     await expect(repository.list(id)).rejects.toThrow(/document id/i);
+    expect(vault.paths()).toEqual([]);
+  });
+
+  it.each([
+    "123E4567-E89B-42D3-A456-426614174000",
+    "01890f8e-7b6d-7cc0-98c4-dc0c0c07398f",
+    "01890f8e-7b6d-8cc0-98c4-dc0c0c07398f",
+    "00000000-0000-0000-0000-000000000000"
+  ])("accepts and safely canonicalizes sidecar-valid UUID %s", async (id) => {
+    const vault = memoryHistoryVault();
+    const repository = new HistoryRepository(vault);
+
+    await repository.store(id, "valid", new Date("2026-01-01T00:00:00.000Z"));
+
+    expect((await repository.list(id)).map(({ html }) => html)).toEqual([
+      "valid"
+    ]);
+    expect(vault.paths()).toHaveLength(1);
+    expect(vault.paths()[0]).toContain(`/${id.toLowerCase()}/`);
+  });
+
+  it("keeps prepared history provisional and removes it on rollback", async () => {
+    const vault = memoryHistoryVault();
+    const repository = new HistoryRepository(vault);
+
+    const prepared = await repository.prepare(
+      DOCUMENT_ID,
+      "pending",
+      new Date("2026-01-01T00:00:00.000Z")
+    );
+    expect(await repository.list(DOCUMENT_ID)).toEqual([]);
+    expect(vault.paths().some((path) => path.endsWith(".pending"))).toBe(true);
+
+    await repository.rollback(prepared);
+
+    expect(await repository.list(DOCUMENT_ID)).toEqual([]);
     expect(vault.paths()).toEqual([]);
   });
 
@@ -121,7 +156,7 @@ describe("HistoryRepository", () => {
     expect(vault.read(".galley/history/unrelated.txt")).toBe("unrelated");
   });
 
-  it("surfaces prune failure without deleting by path or overwriting snapshots", async () => {
+  it("rolls back the newly recognized snapshot when pruning fails", async () => {
     const hooks: MemoryWorkbenchHooks = {};
     const vault = memoryHistoryVault({}, hooks);
     const repository = new HistoryRepository(vault, 1);
@@ -140,11 +175,10 @@ describe("HistoryRepository", () => {
       )
     ).rejects.toThrow("injected history prune failure");
 
-    const retainedHtml = vault
-      .paths()
-      .filter((path) => path.endsWith(".html"))
-      .map((path) => vault.read(path));
-    expect(retainedHtml).toEqual(expect.arrayContaining(["old", "new"]));
+    expect((await repository.list(DOCUMENT_ID)).map(({ html }) => html)).toEqual([
+      "old"
+    ]);
+    expect(vault.paths().some((path) => path.endsWith(".pending"))).toBe(false);
   });
 
   it("preserves an ABA replacement when conditional pruning loses ownership", async () => {
@@ -183,4 +217,54 @@ describe("HistoryRepository", () => {
     ).rejects.toMatchObject({ name: "AbortError" });
     expect(vault.paths()).toEqual([]);
   });
+
+  it("converges to exactly twenty across two repositories after a concrete stale remove", async () => {
+    const hooks: MemoryWorkbenchHooks = {};
+    const vault = memoryHistoryVault({}, hooks);
+    const seed = new HistoryRepository(vault, 20);
+    for (let index = 0; index < 20; index += 1) {
+      await seed.store(
+        DOCUMENT_ID,
+        `seed-${index}`,
+        new Date(1_700_000_000_000 + index)
+      );
+    }
+
+    const firstRemoveEntered = deferred<void>();
+    const secondRemoveEntered = deferred<void>();
+    let removeCalls = 0;
+    hooks.beforeHistoryRemove = async () => {
+      removeCalls += 1;
+      if (removeCalls === 1) {
+        firstRemoveEntered.resolve();
+        await secondRemoveEntered.promise;
+      } else if (removeCalls === 2) {
+        await firstRemoveEntered.promise;
+        secondRemoveEntered.resolve();
+      }
+    };
+    const repositoryA = new HistoryRepository(vault, 20);
+    const repositoryB = new HistoryRepository(vault, 20);
+
+    await Promise.all([
+      repositoryA.store(DOCUMENT_ID, "concurrent-a", new Date(1_800_000_000_000)),
+      repositoryB.store(DOCUMENT_ID, "concurrent-b", new Date(1_800_000_000_001))
+    ]);
+
+    delete hooks.beforeHistoryRemove;
+    const snapshots = await repositoryA.list(DOCUMENT_ID);
+    expect(snapshots).toHaveLength(20);
+    expect(snapshots.map(({ html }) => html)).toEqual(
+      expect.arrayContaining(["concurrent-a", "concurrent-b"])
+    );
+    expect(vault.paths().some((path) => path.endsWith(".pending"))).toBe(false);
+  });
 });
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}

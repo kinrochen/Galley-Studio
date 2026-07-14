@@ -9,6 +9,7 @@ import {
 import {
   HistoryRepository,
   type HistoryFile,
+  type HistoryPromotionResult,
   type HistoryVault
 } from "../../src/documents/HistoryRepository";
 import type { DocumentSessionDependencies } from "../../src/documents/DocumentSession";
@@ -34,6 +35,15 @@ interface MemoryEntry {
   readonly contents: string;
 }
 
+interface MemoryPairJournal {
+  readonly mode: "replace" | "create";
+  readonly paths: ArtifactPaths;
+  readonly oldHtml: MemoryEntry | null;
+  readonly oldSidecar: MemoryEntry | null;
+  readonly newHtml: MemoryEntry;
+  readonly newSidecar: MemoryEntry;
+}
+
 export interface MemoryPairObservation {
   readonly html: MemoryEntry;
   readonly sidecar: MemoryEntry;
@@ -41,20 +51,36 @@ export interface MemoryPairObservation {
 
 export interface MemoryPairOwnership {
   readonly paths: ArtifactPaths;
-  readonly observation: MemoryPairObservation;
+  readonly member: "html" | "sidecar";
+  readonly entry: MemoryEntry;
 }
 
 export interface MemoryHistoryObservation {
   readonly entry: MemoryEntry;
 }
 
+export type MemoryFaultStage =
+  | "replace_after_html"
+  | "replace_after_sidecar"
+  | "replace_rollback_html"
+  | "replace_rollback_sidecar"
+  | "create_after_html"
+  | "create_after_sidecar"
+  | "create_cleanup_html"
+  | "create_cleanup_sidecar";
+
 export interface MemoryWorkbenchHooks {
   beforeReplace?(): Promise<void> | void;
+  afterReplaceCommitted?(): Promise<void> | void;
   beforeCreatePair?(paths: ArtifactPaths): Promise<void> | void;
   beforeRemovePair?(ownership: MemoryPairOwnership): Promise<void> | void;
   failReplace?: boolean;
   failCreatePair?: boolean;
   failHistoryRemove?: boolean;
+  failHistoryRemoveCount?: number;
+  faultStages?: ReadonlySet<MemoryFaultStage>;
+  abortAtStage?: MemoryFaultStage;
+  abortController?: AbortController;
   beforeHistoryRemove?(
     file: HistoryFile<MemoryHistoryObservation>
   ): Promise<void> | void;
@@ -67,6 +93,7 @@ export class MemoryWorkbenchVault
     HistoryVault<MemoryHistoryObservation>
 {
   readonly #files = new Map<string, MemoryEntry>();
+  readonly #pairJournals = new Map<string, MemoryPairJournal>();
   readonly #folders = new Set<string>();
   readonly hooks: MemoryWorkbenchHooks;
   replaceCalls = 0;
@@ -119,7 +146,7 @@ export class MemoryWorkbenchVault
     return left.html === right.html && left.sidecar === right.sidecar;
   }
 
-  async replacePairAtomically(
+  async replacePairTransactional(
     paths: ArtifactPaths,
     expected: MemoryPairObservation,
     next: { html: string; sidecarJson: string },
@@ -139,12 +166,53 @@ export class MemoryWorkbenchVault
     }
     const html = makeEntry(next.html);
     const sidecar = makeEntry(next.sidecarJson);
-    this.#files.set(paths.html, html);
-    this.#files.set(paths.sidecar, sidecar);
-    return { status: "committed", observation: { html, sidecar } };
+    const journal: MemoryPairJournal = {
+      mode: "replace",
+      paths,
+      oldHtml: currentHtml,
+      oldSidecar: currentSidecar,
+      newHtml: html,
+      newSidecar: sidecar
+    };
+    this.#pairJournals.set(paths.html, journal);
+    let wroteHtml = false;
+    let wroteSidecar = false;
+    try {
+      this.#files.set(paths.html, html);
+      wroteHtml = true;
+      this.#operationStage("replace_after_html", signal);
+      this.#files.set(paths.sidecar, sidecar);
+      wroteSidecar = true;
+      this.#operationStage("replace_after_sidecar", signal);
+    } catch (error) {
+      if (wroteHtml && this.#files.get(paths.html) === html) {
+        if (!this.#hasFault("replace_rollback_html")) {
+          this.#files.set(paths.html, currentHtml);
+        }
+        // The durable recovery journal retries independently of the failed
+        // first rollback attempt.
+        if (this.#files.get(paths.html) === html) {
+          this.#files.set(paths.html, currentHtml);
+        }
+      }
+      if (wroteSidecar && this.#files.get(paths.sidecar) === sidecar) {
+        if (!this.#hasFault("replace_rollback_sidecar")) {
+          this.#files.set(paths.sidecar, currentSidecar);
+        }
+        if (this.#files.get(paths.sidecar) === sidecar) {
+          this.#files.set(paths.sidecar, currentSidecar);
+        }
+      }
+      this.#pairJournals.delete(paths.html);
+      throw error;
+    }
+    const observation = { html, sidecar };
+    this.#pairJournals.delete(paths.html);
+    await this.hooks.afterReplaceCommitted?.();
+    return { status: "committed", observation };
   }
 
-  async createPairAtomically(
+  async createPairTransactional(
     paths: ArtifactPaths,
     contents: { html: string; sidecarJson: string },
     signal?: AbortSignal
@@ -163,28 +231,58 @@ export class MemoryWorkbenchVault
     }
     const html = makeEntry(contents.html);
     const sidecar = makeEntry(contents.sidecarJson);
+    this.#pairJournals.set(paths.html, {
+      mode: "create",
+      paths,
+      oldHtml: null,
+      oldSidecar: null,
+      newHtml: html,
+      newSidecar: sidecar
+    });
+    let wroteHtml = false;
+    let wroteSidecar = false;
+    try {
+      this.#files.set(paths.html, html);
+      wroteHtml = true;
+      this.#operationStage("create_after_html", signal);
+      this.#files.set(paths.sidecar, sidecar);
+      wroteSidecar = true;
+      this.#operationStage("create_after_sidecar", signal);
+    } catch (error) {
+      if (wroteHtml && this.#files.get(paths.html) === html) {
+        if (!this.#hasFault("create_cleanup_html")) {
+          this.#files.delete(paths.html);
+        }
+        if (this.#files.get(paths.html) === html) this.#files.delete(paths.html);
+      }
+      if (wroteSidecar && this.#files.get(paths.sidecar) === sidecar) {
+        if (!this.#hasFault("create_cleanup_sidecar")) {
+          this.#files.delete(paths.sidecar);
+        }
+        if (this.#files.get(paths.sidecar) === sidecar) {
+          this.#files.delete(paths.sidecar);
+        }
+      }
+      this.#pairJournals.delete(paths.html);
+      throw error;
+    }
     const observation = { html, sidecar };
-    this.#files.set(paths.html, html);
-    this.#files.set(paths.sidecar, sidecar);
+    this.#pairJournals.delete(paths.html);
     return {
       status: "created",
       observation,
-      ownership: { paths, observation }
+      ownership: [
+        { paths, member: "html", entry: html },
+        { paths, member: "sidecar", entry: sidecar }
+      ]
     };
   }
 
-  async removeCreatedPair(ownership: MemoryPairOwnership): Promise<void> {
+  async removeCreatedMember(ownership: MemoryPairOwnership): Promise<void> {
     this.removePairCalls += 1;
     await this.hooks.beforeRemovePair?.(ownership);
-    const currentHtml = this.#files.get(ownership.paths.html);
-    const currentSidecar = this.#files.get(ownership.paths.sidecar);
-    if (
-      currentHtml === ownership.observation.html &&
-      currentSidecar === ownership.observation.sidecar
-    ) {
-      this.#files.delete(ownership.paths.html);
-      this.#files.delete(ownership.paths.sidecar);
-    }
+    const path = ownership.paths[ownership.member];
+    if (this.#files.get(path) === ownership.entry) this.#files.delete(path);
   }
 
   async ensureFolder(path: string, signal?: AbortSignal): Promise<void> {
@@ -226,6 +324,29 @@ export class MemoryWorkbenchVault
     };
   }
 
+  async promoteObserved(
+    provisional: HistoryFile<MemoryHistoryObservation>,
+    finalPath: string,
+    signal?: AbortSignal
+  ): Promise<HistoryPromotionResult<MemoryHistoryObservation>> {
+    throwIfAborted(signal);
+    if (this.#files.get(provisional.path) !== provisional.observation.entry) {
+      return { status: "lost" };
+    }
+    if (this.#files.has(finalPath)) return { status: "collision" };
+    const entry = makeEntry(provisional.html);
+    this.#files.set(finalPath, entry);
+    this.#files.delete(provisional.path);
+    return {
+      status: "created",
+      file: {
+        path: finalPath,
+        html: provisional.html,
+        observation: { entry }
+      }
+    };
+  }
+
   async removeObserved(
     file: HistoryFile<MemoryHistoryObservation>,
     signal?: AbortSignal
@@ -233,9 +354,24 @@ export class MemoryWorkbenchVault
     throwIfAborted(signal);
     await this.hooks.beforeHistoryRemove?.(file);
     throwIfAborted(signal);
+    if (
+      this.hooks.failHistoryRemoveCount !== undefined &&
+      this.hooks.failHistoryRemoveCount > 0
+    ) {
+      this.hooks.failHistoryRemoveCount -= 1;
+      throw new Error("injected history prune failure");
+    }
     if (this.hooks.failHistoryRemove) {
       throw new Error("injected history prune failure");
     }
+    if (this.#files.get(file.path) !== file.observation.entry) return false;
+    this.#files.delete(file.path);
+    return true;
+  }
+
+  async removePrepared(
+    file: HistoryFile<MemoryHistoryObservation>
+  ): Promise<boolean> {
     if (this.#files.get(file.path) !== file.observation.entry) return false;
     this.#files.delete(file.path);
     return true;
@@ -255,6 +391,24 @@ export class MemoryWorkbenchVault
 
   paths(): string[] {
     return [...this.#files.keys()].sort();
+  }
+
+  journalCount(): number {
+    return this.#pairJournals.size;
+  }
+
+  #operationStage(stage: MemoryFaultStage, signal?: AbortSignal): void {
+    if (this.hooks.abortAtStage === stage) {
+      this.hooks.abortController?.abort();
+    }
+    throwIfAborted(signal);
+    if (this.#hasFault(stage)) {
+      throw new Error(`injected transaction failure at ${stage}`);
+    }
+  }
+
+  #hasFault(stage: MemoryFaultStage): boolean {
+    return this.hooks.faultStages?.has(stage) === true;
   }
 }
 
@@ -285,6 +439,7 @@ export interface SessionFixture {
 
 export async function makeSessionDeps(options: {
   bodyHtml?: string;
+  documentId?: string;
   source?: string | null;
   hooks?: MemoryWorkbenchHooks;
   initialFiles?: Readonly<Record<string, string>>;
@@ -303,7 +458,7 @@ export async function makeSessionDeps(options: {
   });
   const sidecar = GalleySidecarV1Schema.parse({
     schemaVersion: 1,
-    documentId: TEST_DOCUMENT_ID,
+    documentId: options.documentId ?? TEST_DOCUMENT_ID,
     sourcePath: "notes/article.md",
     sourceHash: await sha256Text(source ?? "missing source"),
     htmlHash: await sha256Text(html),
