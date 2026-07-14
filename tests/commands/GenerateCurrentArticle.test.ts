@@ -11,7 +11,7 @@ import { ArtifactRepository } from "../../src/documents/ArtifactRepository";
 import { ArtifactConfigurationError } from "../../src/documents/ArtifactRepository";
 import { GalleySidecarV1Schema } from "../../src/documents/GalleySidecar";
 import type { GeneratedDocument } from "../../src/generation/GenerationPipeline";
-import GalleyPlugin from "../../src/main";
+import GalleyPlugin, { ObsidianArtifactVault } from "../../src/main";
 import { normalizeSettings } from "../../src/settings/GalleySettings";
 import { annotateMarkdown } from "../../src/source/SourceAnnotator";
 import {
@@ -31,6 +31,7 @@ import {
 const UUID = "123e4567-e89b-42d3-a456-426614174000";
 
 afterEach(() => {
+  vi.useRealTimers();
   Platform.isMobileApp = false;
   notices.length = 0;
   resetRequestUrlHandler();
@@ -431,9 +432,17 @@ describe("plugin command registration", () => {
       "Galley: Generated generated/note.galley.html and generated/note.galley.json."
     );
     expect(harness.renameCalls.count).toBe(0);
+    expect(harness.createCalls).toHaveLength(2);
+    expect(harness.createCalls.every((path) => path.includes("galley-tmp"))).toBe(
+      true
+    );
+    expect(harness.copyCalls.map(({ to }) => to)).toEqual([
+      "generated/note.galley.html",
+      "generated/note.galley.json"
+    ]);
   });
 
-  it("uses exclusive final creates when a production destination races an overwrite-permitting rename", async () => {
+  it("uses exclusive adapter copies when a production destination appears between pair probe and commit", async () => {
     const markdown = "# Production race\n";
     const source = annotateMarkdown(markdown);
     const harness = makeProductionPluginApp(markdown, {
@@ -477,6 +486,125 @@ describe("plugin command registration", () => {
       validAuthoringHtml(source)
     );
     expect(harness.contents.has("generated/note-2.galley.json")).toBe(true);
+    expect(harness.createCalls).toHaveLength(4);
+    expect(harness.createCalls.every((path) => path.includes("galley-tmp"))).toBe(
+      true
+    );
+    expect(harness.copyCalls.map(({ to }) => to)).toEqual([
+      "generated/note.galley.html",
+      "generated/note-2.galley.html",
+      "generated/note-2.galley.json"
+    ]);
+  });
+
+  it("allows exactly one of two concurrent production adapter commits to claim an absent destination", async () => {
+    const harness = makeProductionPluginApp("", {
+      coordinateCopiesTo: "shared.galley.html"
+    });
+    const artifacts = new ObsidianArtifactVault(harness.app.vault);
+    const first = await artifacts.createOwned(".first.tmp", "first exact bytes\n");
+    const second = await artifacts.createOwned(".second.tmp", "second exact bytes\r\n");
+
+    expect(await Promise.all([
+      artifacts.exists("shared.galley.html"),
+      artifacts.exists("shared.galley.html")
+    ])).toEqual([false, false]);
+
+    const [firstResult, secondResult] = await Promise.all([
+      artifacts.commitOwned(first, "shared.galley.html"),
+      artifacts.commitOwned(second, "shared.galley.html")
+    ]);
+    const winner =
+      firstResult.status === "committed"
+        ? "first exact bytes\n"
+        : "second exact bytes\r\n";
+
+    expect([firstResult.status, secondResult.status].sort()).toEqual([
+      "collision",
+      "committed"
+    ]);
+    expect(harness.copyInitialPresence).toEqual([false, false]);
+    expect(harness.copyCalls).toEqual([
+      { from: ".first.tmp", to: "shared.galley.html" },
+      { from: ".second.tmp", to: "shared.galley.html" }
+    ]);
+    expect(harness.createCalls).toEqual([".first.tmp", ".second.tmp"]);
+    expect(harness.renameCalls.count).toBe(0);
+    expect(harness.contents.get("shared.galley.html")).toBe(winner);
+    expect(await sha256(harness.contents.get("shared.galley.html") ?? "")).toBe(
+      await sha256(winner)
+    );
+  });
+
+  it("does not claim or path-delete a copied final whose TFile identity never becomes observable", async () => {
+    vi.useFakeTimers();
+    const harness = makeProductionPluginApp("", {
+      suppressCopyIndexFor: "unindexed.galley.html"
+    });
+    const artifacts = new ObsidianArtifactVault(harness.app.vault);
+    const temp = await artifacts.createOwned(".unindexed.tmp", "orphan bytes");
+
+    const commit = artifacts
+      .commitOwned(temp, "unindexed.galley.html")
+      .catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(await commit).toEqual(
+      expect.objectContaining({
+        message: "Galley final artifact identity was not observed."
+      })
+    );
+    expect(harness.contents.get("unindexed.galley.html")).toBe("orphan bytes");
+    expect(harness.deleteCalls).toEqual([]);
+    expect(harness.renameCalls.count).toBe(0);
+  });
+
+  it("binds the exact final handle when vault indexing arrives after adapter copy", async () => {
+    vi.useFakeTimers();
+    const harness = makeProductionPluginApp("", {
+      delayCopyIndexFor: "delayed.galley.html"
+    });
+    const artifacts = new ObsidianArtifactVault(harness.app.vault);
+    const temp = await artifacts.createOwned(".delayed.tmp", "delayed bytes\r\n");
+
+    const commit = artifacts.commitOwned(temp, "delayed.galley.html");
+    await vi.advanceTimersByTimeAsync(10);
+    const result = await commit;
+
+    expect(result.status).toBe("committed");
+    if (result.status === "committed") {
+      expect(await artifacts.owns(result.handle)).toBe(true);
+    }
+    expect(harness.contents.get("delayed.galley.html")).toBe(
+      "delayed bytes\r\n"
+    );
+    expect(harness.createCalls).toEqual([".delayed.tmp"]);
+    expect(harness.copyCalls).toEqual([
+      { from: ".delayed.tmp", to: "delayed.galley.html" }
+    ]);
+    expect(harness.renameCalls.count).toBe(0);
+  });
+
+  it("aborts a copied final identity wait without claiming or path-deleting it", async () => {
+    const harness = makeProductionPluginApp("", {
+      suppressCopyIndexFor: "aborted.galley.html"
+    });
+    const artifacts = new ObsidianArtifactVault(harness.app.vault);
+    const temp = await artifacts.createOwned(".aborted.tmp", "aborted bytes");
+    const controller = new AbortController();
+    const commit = artifacts
+      .commitOwned(temp, "aborted.galley.html", controller.signal)
+      .catch((error: unknown) => error);
+    await vi.waitFor(() => {
+      expect(harness.copyCalls).toHaveLength(1);
+    });
+
+    controller.abort();
+
+    expect(await commit).toEqual(expect.objectContaining({ name: "AbortError" }));
+    expect(harness.contents.get("aborted.galley.html")).toBe("aborted bytes");
+    expect(harness.deleteCalls).toEqual([]);
+    expect(harness.renameCalls.count).toBe(0);
   });
 });
 
@@ -598,11 +726,20 @@ function makePluginApp(): App {
 
 function makeProductionPluginApp(
   markdown: string,
-  options: { raceFirstHtmlFinal?: boolean } = {}
+  options: {
+    raceFirstHtmlFinal?: boolean;
+    coordinateCopiesTo?: string;
+    suppressCopyIndexFor?: string;
+    delayCopyIndexFor?: string;
+  } = {}
 ): {
   app: App;
   contents: Map<string, string>;
   renameCalls: { count: number };
+  createCalls: string[];
+  copyCalls: Array<{ from: string; to: string }>;
+  copyInitialPresence: boolean[];
+  deleteCalls: string[];
 } {
   type MemoryObsidianFile = {
     path: string;
@@ -620,8 +757,67 @@ function makeProductionPluginApp(
   const files = new Map<string, MemoryObsidianFile>([[source.path, source]]);
   const contents = new Map<string, string>([[source.path, markdown]]);
   const renameCalls = { count: 0 };
+  const createCalls: string[] = [];
+  const copyCalls: Array<{ from: string; to: string }> = [];
+  const copyInitialPresence: boolean[] = [];
+  const deleteCalls: string[] = [];
+  const createListeners = new Map<object, (file: MemoryObsidianFile) => unknown>();
   let racedFirstHtmlFinal = false;
+  let coordinatedCopyCount = 0;
+  let releaseCoordinatedCopies: (() => void) | undefined;
+  const coordinatedCopies = new Promise<void>((resolve) => {
+    releaseCoordinatedCopies = resolve;
+  });
+  const emitCreate = (file: MemoryObsidianFile): void => {
+    for (const listener of createListeners.values()) {
+      listener(file);
+    }
+  };
   const vault = {
+    adapter: {
+      exists: async (path: string) => contents.has(path),
+      copy: async (from: string, to: string) => {
+        copyCalls.push({ from, to });
+        copyInitialPresence.push(contents.has(to));
+        if (
+          options.raceFirstHtmlFinal &&
+          !racedFirstHtmlFinal &&
+          to === "generated/note.galley.html"
+        ) {
+          racedFirstHtmlFinal = true;
+          const replacement = { path: to, name: "note.galley.html" };
+          files.set(to, replacement);
+          contents.set(to, "replacement HTML");
+          emitCreate(replacement);
+          throw new Error("Destination raced exclusive copy");
+        }
+        if (to === options.coordinateCopiesTo) {
+          coordinatedCopyCount += 1;
+          if (coordinatedCopyCount === 2) {
+            releaseCoordinatedCopies?.();
+          }
+          await coordinatedCopies;
+        }
+        if (contents.has(to)) throw new Error("Exists");
+        const value = contents.get(from);
+        if (value === undefined) throw new Error("Missing copy source");
+        contents.set(to, value);
+        if (to === options.suppressCopyIndexFor) return;
+        const indexCopy = (): void => {
+          const file = {
+            path: to,
+            name: to.slice(to.lastIndexOf("/") + 1)
+          };
+          files.set(to, file);
+          emitCreate(file);
+        };
+        if (to === options.delayCopyIndexFor) {
+          window.setTimeout(indexCopy, 10);
+          return;
+        }
+        indexCopy();
+      }
+    },
     getAbstractFileByPath: (path: string) => files.get(path) ?? null,
     read: async (file: MemoryObsidianFile) => {
       const value = contents.get(file.path);
@@ -629,17 +825,7 @@ function makeProductionPluginApp(
       return value;
     },
     create: async (path: string, value: string) => {
-      if (
-        options.raceFirstHtmlFinal &&
-        !racedFirstHtmlFinal &&
-        path === "generated/note.galley.html"
-      ) {
-        racedFirstHtmlFinal = true;
-        const replacement = { path, name: "note.galley.html" };
-        files.set(path, replacement);
-        contents.set(path, "replacement HTML");
-        throw new Error("Destination raced exclusive create");
-      }
+      createCalls.push(path);
       if (files.has(path)) throw new Error("Exists");
       const file = {
         path,
@@ -647,6 +833,7 @@ function makeProductionPluginApp(
       };
       files.set(path, file);
       contents.set(path, value);
+      emitCreate(file);
       return file;
     },
     createFolder: async (path: string) => {
@@ -672,8 +859,18 @@ function makeProductionPluginApp(
       if (value !== undefined) contents.set(to, value);
     },
     delete: async (file: MemoryObsidianFile) => {
+      deleteCalls.push(file.path);
       files.delete(file.path);
       contents.delete(file.path);
+    },
+    on: (name: string, listener: (file: MemoryObsidianFile) => unknown) => {
+      if (name !== "create") throw new Error("Unexpected event");
+      const ref = {};
+      createListeners.set(ref, listener);
+      return ref;
+    },
+    offref: (ref: object) => {
+      createListeners.delete(ref);
     }
   };
   const app = {
@@ -685,7 +882,15 @@ function makeProductionPluginApp(
     workspace: { getActiveFile: () => source },
     vault
   } as unknown as App;
-  return { app, contents, renameCalls };
+  return {
+    app,
+    contents,
+    renameCalls,
+    createCalls,
+    copyCalls,
+    copyInitialPresence,
+    deleteCalls
+  };
 }
 
 function openAiContent(content: string): { status: number; json: unknown } {

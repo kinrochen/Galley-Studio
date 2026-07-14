@@ -3,6 +3,7 @@ import {
   Notice,
   Platform,
   Plugin,
+  type EventRef,
   type TAbstractFile,
   type TFile,
   type Vault
@@ -185,7 +186,11 @@ interface ObsidianOwnedArtifact {
   readonly contents: string;
 }
 
-class ObsidianArtifactVault implements ArtifactVault<ObsidianOwnedArtifact> {
+const FINAL_IDENTITY_TIMEOUT_MS = 1_000;
+
+export class ObsidianArtifactVault
+  implements ArtifactVault<ObsidianOwnedArtifact>
+{
   constructor(private readonly vault: Vault) {}
 
   async exists(path: string): Promise<boolean> {
@@ -217,7 +222,8 @@ class ObsidianArtifactVault implements ArtifactVault<ObsidianOwnedArtifact> {
 
   async commitOwned(
     handle: ObsidianOwnedArtifact,
-    finalPath: string
+    finalPath: string,
+    signal?: AbortSignal
   ): Promise<
     | { status: "committed"; handle: ObsidianOwnedArtifact }
     | { status: "collision" }
@@ -225,17 +231,32 @@ class ObsidianArtifactVault implements ArtifactVault<ObsidianOwnedArtifact> {
     if (!(await this.owns(handle))) {
       throw new Error("Galley temporary artifact ownership was lost.");
     }
+    if (signal?.aborted) {
+      throw new DOMException("Aborted", "AbortError");
+    }
+    if (await this.vault.adapter.exists(finalPath)) {
+      return { status: "collision" };
+    }
+
+    const observer = observeFinalFile(this.vault, finalPath);
     try {
-      const file = await this.vault.create(finalPath, handle.contents);
+      await this.vault.adapter.copy(handle.path, finalPath);
+    } catch (error) {
+      observer.dispose();
+      if (await this.vault.adapter.exists(finalPath)) {
+        return { status: "collision" };
+      }
+      throw error;
+    }
+
+    try {
+      const file = await observer.wait(signal);
       return {
         status: "committed",
         handle: { path: finalPath, file, contents: handle.contents }
       };
-    } catch (error) {
-      if (this.vault.getAbstractFileByPath(finalPath)) {
-        return { status: "collision" };
-      }
-      throw error;
+    } finally {
+      observer.dispose();
     }
   }
 
@@ -248,6 +269,80 @@ class ObsidianArtifactVault implements ArtifactVault<ObsidianOwnedArtifact> {
       await this.vault.delete(handle.file, true);
     }
   }
+}
+
+interface FinalFileObserver {
+  wait(signal?: AbortSignal): Promise<TFile>;
+  dispose(): void;
+}
+
+function observeFinalFile(vault: Vault, finalPath: string): FinalFileObserver {
+  let observed: TFile | null = null;
+  let resolveWait: ((file: TFile) => void) | null = null;
+  const eventRef: EventRef = vault.on("create", (file) => {
+    const created = asTFile(file);
+    if (file.path !== finalPath || !created) {
+      return;
+    }
+    observed = created;
+    resolveWait?.(created);
+  });
+
+  return {
+    async wait(signal) {
+      const indexed = asTFile(vault.getAbstractFileByPath(finalPath));
+      if (indexed) {
+        return indexed;
+      }
+      if (observed) {
+        return observed;
+      }
+      if (signal?.aborted) {
+        throw new DOMException("Aborted", "AbortError");
+      }
+
+      return new Promise<TFile>((resolve, reject) => {
+        let settled = false;
+        const finish = (action: () => void): void => {
+          if (settled) return;
+          settled = true;
+          window.clearTimeout(timeout);
+          signal?.removeEventListener("abort", onAbort);
+          resolveWait = null;
+          action();
+        };
+        const onAbort = (): void => {
+          finish(() => reject(new DOMException("Aborted", "AbortError")));
+        };
+        const timeout = window.setTimeout(() => {
+          finish(() =>
+            reject(
+              new Error("Galley final artifact identity was not observed.")
+            )
+          );
+        }, FINAL_IDENTITY_TIMEOUT_MS);
+        resolveWait = (file) => finish(() => resolve(file));
+        signal?.addEventListener("abort", onAbort, { once: true });
+
+        const current =
+          observed ?? asTFile(vault.getAbstractFileByPath(finalPath));
+        if (current) {
+          finish(() => resolve(current));
+        }
+      });
+    },
+    dispose() {
+      resolveWait = null;
+      vault.offref(eventRef);
+    }
+  };
+}
+
+function asTFile(file: TAbstractFile | null): TFile | null {
+  if (!file || isFolder(file)) {
+    return null;
+  }
+  return file as TFile;
 }
 
 function isFolder(file: TAbstractFile): boolean {

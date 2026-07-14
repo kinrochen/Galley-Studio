@@ -15,7 +15,8 @@ export interface ArtifactVault<Handle> {
   createOwned(path: string, contents: string): Promise<Handle>;
   commitOwned(
     handle: Handle,
-    finalPath: string
+    finalPath: string,
+    signal?: AbortSignal
   ): Promise<ArtifactCommitResult<Handle>>;
   owns(handle: Handle): Promise<boolean>;
   removeOwned(handle: Handle): Promise<void>;
@@ -149,7 +150,8 @@ export class ArtifactRepository<Handle> {
         handles.htmlFinal = await commitOrCollide(
           this.vault,
           handles.htmlTemp,
-          paths.html
+          paths.html,
+          signal
         );
         await this.vault.removeOwned(handles.htmlTemp);
         handles.htmlTemp = null;
@@ -158,7 +160,8 @@ export class ArtifactRepository<Handle> {
         handles.sidecarFinal = await commitOrCollide(
           this.vault,
           handles.sidecarTemp,
-          paths.sidecar
+          paths.sidecar,
+          signal
         );
         await this.vault.removeOwned(handles.sidecarTemp);
         handles.sidecarTemp = null;
@@ -226,9 +229,10 @@ export class ArtifactRepository<Handle> {
 async function commitOrCollide<Handle>(
   vault: ArtifactVault<Handle>,
   handle: Handle,
-  finalPath: string
+  finalPath: string,
+  signal?: AbortSignal
 ): Promise<Handle> {
-  const result = await vault.commitOwned(handle, finalPath);
+  const result = await vault.commitOwned(handle, finalPath, signal);
   if (result.status === "collision") {
     throw new PairCollision();
   }
