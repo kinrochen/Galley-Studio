@@ -128,11 +128,13 @@ const DEFAULT_READ_ATTEMPTS = 4;
 
 export class ObsidianVaultFileStore {
   readonly #maxReadAttempts: number;
+  readonly backingIdentity: object;
 
   constructor(
     private readonly vault: ObsidianVaultFilePort,
     options: ObsidianVaultFileStoreOptions = {}
   ) {
+    this.backingIdentity = vault;
     const attempts = options.maxReadAttempts ?? DEFAULT_READ_ATTEMPTS;
     if (!Number.isSafeInteger(attempts) || attempts < 1 || attempts > 32) {
       throw new Error("Galley stable-read attempts must be between 1 and 32.");

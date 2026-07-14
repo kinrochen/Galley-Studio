@@ -179,6 +179,10 @@ const EMPTY_PAIR_SUFFIX = ".history-scope";
 const SCOPE_INDEX_ROOT = `${TRANSACTION_ROOT}/scopes`;
 const ACTIVE_TRANSACTIONS = new Map<string, Promise<void>>();
 const ACTIVE_RELEASES = new Map<string, () => void>();
+const DELETION_OWNERSHIP = new WeakMap<
+  object,
+  Map<string, Map<string, VaultFileObservation>>
+>();
 
 interface ScopeIndexData {
   readonly schemaVersion: 1;
@@ -203,9 +207,16 @@ export class ObsidianWorkbenchVault
   readonly #ownershipHandles = new WeakMap<ObsidianPairOwnership, OwnershipData>();
   readonly #historyHandles = new WeakMap<ObsidianHistoryObservation, HistoryObservationData>();
   readonly #queues = new Map<string, Promise<void>>();
+  readonly #deletionOwnership: Map<string, Map<string, VaultFileObservation>>;
 
   constructor(vault: Vault, options: ObsidianWorkbenchVaultOptions = {}) {
     this.#files = new ObsidianVaultFileStore(vault);
+    let ownership = DELETION_OWNERSHIP.get(this.#files.backingIdentity);
+    if (!ownership) {
+      ownership = new Map();
+      DELETION_OWNERSHIP.set(this.#files.backingIdentity, ownership);
+    }
+    this.#deletionOwnership = ownership;
     this.#options = options;
     this.#transactions = new ObsidianTransactionStore(this.#files, {
       ...(options.randomUUID ? { randomUUID: options.randomUUID } : {}),
@@ -305,6 +316,7 @@ export class ObsidianWorkbenchVault
             throw new ObsidianWorkbenchAmbiguousError(record.id, cleanup);
           }
           await this.#removeScopeIndexes(record, signal);
+          this.#forgetDeletionOwnership(record.id);
           this.#abandonActive(record.id);
           return { status: "conflict" };
         }
@@ -332,6 +344,7 @@ export class ObsidianWorkbenchVault
         }
         await this.#releaseLocks(current, ["pair"], signal);
         await this.#removeScopeIndexes(current, signal);
+        this.#forgetDeletionOwnership(current.id);
         this.#abandonActive(current.id);
         return {
           status: "committed",
@@ -376,12 +389,14 @@ export class ObsidianWorkbenchVault
             throw new ObsidianWorkbenchAmbiguousError(record.id, cleanup);
           }
           await this.#removeScopeIndexes(record, signal);
+          this.#forgetDeletionOwnership(record.id);
           this.#abandonActive(record.id);
           return { status: "collision" };
         }
         let current = await this.#transactions.transition(record, "applying", signal);
         await this.#crashPoint("after-applying", current);
         const html = await this.#createExact(checked.html, contents.html, current.id, signal);
+        this.#rememberDeletion(current.id, "pair-create:html", html);
         await this.#crashPoint("after-html", current);
         const sidecar = await this.#createExact(
           checked.sidecar,
@@ -389,6 +404,7 @@ export class ObsidianWorkbenchVault
           current.id,
           signal
         );
+        this.#rememberDeletion(current.id, "pair-create:sidecar", sidecar);
         await this.#crashPoint("after-sidecar", current);
         current = await this.#transactions.transition(current, "committed", signal);
         await this.#crashPoint("after-commit", current);
@@ -406,6 +422,7 @@ export class ObsidianWorkbenchVault
         }
         await this.#releaseLocks(current, ["pair"], signal);
         await this.#removeScopeIndexes(current, signal);
+        this.#forgetDeletionOwnership(current.id);
         this.#abandonActive(current.id);
         const observation = this.#pairObservation(checked, html, sidecar);
         return {
@@ -457,6 +474,9 @@ export class ObsidianWorkbenchVault
       });
       await this.#createScopeIndexes(record);
       this.#beginActive(record.id);
+      for (const item of data) {
+        this.#rememberDeletion(record.id, `pair-cleanup:${item.member}`, item.file);
+      }
       try {
         await this.#crashPoint("after-intent", record);
         if (!(await this.#acquireLocks(record, ["pair"]))) {
@@ -487,6 +507,7 @@ export class ObsidianWorkbenchVault
         }
         await this.#releaseLocks(current, ["pair"]);
         await this.#removeScopeIndexes(current);
+        this.#forgetDeletionOwnership(current.id);
         this.#abandonActive(current.id);
       } catch (error) {
         this.#abandonActive(record.id);
@@ -575,6 +596,7 @@ export class ObsidianWorkbenchVault
         let current = await this.#transactions.transition(record, "applying", signal);
         await this.#crashPoint("after-applying", current);
         const created = await this.#createExact(checkedPath, html, current.id, signal);
+        this.#rememberDeletion(current.id, "history-pending", created);
         await this.#crashPoint("after-history-promote", current);
         current = await this.#transactions.transition(current, "committed", signal);
         await this.#crashPoint("after-commit", current);
@@ -600,8 +622,23 @@ export class ObsidianWorkbenchVault
     const existingData = this.#trustedHistory(provisional);
     if (existingData.retentionId) {
       try {
-        const record = await this.#transactions.open(existingData.retentionId, signal);
-        const storedPlan = await parseHistoryPlan(blobText(record, "history-plan"));
+        let record = await this.#transactions.open(existingData.retentionId, signal);
+        let storedPlan = await parseHistoryPlan(blobText(record, "history-plan"));
+        if (record.kind === "history-retention") {
+          const requestedPlan = await this.#validatedHistoryPlan(
+            provisional,
+            finalPath,
+            observedFiles,
+            removals,
+            false
+          );
+          if (canonicalJson(storedPlan) !== canonicalJson(requestedPlan)) {
+            return { status: "lost" };
+          }
+        }
+        await this.#recoverRecord(record, signal);
+        record = await this.#transactions.open(existingData.retentionId, signal);
+        storedPlan = await parseHistoryPlan(blobText(record, "history-plan"));
         await this.#transactions.verifyReceipt(
           record,
           await this.#receiptPlan(
@@ -656,6 +693,7 @@ export class ObsidianWorkbenchVault
       if (fresh === "collision") return { status: "collision" };
       if (fresh === "conflict") return { status: "conflict" };
       const record = await this.#prepareHistoryOnly(plan, signal);
+      this.#rememberHistoryDeletions(record.id, provisional, removals);
       try {
         await this.#crashPoint("after-intent", record);
         if (!(await this.#acquireLocks(record, ["history"], signal))) {
@@ -664,6 +702,7 @@ export class ObsidianWorkbenchVault
             throw new ObsidianWorkbenchAmbiguousError(record.id, cleanup);
           }
           await this.#removeScopeIndexes(record, signal);
+          this.#forgetDeletionOwnership(record.id);
           this.#abandonActive(record.id);
           return { status: "conflict" };
         }
@@ -671,6 +710,7 @@ export class ObsidianWorkbenchVault
         await this.#crashPoint("after-applying", current);
         const promoted = await this.#applyHistoryForward(plan, current, signal);
         current = await this.#transactions.transition(current, "committed", signal);
+        existingData.retentionId = current.id;
         await this.#crashPoint("after-commit", current);
         const receiptPlan = await this.#receiptPlan(
           current.scope.pair,
@@ -684,15 +724,6 @@ export class ObsidianWorkbenchVault
         await this.#crashPoint("after-receipt", current);
         current = await this.#transactions.transition(current, "completed", signal);
         await this.#crashPoint("after-completed", current);
-        const cleanup = await this.#transactions.cleanup(current, signal);
-        if (cleanup.status !== "cleaned") {
-          throw new ObsidianWorkbenchAmbiguousError(current.id, cleanup);
-        }
-        await this.#releaseLocks(current, ["history"], signal);
-        await this.#removeScopeIndexes(current, signal);
-        const provisionalData = this.#trustedHistory(provisional);
-        provisionalData.retentionId = current.id;
-        this.#abandonActive(current.id);
         return {
           status: "created",
           file: this.#historyFile(promoted, {
@@ -735,6 +766,7 @@ export class ObsidianWorkbenchVault
       );
       if (cleanup.status === "cleaned") {
         await this.#removeScopeIndexes(record);
+        this.#forgetDeletionOwnership(record.id);
       }
       return cleanup.status === "cleaned";
     });
@@ -770,6 +802,7 @@ export class ObsidianWorkbenchVault
             if (cleanup.status === "cleaned") {
               await this.#releaseLocks(record, lockKinds(metadata.operation));
               await this.#removeScopeIndexes(record);
+              this.#forgetDeletionOwnership(record.id);
             }
           } catch {
             // Recovery retains exact durable proof for a later scoped entry.
@@ -824,6 +857,7 @@ export class ObsidianWorkbenchVault
           plan,
           signal
         );
+        this.#rememberHistoryDeletions(record.id, history.provisional, history.removals);
         try {
           await this.#crashPoint("after-intent", record);
           if (!(await this.#acquireLocks(record, ["pair", "history"], signal))) {
@@ -832,6 +866,7 @@ export class ObsidianWorkbenchVault
               throw new ObsidianWorkbenchAmbiguousError(record.id, cleanup);
             }
             await this.#removeScopeIndexes(record, signal);
+            this.#forgetDeletionOwnership(record.id);
             this.#abandonActive(record.id);
             return { status: "history-conflict" };
           }
@@ -1165,6 +1200,13 @@ export class ObsidianWorkbenchVault
     record: TransactionRecord,
     signal?: AbortSignal
   ): Promise<void> {
+    const initialMetadata = await parseMetadata(blobText(record, "metadata"));
+    if (
+      initialMetadata.operation === "history-pending" &&
+      (record.phase === "committed" || record.phase === "completed")
+    ) {
+      return;
+    }
     const active = ACTIVE_TRANSACTIONS.get(record.id);
     if (active) {
       await active;
@@ -1204,7 +1246,21 @@ export class ObsidianWorkbenchVault
       ? await parseHistoryPlan(blobText(record, "history-plan"))
       : undefined;
     const pairPlan = pairPlanFromRecord(record);
-    const rollForward = record.phase === "committed" || record.phase === "completed";
+    let rollForward = record.phase === "committed" || record.phase === "completed";
+    if (
+      !rollForward &&
+      metadata.operation === "pair-create" &&
+      record.phase === "applying"
+    ) {
+      const complete = await this.#readPairRaw(record.scope.pair);
+      if (
+        complete?.html.text === pairPlan.afterHtml &&
+        complete.sidecar.text === pairPlan.afterSidecar
+      ) {
+        record = await this.#transactions.transition(record, "committed", signal);
+        rollForward = true;
+      }
+    }
     const evidence = await this.#preflightRecovery(pairPlan, history, rollForward, signal);
     if (evidence) {
       await this.#transactions.quarantineTargetDrift(record, evidence, signal);
@@ -1213,9 +1269,9 @@ export class ObsidianWorkbenchVault
 
     if (rollForward) {
       if (metadata.operation !== "history-retention") {
-        await this.#recoverPairState(pairPlan, true, record.id, signal);
+        await this.#recoverPairState(pairPlan, true, record, signal);
       }
-      if (history) await this.#recoverHistoryState(history, true, record.id, signal);
+      if (history) await this.#recoverHistoryState(history, true, record, signal);
       const receiptPlan = await this.#receiptPlan(
         record.scope.pair,
         { html: pairPlan.afterHtml, sidecarJson: pairPlan.afterSidecar },
@@ -1235,26 +1291,33 @@ export class ObsidianWorkbenchVault
           throw error;
         }
       }
-      if (record.kind === "pair-history") return;
+      if (
+        record.kind === "pair-history" ||
+        (record.kind === "history-retention" && this.#hasDeletionOwnership(record.id))
+      ) {
+        return;
+      }
       const cleanup = await this.#transactions.cleanup(record, signal);
       if (cleanup.status !== "cleaned") {
         throw new ObsidianWorkbenchRecoveryConflictError(record.id);
       }
       await this.#releaseLocks(record, lockKinds(metadata.operation), signal);
       await this.#removeScopeIndexes(record, signal);
+      this.#forgetDeletionOwnership(record.id);
       return;
     }
 
     if (metadata.operation !== "history-retention") {
-      await this.#recoverPairState(pairPlan, false, record.id, signal);
+      await this.#recoverPairState(pairPlan, false, record, signal);
     }
-    if (history) await this.#recoverHistoryState(history, false, record.id, signal);
+    if (history) await this.#recoverHistoryState(history, false, record, signal);
     const cleanup = await this.#transactions.cleanup(record, signal, true);
     if (cleanup.status !== "cleaned") {
       throw new ObsidianWorkbenchRecoveryConflictError(record.id);
     }
     await this.#releaseLocks(record, lockKinds(metadata.operation), signal);
     await this.#removeScopeIndexes(record, signal);
+    this.#forgetDeletionOwnership(record.id);
   }
 
   async #preflightRecovery(
@@ -1337,52 +1400,70 @@ export class ObsidianWorkbenchVault
   async #recoverPairState(
     plan: ReturnType<typeof pairPlanFromRecord>,
     forward: boolean,
-    transactionId: string,
+    record: TransactionRecord,
     signal?: AbortSignal
   ): Promise<void> {
-    await this.#restorePath(
-      plan.paths.html,
-      forward ? plan.afterHtml : plan.beforeHtml,
-      transactionId,
-      signal
-    );
-    await this.#restorePath(
-      plan.paths.sidecar,
-      forward ? plan.afterSidecar : plan.beforeSidecar,
-      transactionId,
-      signal
-    );
+    for (const [member, path, text] of [
+      ["html", plan.paths.html, forward ? plan.afterHtml : plan.beforeHtml],
+      ["sidecar", plan.paths.sidecar, forward ? plan.afterSidecar : plan.beforeSidecar]
+    ] as const) {
+      if (text === null) {
+        await this.#removePathProven(record, path, `pair-create:${member}`, signal);
+      } else {
+        await this.#restorePath(path, text, record.id, signal);
+      }
+    }
   }
 
   async #recoverHistoryState(
     plan: HistoryPlanData,
     forward: boolean,
-    transactionId: string,
+    record: TransactionRecord,
     signal?: AbortSignal
   ): Promise<void> {
     if (forward) {
       await this.#restorePath(
         plan.finalPath,
         plan.provisional.text,
-        transactionId,
+        record.id,
         signal
       );
-      await this.#restorePath(plan.provisional.path, null, transactionId, signal);
+      await this.#removePathProven(
+        record,
+        plan.provisional.path,
+        "history:provisional",
+        signal
+      );
       for (const item of plan.removals) {
-        await this.#restorePath(item.path, null, transactionId, signal);
+        await this.#removePathProven(
+          record,
+          item.path,
+          historyRemovalRole(item.path),
+          signal
+        );
       }
       return;
     }
-    await this.#restorePath(plan.finalPath, null, transactionId, signal);
+    await this.#removePathProven(record, plan.finalPath, "history:final", signal);
     for (const item of plan.removals) {
-      await this.#restorePath(item.path, item.text, transactionId, signal);
+      await this.#restorePath(item.path, item.text, record.id, signal);
     }
     await this.#restorePath(
       plan.provisional.path,
       plan.provisional.text,
-      transactionId,
+      record.id,
       signal
     );
+  }
+
+  async #removePathProven(
+    record: TransactionRecord,
+    path: string,
+    role: string,
+    signal?: AbortSignal
+  ): Promise<void> {
+    const current = await this.#files.readTextStable(path, signal);
+    if (current) await this.#removeProvenOwned(record, role, current, signal);
   }
 
   async #recoverPendingPreparation(
@@ -1399,25 +1480,28 @@ export class ObsidianWorkbenchVault
       );
       throw new ObsidianWorkbenchRecoveryConflictError(record.id);
     }
-    if (current) await this.#removeExact(current, record.id, signal);
+    if (current) {
+      await this.#removeProvenOwned(record, "history-pending", current, signal);
+    }
     const cleanup = await this.#transactions.cleanup(record, signal, true);
     if (cleanup.status !== "cleaned") {
       throw new ObsidianWorkbenchRecoveryConflictError(record.id);
     }
     await this.#removeScopeIndexes(record, signal);
+    this.#forgetDeletionOwnership(record.id);
   }
 
   async #recoverPairCleanup(
     record: TransactionRecord,
     signal?: AbortSignal
   ): Promise<void> {
-    for (const [path, role] of [
-      [record.scope.pair.html, "pair-html-after"],
-      [record.scope.pair.sidecar, "pair-sidecar-after"]
+    for (const [path, blobRole, ownershipRole] of [
+      [record.scope.pair.html, "pair-html-after", "pair-cleanup:html"],
+      [record.scope.pair.sidecar, "pair-sidecar-after", "pair-cleanup:sidecar"]
     ] as const) {
       const current = await this.#files.readTextStable(path, signal);
-      if (current && current.text === blobText(record, role)) {
-        await this.#removeExact(current, record.id, signal);
+      if (current && current.text === blobText(record, blobRole)) {
+        await this.#removeProvenOwned(record, ownershipRole, current, signal);
       }
     }
     if (record.phase === "prepared") {
@@ -1435,6 +1519,7 @@ export class ObsidianWorkbenchVault
     }
     await this.#releaseLocks(record, ["pair"], signal);
     await this.#removeScopeIndexes(record, signal);
+    this.#forgetDeletionOwnership(record.id);
   }
 
   async #activePending(
@@ -1456,8 +1541,48 @@ export class ObsidianWorkbenchVault
         }
         const plan = await parseOwnershipPlan(blobText(record, "ownership-plan"));
         const current = await this.#files.readTextStable(plan.path, signal);
-        if (current && current.sha256 === plan.sha256 && current.byteLength === plan.byteLength) {
+        const original = this.#deletionOwnership.get(record.id)?.get("history-pending");
+        if (
+          original &&
+          current &&
+          sameFile(current, original) &&
+          current.sha256 === plan.sha256 &&
+          current.byteLength === plan.byteLength
+        ) {
           result.set(plan.path, record.id);
+        }
+      } catch {
+        // Strict record opening/quarantine owns malformed WAL classification.
+      }
+    }
+    return result;
+  }
+
+  async #knownPendingPaths(
+    documentId: string,
+    signal?: AbortSignal
+  ): Promise<Set<string>> {
+    const result = new Set<string>();
+    for (const record of await this.#transactions.listAll(signal)) {
+      if (
+        record.kind !== "owned-cleanup" ||
+        record.scope.historyDocumentId !== documentId ||
+        record.phase !== "committed"
+      ) {
+        continue;
+      }
+      try {
+        if ((await parseMetadata(blobText(record, "metadata"))).operation !== "history-pending") {
+          continue;
+        }
+        const plan = await parseOwnershipPlan(blobText(record, "ownership-plan"));
+        const current = await this.#files.readTextStable(plan.path, signal);
+        if (
+          current &&
+          current.sha256 === plan.sha256 &&
+          current.byteLength === plan.byteLength
+        ) {
+          result.add(plan.path);
         }
       } catch {
         // Strict record opening/quarantine owns malformed WAL classification.
@@ -1561,9 +1686,15 @@ export class ObsidianWorkbenchVault
     if (!sameFile(currentProvisional, provisionalData.file)) return "lost";
     if (await this.#files.readTextStable(finalPath, signal)) return "collision";
     const entries = await this.#files.list(provisionalData.folder, signal);
+    const knownPending = await this.#knownPendingPaths(provisionalData.documentId, signal);
+    const relevantEntries = entries.filter(
+      ({ path }) =>
+        observedFiles.some((file) => file.path === path) ||
+        !knownPending.has(path)
+    );
     if (
-      entries.length !== observedFiles.length ||
-      entries.some(({ kind }) => kind !== "file")
+      relevantEntries.length !== observedFiles.length ||
+      relevantEntries.some(({ kind }) => kind !== "file")
     ) {
       return "conflict";
     }
@@ -1587,11 +1718,12 @@ export class ObsidianWorkbenchVault
       record.id,
       signal
     );
+    this.#rememberDeletion(record.id, "history:final", promoted);
     const provisional = await this.#files.readTextStable(plan.provisional.path, signal);
     if (!provisional || !sameExact(provisional, plan.provisional)) {
       throw new ObsidianWorkbenchAmbiguousError(record.id);
     }
-    await this.#removeExact(provisional, record.id, signal);
+    await this.#removeProvenOwned(record, "history:provisional", provisional, signal);
     await this.#crashPoint("after-history-promote", record);
     for (let index = 0; index < plan.removals.length; index += 1) {
       const item = plan.removals[index]!;
@@ -1599,7 +1731,7 @@ export class ObsidianWorkbenchVault
       if (!current || !sameExact(current, item)) {
         throw new ObsidianWorkbenchAmbiguousError(record.id);
       }
-      await this.#removeExact(current, record.id, signal);
+      await this.#removeProvenOwned(record, historyRemovalRole(item.path), current, signal);
       await this.#crashPoint("after-history-removal", record, index);
     }
     return promoted;
@@ -1708,6 +1840,68 @@ export class ObsidianWorkbenchVault
     if (result.status !== "removed") {
       throw new ObsidianWorkbenchAmbiguousError(transactionId, result);
     }
+  }
+
+  #rememberDeletion(
+    transactionId: string,
+    role: string,
+    file: VaultFileObservation
+  ): void {
+    let transaction = this.#deletionOwnership.get(transactionId);
+    if (!transaction) {
+      transaction = new Map();
+      this.#deletionOwnership.set(transactionId, transaction);
+    }
+    transaction.set(role, file);
+  }
+
+  #rememberHistoryDeletions(
+    transactionId: string,
+    provisional: HistoryFile<ObsidianHistoryObservation>,
+    removals: readonly HistoryFile<ObsidianHistoryObservation>[]
+  ): void {
+    this.#rememberDeletion(
+      transactionId,
+      "history:provisional",
+      this.#trustedHistory(provisional).file
+    );
+    for (const removal of removals) {
+      const file = this.#trustedHistory(removal).file;
+      this.#rememberDeletion(transactionId, historyRemovalRole(file.path), file);
+    }
+  }
+
+  #hasDeletionOwnership(transactionId: string): boolean {
+    return this.#deletionOwnership.has(transactionId);
+  }
+
+  #forgetDeletionOwnership(transactionId: string): void {
+    this.#deletionOwnership.delete(transactionId);
+  }
+
+  async #removeProvenOwned(
+    record: TransactionRecord,
+    role: string,
+    current: VaultFileObservation,
+    signal?: AbortSignal
+  ): Promise<void> {
+    const original = this.#deletionOwnership.get(record.id)?.get(role);
+    if (!original || !sameFile(current, original)) {
+      await this.#transactions.quarantineTargetDrift(
+        record,
+        [
+          {
+            path: current.path,
+            state: "present",
+            sha256: current.sha256,
+            byteLength: current.byteLength
+          }
+        ],
+        signal
+      );
+      throw new ObsidianWorkbenchRecoveryConflictError(record.id);
+    }
+    await this.#removeExact(original, record.id, signal);
   }
 
   async #restorePath(
@@ -2014,6 +2208,10 @@ function pairQueueKey(paths: ArtifactPaths): string {
 
 function historyQueueKey(folder: string): string {
   return `history:${folder}`;
+}
+
+function historyRemovalRole(path: string): string {
+  return `history:removal:${path}`;
 }
 
 function lockKinds(

@@ -63,6 +63,108 @@ describe("Obsidian workbench transaction recovery", () => {
     expect(backing.read(PATHS.sidecar)).toBe(oldPair.sidecarJson);
   });
 
+  it("preserves a same-byte replacement of a one-sided created member", async () => {
+    const contents = await pair("created");
+    const other = await pair("unrelated");
+    const otherPaths = {
+      html: "notes/unrelated.galley.html",
+      sidecar: "notes/unrelated.galley.json"
+    } as const;
+    const backing = new PersistentObsidianBacking({
+      [otherPaths.html]: other.html,
+      [otherPaths.sidecar]: other.sidecarJson
+    });
+    const obsidianVault = persistentObsidianVault(backing);
+    const crashing = new ObsidianWorkbenchVault(obsidianVault, {
+      crashAt: new Set(["after-html"])
+    });
+    await expect(crashing.createPairTransactional(PATHS, contents)).rejects.toMatchObject({
+      code: "workbench_simulated_crash"
+    });
+    backing.replace(PATHS.html, contents.html);
+
+    const reopened = new ObsidianWorkbenchVault(obsidianVault);
+    await expect(reopened.readPair(PATHS)).rejects.toMatchObject({
+      code: "transaction_recovery_conflict"
+    });
+    expect(backing.read(PATHS.html)).toBe(contents.html);
+    await expect(reopened.readPair(otherPaths)).resolves.toMatchObject(other);
+  });
+
+  it("quarantines a one-sided create when process restart loses identity provenance", async () => {
+    const contents = await pair("created");
+    const backing = new PersistentObsidianBacking();
+    const crashing = new ObsidianWorkbenchVault(persistentObsidianVault(backing), {
+      crashAt: new Set(["after-html"])
+    });
+    await expect(crashing.createPairTransactional(PATHS, contents)).rejects.toMatchObject({
+      code: "workbench_simulated_crash"
+    });
+
+    const restarted = new ObsidianWorkbenchVault(persistentObsidianVault(backing));
+    await expect(restarted.readPair(PATHS)).rejects.toMatchObject({
+      code: "transaction_recovery_conflict"
+    });
+    expect(backing.read(PATHS.html)).toBe(contents.html);
+  });
+
+  it("cleans an original one-sided create when the same Vault retains provenance", async () => {
+    const contents = await pair("created");
+    const backing = new PersistentObsidianBacking();
+    const obsidianVault = persistentObsidianVault(backing);
+    const crashing = new ObsidianWorkbenchVault(obsidianVault, {
+      crashAt: new Set(["after-html"])
+    });
+    await expect(crashing.createPairTransactional(PATHS, contents)).rejects.toMatchObject({
+      code: "workbench_simulated_crash"
+    });
+
+    await expect(new ObsidianWorkbenchVault(obsidianVault).readPair(PATHS)).resolves.toBeNull();
+    expect(backing.read(PATHS.html)).toBeNull();
+  });
+
+  it("preserves a same-byte replacement of a pending history preparation", async () => {
+    const backing = new PersistentObsidianBacking();
+    const obsidianVault = persistentObsidianVault(backing);
+    const pendingPath = `.galley/history/${DOCUMENT_ID}/0001752480550123-323e4567-e89b-42d3-a456-426614174000-00000001.pending`;
+    const crashing = new ObsidianWorkbenchVault(obsidianVault, {
+      crashAt: new Set(["after-history-promote"])
+    });
+    await expect(crashing.createFileExclusive(pendingPath, "pending")).rejects.toMatchObject({
+      code: "workbench_simulated_crash"
+    });
+    backing.replace(pendingPath, "pending");
+
+    const reopened = new ObsidianWorkbenchVault(obsidianVault);
+    await expect(reopened.listFiles(`.galley/history/${DOCUMENT_ID}`)).rejects.toMatchObject({
+      code: "transaction_recovery_conflict"
+    });
+    expect(backing.read(pendingPath)).toBe("pending");
+  });
+
+  it("preserves same-byte pair replacements during restarted owned cleanup", async () => {
+    const contents = await pair("created");
+    const backing = new PersistentObsidianBacking();
+    const obsidianVault = persistentObsidianVault(backing);
+    const crashAt = new Set<ObsidianWorkbenchCrashPoint>();
+    const vault = new ObsidianWorkbenchVault(obsidianVault, { crashAt });
+    const created = await vault.createPairTransactional(PATHS, contents);
+    if (created.status !== "created") throw new Error("expected created pair");
+    crashAt.add("after-intent");
+    await expect(vault.cleanupCreatedMembers(created.ownership)).rejects.toMatchObject({
+      code: "workbench_simulated_crash"
+    });
+    backing.replace(PATHS.html, contents.html);
+    backing.replace(PATHS.sidecar, contents.sidecarJson);
+
+    const reopened = new ObsidianWorkbenchVault(obsidianVault);
+    await expect(reopened.readPair(PATHS)).rejects.toMatchObject({
+      code: "transaction_recovery_conflict"
+    });
+    expect(backing.read(PATHS.html)).toBe(contents.html);
+    expect(backing.read(PATHS.sidecar)).toBe(contents.sidecarJson);
+  });
+
   for (const point of [
     "after-intent",
     "after-applying",
@@ -154,13 +256,25 @@ describe("Obsidian workbench transaction recovery", () => {
       });
 
       const reopened = new ObsidianWorkbenchVault(persistentObsidianVault(backing));
-      const committed = ["after-commit", "after-receipt", "after-completed"].includes(point);
-      if (committed) {
+      const committed = [
+        "after-sidecar",
+        "after-commit",
+        "after-receipt",
+        "after-completed"
+      ].includes(point);
+      if (point === "after-html") {
+        await expect(reopened.readPair(PATHS)).rejects.toMatchObject({
+          code: "transaction_recovery_conflict"
+        });
+        expect(backing.read(PATHS.html)).toBe(contents.html);
+      } else if (committed) {
         await expect(reopened.readPair(PATHS)).resolves.toMatchObject(contents);
       } else {
         await expect(reopened.readPair(PATHS)).resolves.toBeNull();
       }
-      expect(backing.paths().filter((path) => path.endsWith(".lock"))).toEqual([]);
+      if (point !== "after-html") {
+        expect(backing.paths().filter((path) => path.endsWith(".lock"))).toEqual([]);
+      }
     });
   }
 
@@ -182,8 +296,7 @@ describe("Obsidian workbench transaction recovery", () => {
       code: "transaction_recovery_conflict"
     });
     expect(backing.read(PATHS.html)).toBe("external");
-    expect(backing.read(PATHS.sidecar)).toBeNull();
-    expect(backing.paths().filter((path) => path.endsWith(".lock"))).toEqual([]);
+    expect(backing.read(PATHS.sidecar)).toBe(contents.sidecarJson);
   });
 
   it("rolls back a one-sided crashed create without deleting an external replacement", async () => {
@@ -379,16 +492,137 @@ describe("Obsidian workbench transaction recovery", () => {
       const reopened = new ObsidianWorkbenchVault(
         persistentObsidianVault(fixture.backing)
       );
-      const snapshots = await new HistoryRepository(reopened, 1).list(DOCUMENT_ID);
       const committed = ["after-commit", "after-receipt", "after-completed"].includes(point);
+      if (!committed) {
+        await expect(new HistoryRepository(reopened, 1).list(DOCUMENT_ID)).rejects.toMatchObject(
+          { code: "transaction_recovery_conflict" }
+        );
+        expect(fixture.backing.read(fixture.plan.finalPath)).toBe("newer");
+        return;
+      }
+      const snapshots = await new HistoryRepository(reopened, 1).list(DOCUMENT_ID);
       expect(snapshots.map(({ html }) => html)).toEqual([
-        committed ? "newer" : "older"
+        "newer"
       ]);
       expect(
         fixture.backing.paths().some((path) => path.includes(".history-scope.galley"))
       ).toBe(false);
     });
   }
+
+  it("preserves a same-byte replacement of a promoted history final", async () => {
+    const backing = new PersistentObsidianBacking();
+    const obsidianVault = persistentObsidianVault(backing);
+    const crashAt = new Set<ObsidianWorkbenchCrashPoint>();
+    const vault = new ObsidianWorkbenchVault(obsidianVault, { crashAt });
+    const history = new HistoryRepository(vault, 20, {
+      randomUUID: () => "323e4567-e89b-42d3-a456-426614174000"
+    });
+    const prepared = await history.prepare(
+      DOCUMENT_ID,
+      "newer",
+      new Date("2026-07-14T08:09:10.000Z")
+    );
+    const plan = await history.plan(prepared);
+    crashAt.add("after-history-promote");
+    await expect(
+      vault.applyRetentionTransaction(
+        plan.provisional,
+        plan.finalPath,
+        plan.observedFiles,
+        plan.removals
+      )
+    ).rejects.toMatchObject({ code: "workbench_simulated_crash" });
+    backing.replace(plan.finalPath, "newer");
+
+    await expect(
+      new ObsidianWorkbenchVault(obsidianVault).listFiles(
+        `.galley/history/${DOCUMENT_ID}`
+      )
+    ).rejects.toMatchObject({ code: "transaction_recovery_conflict" });
+    expect(backing.read(plan.finalPath)).toBe("newer");
+  });
+
+  it("preserves a same-byte provisional replacement before history deletion", async () => {
+    const backing = new PersistentObsidianBacking();
+    const obsidianVault = persistentObsidianVault(backing);
+    let provisionalPath = "";
+    const vault = new ObsidianWorkbenchVault(obsidianVault, {
+      onCrashPoint(point) {
+        if (point === "after-applying") {
+          backing.replace(provisionalPath, "newer");
+        }
+      }
+    });
+    const history = new HistoryRepository(vault, 20, {
+      randomUUID: () => "323e4567-e89b-42d3-a456-426614174000"
+    });
+    const prepared = await history.prepare(
+      DOCUMENT_ID,
+      "newer",
+      new Date("2026-07-14T08:09:10.000Z")
+    );
+    const plan = await history.plan(prepared);
+    provisionalPath = plan.provisional.path;
+
+    await expect(
+      vault.applyRetentionTransaction(
+        plan.provisional,
+        plan.finalPath,
+        plan.observedFiles,
+        plan.removals
+      )
+    ).rejects.toMatchObject({ code: "workbench_mutation_ambiguous" });
+    expect(backing.read(provisionalPath)).toBe("newer");
+  });
+
+  it("retries the exact completed history plan and acknowledges it idempotently", async () => {
+    const backing = new PersistentObsidianBacking();
+    const obsidianVault = persistentObsidianVault(backing);
+    const crashAt = new Set<ObsidianWorkbenchCrashPoint>();
+    const vault = new ObsidianWorkbenchVault(obsidianVault, { crashAt });
+    const history = new HistoryRepository(vault, 20, {
+      randomUUID: () => "323e4567-e89b-42d3-a456-426614174000"
+    });
+    const prepared = await history.prepare(
+      DOCUMENT_ID,
+      "newer",
+      new Date("2026-07-14T08:09:10.000Z")
+    );
+    const plan = await history.plan(prepared);
+    crashAt.add("after-completed");
+    await expect(
+      vault.applyRetentionTransaction(
+        plan.provisional,
+        plan.finalPath,
+        plan.observedFiles,
+        plan.removals
+      )
+    ).rejects.toMatchObject({ code: "workbench_simulated_crash" });
+    crashAt.clear();
+
+    await expect(
+      vault.applyRetentionTransaction(
+        plan.provisional,
+        plan.finalPath,
+        plan.observedFiles,
+        plan.removals
+      )
+    ).resolves.toMatchObject({ status: "created", file: { path: plan.finalPath } });
+    const differentFinalPath = plan.finalPath.replace(/-[0-9]{8,}\.html$/u, "-99999999.html");
+    await expect(
+      vault.applyRetentionTransaction(
+        plan.provisional,
+        differentFinalPath,
+        plan.observedFiles,
+        plan.removals
+      )
+    ).resolves.toEqual({ status: "lost" });
+    await vault.acknowledgeRetention(plan.provisional);
+    await vault.acknowledgeRetention(plan.provisional);
+    expect(backing.paths().filter((path) => path.endsWith(".lock"))).toEqual([]);
+    expect(backing.read(plan.finalPath)).toBe("newer");
+  });
 
   it("returns unknown and preserves bytes when a combined receipt is replaced", async () => {
     const fixture = await combinedFixture("after-completed");
