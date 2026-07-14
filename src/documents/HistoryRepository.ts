@@ -13,6 +13,13 @@ export type HistoryRetentionResult<Observation> =
   | { status: "ownership-conflict" }
   | { status: "lost" };
 
+export interface HistoryCommitPlan<Observation> {
+  readonly provisional: HistoryFile<Observation>;
+  readonly finalPath: string;
+  readonly observedFiles: readonly HistoryFile<Observation>[];
+  readonly removals: readonly HistoryFile<Observation>[];
+}
+
 export interface HistoryVault<Observation> {
   ensureFolder(path: string, signal?: AbortSignal): Promise<void>;
   listFiles(
@@ -41,6 +48,7 @@ export interface HistoryVault<Observation> {
   ): Promise<HistoryRetentionResult<Observation>>;
   /** Registers cleanup durably before removing a provisional file. */
   rollbackPrepared(file: HistoryFile<Observation>): Promise<boolean>;
+  acknowledgeRetention(provisional: HistoryFile<Observation>): Promise<void>;
 }
 
 export interface HistorySnapshot {
@@ -152,19 +160,12 @@ export class HistoryRepository<Observation> {
     try {
       return await this.#serialize(data.folder, async () => {
         for (let attempt = 0; attempt < MAX_RETENTION_RETRIES; attempt += 1) {
-          throwIfAborted(signal);
-          const finalPath = `${data.folder}/${this.#newSnapshotStem(
-            data.timestampMs
-          )}.html`;
-          const observedFiles = await this.vault.listFiles(data.folder, signal);
-          const files = parsedFiles(data.folder, observedFiles);
-          const removeCount = Math.max(0, files.length + 1 - this.limit);
-          const removals = files.slice(0, removeCount).map(({ file }) => file);
+          const plan = await this.plan(prepared, signal);
           const result = await this.vault.applyRetentionTransaction(
-            data.file,
-            finalPath,
-            observedFiles,
-            removals,
+            plan.provisional,
+            plan.finalPath,
+            plan.observedFiles,
+            plan.removals,
             signal
           );
           if (result.status === "collision" || result.status === "conflict") {
@@ -177,6 +178,7 @@ export class HistoryRepository<Observation> {
 
           data.file = result.file;
           data.state = "committed";
+          await this.#acknowledge(plan.provisional);
           const snapshot = parseSnapshotFile(data.folder, data.file);
           if (!snapshot) {
             throw new Error("Committed Galley history path is invalid.");
@@ -201,6 +203,29 @@ export class HistoryRepository<Observation> {
     if (await this.vault.rollbackPrepared(data.file)) {
       data.state = "rolled-back";
     }
+  }
+
+  async plan(
+    prepared: PreparedHistorySnapshot,
+    signal?: AbortSignal
+  ): Promise<HistoryCommitPlan<Observation>> {
+    const data = this.#preparationData(prepared);
+    if (data.state !== "pending") {
+      throw new Error("Galley history preparation is no longer active.");
+    }
+    throwIfAborted(signal);
+    const finalPath = `${data.folder}/${this.#newSnapshotStem(
+      data.timestampMs
+    )}.html`;
+    const observedFiles = await this.vault.listFiles(data.folder, signal);
+    const files = parsedFiles(data.folder, observedFiles);
+    const removeCount = Math.max(0, files.length + 1 - this.limit);
+    return {
+      provisional: data.file,
+      finalPath,
+      observedFiles,
+      removals: files.slice(0, removeCount).map(({ file }) => file)
+    };
   }
 
   async store(
@@ -264,6 +289,14 @@ export class HistoryRepository<Observation> {
     } finally {
       release();
       if (this.#queues.get(key) === current) this.#queues.delete(key);
+    }
+  }
+
+  async #acknowledge(provisional: HistoryFile<Observation>): Promise<void> {
+    try {
+      await this.vault.acknowledgeRetention(provisional);
+    } catch {
+      // Receipts are compacted against visible history on later adapter entry.
     }
   }
 }

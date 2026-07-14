@@ -29,13 +29,26 @@ describe("DocumentSession", () => {
       const fixture = await makeSessionDeps({
         hooks: { crashStages: new Set<MemoryFaultStage>([stage]) }
       });
-      const session = await DocumentSession.open(fixture.dependencies);
-      session.updateBody("<article><p>durable replacement</p></article>");
-      const targetHtml = session.html();
-
-      await expect(session.save("explicit")).rejects.toMatchObject({
-        name: "MemoryCrashError"
+      const observed = await fixture.vault.readPair(TEST_PATHS);
+      const targetHtml = GalleyDocumentCodec.serialize({
+        ...GalleyDocumentCodec.parse(fixture.html),
+        bodyHtml: "<article><p>durable replacement</p></article>"
       });
+      const targetSidecar = {
+        ...fixture.sidecar,
+        htmlHash: await sha256Text(targetHtml)
+      };
+
+      await expect(
+        fixture.vault.replacePairTransactional(
+          TEST_PATHS,
+          observed?.observation ?? failTest("missing pair observation"),
+          {
+            html: targetHtml,
+            sidecarJson: `${JSON.stringify(targetSidecar, null, 2)}\n`
+          }
+        )
+      ).rejects.toMatchObject({ name: "MemoryCrashError" });
 
       expect(fixture.backing.rawRead(TEST_PATHS.html)).toBe(targetHtml);
       const rawSidecar = GalleySidecarV1Schema.parse(
@@ -69,11 +82,25 @@ describe("DocumentSession", () => {
         crashStages: new Set<MemoryFaultStage>(["replace_after_html"])
       }
     });
-    const session = await DocumentSession.open(fixture.dependencies);
-    session.updateBody("<article><p>crash then recover twice</p></article>");
-    await expect(session.save("explicit")).rejects.toMatchObject({
-      name: "MemoryCrashError"
+    const observed = await fixture.vault.readPair(TEST_PATHS);
+    const targetHtml = GalleyDocumentCodec.serialize({
+      ...GalleyDocumentCodec.parse(fixture.html),
+      bodyHtml: "<article><p>crash then recover twice</p></article>"
     });
+    const targetSidecar = {
+      ...fixture.sidecar,
+      htmlHash: await sha256Text(targetHtml)
+    };
+    await expect(
+      fixture.vault.replacePairTransactional(
+        TEST_PATHS,
+        observed?.observation ?? failTest("missing pair observation"),
+        {
+          html: targetHtml,
+          sidecarJson: `${JSON.stringify(targetSidecar, null, 2)}\n`
+        }
+      )
+    ).rejects.toMatchObject({ name: "MemoryCrashError" });
 
     fixture.vault.destroy();
     const failedRecovery = MemoryWorkbenchVault.reopen(fixture.backing, {
@@ -92,6 +119,155 @@ describe("DocumentSession", () => {
     expect(recovered?.html).toBe(fixture.html);
     expect(fixture.backing.journalCount()).toBe(0);
   });
+
+  it("recovers a true caller-level commit-marker crash with its exact prior history", async () => {
+    const fixture = await makeSessionDeps({
+      hooks: {
+        crashStages: new Set<MemoryFaultStage>([
+          "replace_after_commit_marker"
+        ])
+      }
+    });
+    const prepared = await fixture.history.prepare(
+      fixture.sidecar.documentId,
+      fixture.html,
+      TEST_NOW
+    );
+    const targetHtml = GalleyDocumentCodec.serialize({
+      ...GalleyDocumentCodec.parse(fixture.html),
+      bodyHtml: "<article><p>caller-level committed target</p></article>"
+    });
+    const targetSidecar = GalleySidecarV1Schema.parse({
+      ...fixture.sidecar,
+      htmlHash: await sha256Text(targetHtml)
+    });
+    const observed = await fixture.vault.readPair(TEST_PATHS);
+    expect(observed).not.toBeNull();
+    const historyPlan = await fixture.history.plan(prepared);
+
+    await expect(
+      fixture.vault.replacePairWithHistoryTransactional(
+        TEST_PATHS,
+        observed?.observation ?? failTest("missing pair observation"),
+        {
+          html: targetHtml,
+          sidecarJson: `${JSON.stringify(targetSidecar, null, 2)}\n`
+        },
+        historyPlan
+      )
+    ).rejects.toMatchObject({ name: "MemoryCrashError" });
+    fixture.vault.destroy();
+
+    const reopened = MemoryWorkbenchVault.reopen(fixture.backing);
+    const recoveredPair = await new GalleyDocumentRepository(reopened).readPair(
+      TEST_PATHS
+    );
+    expect(recoveredPair?.html).toBe(targetHtml);
+    expect(
+      (await new HistoryRepository(reopened).list(fixture.sidecar.documentId)).map(
+        ({ html }) => html
+      )
+    ).toEqual([fixture.html]);
+    expect(
+      fixture.backing.rawPaths().some((path) => path.endsWith(".pending"))
+    ).toBe(false);
+    expect(fixture.backing.journalCount()).toBe(0);
+
+    // The caller process ended at the adapter rejection: no session/repository
+    // catch or original-adapter cleanup is allowed to run this preparation.
+    void prepared;
+  });
+
+  it.each(["sidecar", "both"] as const)(
+    "quarantines %s-member ownership loss without blocking unrelated resources",
+    async (replacement) => {
+      const fixture = await makeSessionDeps({
+        hooks: {
+          crashStages: new Set<MemoryFaultStage>(["replace_after_html"])
+        }
+      });
+      const otherDocumentId = TEST_COPY_ID;
+      await fixture.history.store(
+        otherDocumentId,
+        "unrelated history",
+        new Date("2026-07-14T09:00:00.000Z")
+      );
+      fixture.vault.writeExternally("notes/unrelated.md", "unrelated source");
+      fixture.vault.writeExternally("notes/other.galley.html", fixture.html);
+      fixture.vault.writeExternally(
+        "notes/other.galley.json",
+        `${JSON.stringify(
+          { ...fixture.sidecar, documentId: otherDocumentId },
+          null,
+          2
+        )}\n`
+      );
+      const prepared = await fixture.history.prepare(
+        fixture.sidecar.documentId,
+        fixture.html,
+        TEST_NOW
+      );
+      const historyPlan = await fixture.history.plan(prepared);
+      const observed = await fixture.vault.readPair(TEST_PATHS);
+      const targetHtml = GalleyDocumentCodec.serialize({
+        ...GalleyDocumentCodec.parse(fixture.html),
+        bodyHtml: "<article><p>interrupted target</p></article>"
+      });
+      const targetSidecar = {
+        ...fixture.sidecar,
+        htmlHash: await sha256Text(targetHtml)
+      };
+      await expect(
+        fixture.vault.replacePairWithHistoryTransactional(
+          TEST_PATHS,
+          observed?.observation ?? failTest("missing pair observation"),
+          {
+            html: targetHtml,
+            sidecarJson: `${JSON.stringify(targetSidecar, null, 2)}\n`
+          },
+          historyPlan
+        )
+      ).rejects.toMatchObject({ name: "MemoryCrashError" });
+      fixture.vault.writeExternally(
+        TEST_PATHS.sidecar,
+        "external sidecar replacement"
+      );
+      if (replacement === "both") {
+        fixture.vault.writeExternally(
+          TEST_PATHS.html,
+          "external HTML replacement"
+        );
+      }
+      const rawHtml = fixture.backing.rawRead(TEST_PATHS.html);
+      const rawSidecar = fixture.backing.rawRead(TEST_PATHS.sidecar);
+      fixture.vault.destroy();
+
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const reopened = MemoryWorkbenchVault.reopen(fixture.backing);
+        const repository = new GalleyDocumentRepository(reopened);
+        await expect(repository.readText("notes/unrelated.md")).resolves.toBe(
+          "unrelated source"
+        );
+        await expect(
+          repository.readPair({
+            html: "notes/other.galley.html",
+            sidecar: "notes/other.galley.json"
+          })
+        ).resolves.toMatchObject({ html: fixture.html });
+        await expect(
+          new HistoryRepository(reopened).list(otherDocumentId)
+        ).resolves.toHaveLength(1);
+        await expect(repository.readPair(TEST_PATHS)).rejects.toMatchObject({
+          code: "transaction_recovery_conflict"
+        });
+        expect(fixture.backing.journalCount()).toBe(0);
+        expect(fixture.backing.recoveryConflicts.size).toBe(1);
+        expect(fixture.backing.rawRead(TEST_PATHS.html)).toBe(rawHtml);
+        expect(fixture.backing.rawRead(TEST_PATHS.sidecar)).toBe(rawSidecar);
+        reopened.destroy();
+      }
+    }
+  );
 
   it("opens a valid exact-hash pair, trusts the sidecar source path, and exposes body state", async () => {
     const fixture = await makeSessionDeps();
@@ -531,6 +707,35 @@ describe("DocumentSession", () => {
     ).toEqual([fixture.html]);
   });
 
+  it("treats an ordinary commit-marker fault as committed with exact prior history", async () => {
+    const fixture = await makeSessionDeps({
+      hooks: {
+        faultStages: new Set<MemoryFaultStage>([
+          "replace_after_commit_marker"
+        ])
+      }
+    });
+    const session = await DocumentSession.open(fixture.dependencies);
+    session.updateBody("<article><p>durably committed marker fault</p></article>");
+    const targetHtml = session.html();
+
+    await expect(session.save("explicit")).rejects.toThrow(
+      "replace_after_commit_marker"
+    );
+
+    expect(fixture.backing.rawRead(TEST_PATHS.html)).toBe(targetHtml);
+    await expectMatchingPair(fixture.vault, TEST_PATHS);
+    expect(
+      (await fixture.history.list(fixture.sidecar.documentId)).map(({ html }) =>
+        html
+      )
+    ).toEqual([fixture.html]);
+    expect(
+      fixture.backing.rawPaths().some((path) => path.endsWith(".pending"))
+    ).toBe(false);
+    expect(session.state()).toMatchObject({ dirty: true, conflict: true });
+  });
+
   it("reload discards local content only after a valid reread and refreshes source status", async () => {
     const fixture = await makeSessionDeps();
     const session = await DocumentSession.open(fixture.dependencies);
@@ -658,7 +863,10 @@ describe("DocumentSession", () => {
       await expect(session.saveCopy()).rejects.toThrow(/injected/i);
 
       const reopened = MemoryWorkbenchVault.reopen(fixture.backing);
-      await new GalleyDocumentRepository(reopened).readPair(TEST_PATHS);
+      await new GalleyDocumentRepository(reopened).readPair({
+        html: "notes/article-2.galley.html",
+        sidecar: "notes/article-2.galley.json"
+      });
       expect(reopened.read("notes/article-2.galley.html")).toBeNull();
       expect(reopened.read("notes/article-2.galley.json")).toBeNull();
       await expectMatchingPair(reopened, TEST_PATHS);
@@ -960,6 +1168,7 @@ describe("DocumentSession", () => {
           controller.abort();
           return prepared;
         },
+        plan: (prepared, signal) => history.plan(prepared, signal),
         commit: (prepared, signal) => history.commit(prepared, signal),
         rollback: (prepared) => history.rollback(prepared)
       }
@@ -1054,7 +1263,10 @@ describe("DocumentSession", () => {
 
       fixture.vault.destroy();
       const reopened = MemoryWorkbenchVault.reopen(fixture.backing);
-      await new GalleyDocumentRepository(reopened).readPair(TEST_PATHS);
+      await new GalleyDocumentRepository(reopened).readPair({
+        html: "notes/article-2.galley.html",
+        sidecar: "notes/article-2.galley.json"
+      });
       expect(
         fixture.backing
           .rawPaths()
@@ -1083,7 +1295,9 @@ describe("DocumentSession", () => {
 
     fixture.vault.destroy();
     const reopened = MemoryWorkbenchVault.reopen(fixture.backing);
-    await new GalleyDocumentRepository(reopened).readPair(TEST_PATHS);
+    await new GalleyDocumentRepository(reopened).readText(
+      "notes/article-2.galley.html"
+    );
     expect(
       fixture.backing
         .rawPaths()
@@ -1112,7 +1326,9 @@ describe("DocumentSession", () => {
 
     fixture.vault.destroy();
     const reopened = MemoryWorkbenchVault.reopen(fixture.backing);
-    await new GalleyDocumentRepository(reopened).readPair(TEST_PATHS);
+    await new GalleyDocumentRepository(reopened).readText(
+      "notes/article-2.galley.html"
+    );
     expect(reopened.read("notes/article-2.galley.html")).toBe(
       "external replacement HTML"
     );
@@ -1236,6 +1452,10 @@ function deferred<T>() {
     resolve = resolvePromise;
   });
   return { promise, resolve };
+}
+
+function failTest(message: string): never {
+  throw new Error(message);
 }
 
 async function expectMatchingPair(

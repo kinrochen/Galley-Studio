@@ -4,10 +4,12 @@ import {
   type GalleyDocumentVault,
   type VaultCreatePairResult,
   type VaultPairSnapshot,
-  type VaultReplacePairResult
+  type VaultReplacePairResult,
+  type VaultReplacePairWithHistoryResult
 } from "../../src/documents/GalleyDocumentRepository";
 import {
   HistoryRepository,
+  type HistoryCommitPlan,
   type HistoryFile,
   type HistoryRetentionResult,
   type HistoryVault
@@ -42,6 +44,7 @@ interface MemoryPairJournal {
   readonly oldSidecar: MemoryEntry | null;
   readonly newHtml: MemoryEntry;
   readonly newSidecar: MemoryEntry;
+  readonly history?: MemoryHistoryJournal;
   phase: "prepared" | "committed";
 }
 
@@ -59,6 +62,12 @@ interface MemoryHistoryJournal {
 
 interface MemoryPendingCleanupJournal {
   readonly file: HistoryFile<MemoryHistoryObservation>;
+}
+
+interface MemoryRecoveryConflict {
+  readonly paths: ArtifactPaths;
+  readonly historyFolder: string | null;
+  readonly reason: string;
 }
 
 export interface MemoryPairObservation {
@@ -123,6 +132,15 @@ export class MemoryCrashError extends Error {
   }
 }
 
+export class MemoryTransactionRecoveryConflictError extends Error {
+  readonly code = "transaction_recovery_conflict";
+
+  constructor(readonly conflict: MemoryRecoveryConflict) {
+    super(conflict.reason);
+    this.name = "MemoryTransactionRecoveryConflictError";
+  }
+}
+
 export class MemoryWorkbenchBacking {
   readonly files = new Map<string, MemoryEntry>();
   readonly folders = new Set<string>();
@@ -140,6 +158,7 @@ export class MemoryWorkbenchBacking {
     MemoryEntry,
     HistoryFile<MemoryHistoryObservation>
   >();
+  readonly recoveryConflicts = new Map<string, MemoryRecoveryConflict>();
   readonly #queues = new Map<string, Promise<void>>();
 
   constructor(initialFiles: Readonly<Record<string, string>> = {}) {
@@ -184,7 +203,11 @@ export class MemoryWorkbenchBacking {
 
 export class MemoryWorkbenchVault
   implements
-    GalleyDocumentVault<MemoryPairObservation, MemoryPairOwnership>,
+    GalleyDocumentVault<
+      MemoryPairObservation,
+      MemoryPairOwnership,
+      MemoryHistoryObservation
+    >,
     HistoryVault<MemoryHistoryObservation>
 {
   readonly backing: MemoryWorkbenchBacking;
@@ -225,7 +248,7 @@ export class MemoryWorkbenchVault
     signal?: AbortSignal
   ): Promise<VaultPairSnapshot<MemoryPairObservation> | null> {
     throwIfAborted(signal);
-    await this.#recoverAll();
+    await this.#recoverPairScope(paths);
     if (this.hooks.verifyReadOverride !== undefined) {
       const override = this.hooks.verifyReadOverride;
       delete this.hooks.verifyReadOverride;
@@ -246,7 +269,7 @@ export class MemoryWorkbenchVault
 
   async readText(path: string, signal?: AbortSignal): Promise<string | null> {
     throwIfAborted(signal);
-    await this.#recoverAll();
+    await this.#recoverTextScope(path);
     return this.backing.files.get(path)?.contents ?? null;
   }
 
@@ -265,7 +288,7 @@ export class MemoryWorkbenchVault
   ): Promise<VaultReplacePairResult<MemoryPairObservation>> {
     this.replaceCalls += 1;
     throwIfAborted(signal);
-    await this.#recoverAll();
+    await this.#recoverPairScope(paths);
     await this.hooks.beforeReplace?.();
     throwIfAborted(signal);
     const currentHtml = this.backing.files.get(paths.html);
@@ -311,6 +334,84 @@ export class MemoryWorkbenchVault
     return { status: "committed", observation };
   }
 
+  async replacePairWithHistoryTransactional(
+    paths: ArtifactPaths,
+    expected: MemoryPairObservation,
+    next: { html: string; sidecarJson: string },
+    historyPlan: HistoryCommitPlan<MemoryHistoryObservation>,
+    signal?: AbortSignal
+  ): Promise<VaultReplacePairWithHistoryResult<MemoryPairObservation>> {
+    this.replaceCalls += 1;
+    throwIfAborted(signal);
+    await this.#recoverPairScope(paths);
+    await this.hooks.beforeReplace?.();
+    throwIfAborted(signal);
+
+    const folder = folderOf(historyPlan.finalPath);
+    return this.backing.serialize(`history:${folder}`, async () => {
+      const currentHtml = this.backing.files.get(paths.html);
+      const currentSidecar = this.backing.files.get(paths.sidecar);
+      if (currentHtml !== expected.html || currentSidecar !== expected.sidecar) {
+        return { status: "conflict" };
+      }
+      if (!this.#historyPlanStillObserved(historyPlan, folder)) {
+        return { status: "history-conflict" };
+      }
+      if (this.hooks.failReplace) {
+        throw new Error("injected atomic pair replacement failure");
+      }
+
+      const html = makeEntry(next.html);
+      const sidecar = makeEntry(next.sidecarJson);
+      const promotedEntry = makeEntry(historyPlan.provisional.html);
+      const history: MemoryHistoryJournal = {
+        provisional: historyPlan.provisional,
+        promoted: {
+          path: historyPlan.finalPath,
+          html: historyPlan.provisional.html,
+          observation: { entry: promotedEntry }
+        },
+        removals: historyPlan.removals,
+        removedCount: 0,
+        rollback: false
+      };
+      const journal: MemoryPairJournal = {
+        mode: "replace",
+        paths,
+        oldHtml: currentHtml,
+        oldSidecar: currentSidecar,
+        newHtml: html,
+        newSidecar: sidecar,
+        history,
+        phase: "prepared"
+      };
+      this.backing.pairJournals.set(paths.html, journal);
+      try {
+        this.backing.files.set(paths.html, html);
+        this.#operationStage("replace_after_html", signal);
+        this.backing.files.set(paths.sidecar, sidecar);
+        this.#operationStage("replace_after_sidecar", signal);
+        journal.phase = "committed";
+        this.#operationStage("replace_after_commit_marker", signal);
+        this.#operationStage("history_before_promotion", signal);
+        await this.#applyHistoryMutation(history, signal);
+      } catch (error) {
+        if (!(error instanceof MemoryCrashError)) {
+          try {
+            await this.#recoverPairJournal(journal);
+          } catch {
+            // A later scoped adapter entry retries or surfaces quarantine.
+          }
+        }
+        throw error;
+      }
+
+      this.backing.pairJournals.delete(paths.html);
+      await this.hooks.afterReplaceCommitted?.();
+      return { status: "committed", observation: { html, sidecar } };
+    });
+  }
+
   async createPairTransactional(
     paths: ArtifactPaths,
     contents: { html: string; sidecarJson: string },
@@ -320,7 +421,7 @@ export class MemoryWorkbenchVault
   > {
     this.createPairCalls += 1;
     throwIfAborted(signal);
-    await this.#recoverAll();
+    await this.#recoverPairScope(paths);
     await this.hooks.beforeCreatePair?.(paths);
     throwIfAborted(signal);
     if (
@@ -404,7 +505,7 @@ export class MemoryWorkbenchVault
 
   async ensureFolder(path: string, signal?: AbortSignal): Promise<void> {
     throwIfAborted(signal);
-    await this.#recoverAll();
+    await this.#recoverHistoryFolder(path);
     this.backing.folders.add(path);
   }
 
@@ -413,7 +514,7 @@ export class MemoryWorkbenchVault
     signal?: AbortSignal
   ): Promise<readonly HistoryFile<MemoryHistoryObservation>[]> {
     throwIfAborted(signal);
-    await this.#recoverAll();
+    await this.#recoverHistoryFolder(folder);
     const prefix = `${folder}/`;
     return [...this.backing.files]
       .filter(([path]) => path.startsWith(prefix))
@@ -434,7 +535,7 @@ export class MemoryWorkbenchVault
   > {
     this.historyCreateCalls += 1;
     throwIfAborted(signal);
-    await this.#recoverAll();
+    await this.#recoverHistoryFolder(folderOf(path));
     if (this.backing.files.has(path)) return { status: "collision" };
     const entry = makeEntry(html);
     this.backing.files.set(path, entry);
@@ -452,13 +553,13 @@ export class MemoryWorkbenchVault
     signal?: AbortSignal
   ): Promise<HistoryRetentionResult<MemoryHistoryObservation>> {
     throwIfAborted(signal);
-    await this.#recoverAll();
+    const folder = folderOf(finalPath);
+    await this.#recoverHistoryFolder(folder);
     const receipt = this.backing.historyReceipts.get(
       provisional.observation.entry
     );
     if (receipt) return { status: "created", file: receipt };
 
-    const folder = finalPath.slice(0, finalPath.lastIndexOf("/"));
     return this.backing.serialize(`history:${folder}`, async () => {
       const repeated = this.backing.historyReceipts.get(
         provisional.observation.entry
@@ -574,6 +675,12 @@ export class MemoryWorkbenchVault
     return true;
   }
 
+  async acknowledgeRetention(
+    provisional: HistoryFile<MemoryHistoryObservation>
+  ): Promise<void> {
+    this.backing.historyReceipts.delete(provisional.observation.entry);
+  }
+
   writeExternally(path: string, contents: string): void {
     this.backing.files.set(path, makeEntry(contents));
   }
@@ -611,35 +718,140 @@ export class MemoryWorkbenchVault
     return this.hooks.faultStages?.has(stage) === true;
   }
 
+  #historyPlanStillObserved(
+    plan: HistoryCommitPlan<MemoryHistoryObservation>,
+    folder: string
+  ): boolean {
+    if (
+      this.backing.files.get(plan.provisional.path) !==
+        plan.provisional.observation.entry ||
+      this.backing.files.has(plan.finalPath)
+    ) {
+      return false;
+    }
+    const prefix = `${folder}/`;
+    const currentFiles = [...this.backing.files].filter(([path]) =>
+      path.startsWith(prefix)
+    );
+    return (
+      currentFiles.length === plan.observedFiles.length &&
+      plan.observedFiles.every(
+        (file) =>
+          this.backing.files.get(file.path) === file.observation.entry
+      ) &&
+      plan.removals.every(
+        (file) =>
+          this.backing.files.get(file.path) === file.observation.entry
+      )
+    );
+  }
+
+  async #applyHistoryMutation(
+    journal: MemoryHistoryJournal,
+    signal?: AbortSignal
+  ): Promise<void> {
+    const promotedEntry = journal.promoted.observation.entry;
+    this.backing.files.set(journal.promoted.path, promotedEntry);
+    if (
+      this.backing.files.get(journal.provisional.path) ===
+      journal.provisional.observation.entry
+    ) {
+      this.backing.files.delete(journal.provisional.path);
+    }
+    this.#operationStage("history_after_promotion", signal);
+    for (const file of journal.removals) {
+      await this.hooks.beforeHistoryRemove?.(file);
+      throwIfAborted(signal);
+      if (
+        this.hooks.failHistoryRemoveCount !== undefined &&
+        this.hooks.failHistoryRemoveCount > 0
+      ) {
+        this.hooks.failHistoryRemoveCount -= 1;
+        throw new Error("injected history prune failure");
+      }
+      if (this.hooks.failHistoryRemove) {
+        throw new Error("injected history prune failure");
+      }
+      if (this.backing.files.get(file.path) !== file.observation.entry) {
+        throw new Error("History save transaction lost removal ownership.");
+      }
+      this.backing.files.delete(file.path);
+      journal.removedCount += 1;
+      this.#operationStage("history_after_remove", signal);
+    }
+    this.backing.historyReceipts.set(
+      journal.provisional.observation.entry,
+      journal.promoted
+    );
+    this.#compactHistoryReceipts(folderOf(journal.promoted.path));
+  }
+
+  #compactHistoryReceipts(folder: string): void {
+    const prefix = `${folder}/`;
+    for (const [key, file] of this.backing.historyReceipts) {
+      if (
+        file.path.startsWith(prefix) &&
+        this.backing.files.get(file.path) !== file.observation.entry
+      ) {
+        this.backing.historyReceipts.delete(key);
+      }
+    }
+  }
+
   #assertLive(): void {
     if (this.#destroyed) {
       throw new Error("Memory workbench adapter instance was destroyed.");
     }
   }
 
-  async #recoverAll(): Promise<void> {
+  async #recoverPairScope(paths: ArtifactPaths): Promise<void> {
     this.#assertLive();
-    for (const journal of [...this.backing.pairJournals.values()]) {
-      await this.#recoverPairJournal(journal);
+    const conflict = this.backing.recoveryConflicts.get(paths.html);
+    if (conflict) throw new MemoryTransactionRecoveryConflictError(conflict);
+    const journal = this.backing.pairJournals.get(paths.html);
+    if (journal) await this.#recoverPairJournal(journal);
+    const cleanup = this.backing.ownershipCleanupJournals.get(paths.html);
+    if (cleanup) this.#recoverOwnershipCleanup(cleanup);
+    const recoveredConflict = this.backing.recoveryConflicts.get(paths.html);
+    if (recoveredConflict) {
+      throw new MemoryTransactionRecoveryConflictError(recoveredConflict);
     }
-    for (const journal of [
-      ...this.backing.ownershipCleanupJournals.values()
-    ]) {
-      for (const ownership of journal.ownership) {
-        const path = ownership.paths[ownership.member];
-        if (this.backing.files.get(path) === ownership.entry) {
-          this.backing.files.delete(path);
-        }
+  }
+
+  async #recoverTextScope(path: string): Promise<void> {
+    this.#assertLive();
+    const conflict = [...this.backing.recoveryConflicts.values()].find(
+      ({ paths }) => paths.html === path || paths.sidecar === path
+    );
+    if (conflict) throw new MemoryTransactionRecoveryConflictError(conflict);
+    const journal = [...this.backing.pairJournals.values()].find(
+      ({ paths }) => paths.html === path || paths.sidecar === path
+    );
+    if (journal) await this.#recoverPairJournal(journal);
+    const cleanup = [...this.backing.ownershipCleanupJournals.values()].find(
+      ({ ownership }) => {
+        const paths = ownership[0].paths;
+        return paths.html === path || paths.sidecar === path;
       }
-      this.backing.ownershipCleanupJournals.delete(
-        journal.ownership[0].paths.html
-      );
-    }
+    );
+    if (cleanup) this.#recoverOwnershipCleanup(cleanup);
+  }
+
+  async #recoverHistoryFolder(folder: string): Promise<void> {
+    this.#assertLive();
+    const conflict = [...this.backing.recoveryConflicts.values()].find(
+      ({ historyFolder }) => historyFolder === folder
+    );
+    if (conflict) throw new MemoryTransactionRecoveryConflictError(conflict);
+
+    const pairJournals = [...this.backing.pairJournals.values()].filter(
+      ({ history }) =>
+        history !== undefined && folderOf(history.promoted.path) === folder
+    );
+    for (const journal of pairJournals) await this.#recoverPairJournal(journal);
+
     for (const journal of [...this.backing.historyJournals.values()]) {
-      const folder = journal.promoted.path.slice(
-        0,
-        journal.promoted.path.lastIndexOf("/")
-      );
+      if (folderOf(journal.promoted.path) !== folder) continue;
       await this.backing.serialize(`history:${folder}`, async () => {
         if (
           this.backing.historyJournals.get(
@@ -650,9 +862,8 @@ export class MemoryWorkbenchVault
         }
       });
     }
-    for (const journal of [
-      ...this.backing.pendingCleanupJournals.values()
-    ]) {
+    for (const journal of [...this.backing.pendingCleanupJournals.values()]) {
+      if (folderOf(journal.file.path) !== folder) continue;
       this.#operationStage("history_rollback_recovery");
       if (
         this.backing.files.get(journal.file.path) ===
@@ -664,63 +875,138 @@ export class MemoryWorkbenchVault
         journal.file.observation.entry
       );
     }
+    this.#compactHistoryReceipts(folder);
+    const recoveredConflict = [...this.backing.recoveryConflicts.values()].find(
+      ({ historyFolder }) => historyFolder === folder
+    );
+    if (recoveredConflict) {
+      throw new MemoryTransactionRecoveryConflictError(recoveredConflict);
+    }
+  }
+
+  #recoverOwnershipCleanup(journal: MemoryOwnershipCleanupJournal): void {
+    for (const ownership of journal.ownership) {
+      const path = ownership.paths[ownership.member];
+      if (this.backing.files.get(path) === ownership.entry) {
+        this.backing.files.delete(path);
+      }
+    }
+    this.backing.ownershipCleanupJournals.delete(
+      journal.ownership[0].paths.html
+    );
   }
 
   async #recoverPairJournal(journal: MemoryPairJournal): Promise<void> {
+    const reason = this.#pairRecoveryConflictReason(journal);
+    if (reason) {
+      const conflict: MemoryRecoveryConflict = {
+        paths: journal.paths,
+        historyFolder: journal.history
+          ? folderOf(journal.history.promoted.path)
+          : null,
+        reason
+      };
+      this.backing.recoveryConflicts.set(journal.paths.html, conflict);
+      this.backing.pairJournals.delete(journal.paths.html);
+      throw new MemoryTransactionRecoveryConflictError(conflict);
+    }
+
     const rollForward =
       journal.mode === "replace" && journal.phase === "committed";
-    if (rollForward) {
-      this.#recoverPairMember(
-        journal.paths.html,
-        journal.oldHtml,
-        journal.newHtml,
-        journal.newHtml,
-        "replace_rollback_html"
-      );
-      this.#recoverPairMember(
-        journal.paths.sidecar,
-        journal.oldSidecar,
-        journal.newSidecar,
-        journal.newSidecar,
-        "replace_rollback_sidecar"
-      );
-    } else {
-      this.#recoverPairMember(
-        journal.paths.html,
-        journal.oldHtml,
-        journal.newHtml,
-        journal.oldHtml,
-        journal.mode === "replace"
-          ? "replace_rollback_html"
-          : "create_cleanup_html"
-      );
-      this.#recoverPairMember(
-        journal.paths.sidecar,
-        journal.oldSidecar,
-        journal.newSidecar,
-        journal.oldSidecar,
-        journal.mode === "replace"
-          ? "replace_rollback_sidecar"
-          : "create_cleanup_sidecar"
-      );
+    this.#operationStage(
+      journal.mode === "replace"
+        ? "replace_rollback_html"
+        : "create_cleanup_html"
+    );
+    this.#operationStage(
+      journal.mode === "replace"
+        ? "replace_rollback_sidecar"
+        : "create_cleanup_sidecar"
+    );
+
+    this.#setEntry(
+      journal.paths.html,
+      rollForward ? journal.newHtml : journal.oldHtml
+    );
+    this.#setEntry(
+      journal.paths.sidecar,
+      rollForward ? journal.newSidecar : journal.oldSidecar
+    );
+
+    if (journal.history) {
+      if (rollForward) {
+        this.#rollForwardHistoryJournal(journal.history);
+      } else if (
+        this.backing.files.get(journal.history.provisional.path) ===
+        journal.history.provisional.observation.entry
+      ) {
+        this.backing.files.delete(journal.history.provisional.path);
+      }
     }
     this.backing.pairJournals.delete(journal.paths.html);
   }
 
-  #recoverPairMember(
-    path: string,
-    oldEntry: MemoryEntry | null,
-    newEntry: MemoryEntry,
-    desired: MemoryEntry | null,
-    stage: MemoryFaultStage
-  ): void {
-    this.#operationStage(stage);
-    const current = this.backing.files.get(path) ?? null;
-    if (current !== oldEntry && current !== newEntry && current !== desired) {
-      throw new Error("Memory transaction recovery lost member ownership.");
+  #pairRecoveryConflictReason(journal: MemoryPairJournal): string | null {
+    const html = this.backing.files.get(journal.paths.html) ?? null;
+    const sidecar = this.backing.files.get(journal.paths.sidecar) ?? null;
+    if (!isOwnedPairMember(html, journal.oldHtml, journal.newHtml)) {
+      return "Document transaction recovery lost HTML member ownership.";
     }
-    if (desired) this.backing.files.set(path, desired);
+    if (!isOwnedPairMember(sidecar, journal.oldSidecar, journal.newSidecar)) {
+      return "Document transaction recovery lost sidecar member ownership.";
+    }
+    const history = journal.history;
+    if (!history) return null;
+    const provisional = this.backing.files.get(history.provisional.path) ?? null;
+    const promoted = this.backing.files.get(history.promoted.path) ?? null;
+    if (
+      provisional !== null &&
+      provisional !== history.provisional.observation.entry
+    ) {
+      return "Document transaction recovery lost provisional-history ownership.";
+    }
+    if (promoted !== null && promoted !== history.promoted.observation.entry) {
+      return "Document transaction recovery lost promoted-history ownership.";
+    }
+    for (const removal of history.removals) {
+      const current = this.backing.files.get(removal.path) ?? null;
+      const mayAlreadyBeRemoved = journal.phase === "committed";
+      if (
+        current !== removal.observation.entry &&
+        !(mayAlreadyBeRemoved && current === null)
+      ) {
+        return "Document transaction recovery lost retained-history ownership.";
+      }
+    }
+    return null;
+  }
+
+  #setEntry(path: string, entry: MemoryEntry | null): void {
+    if (entry) this.backing.files.set(path, entry);
     else this.backing.files.delete(path);
+  }
+
+  #rollForwardHistoryJournal(journal: MemoryHistoryJournal): void {
+    this.backing.files.set(
+      journal.promoted.path,
+      journal.promoted.observation.entry
+    );
+    if (
+      this.backing.files.get(journal.provisional.path) ===
+      journal.provisional.observation.entry
+    ) {
+      this.backing.files.delete(journal.provisional.path);
+    }
+    for (const file of journal.removals) {
+      if (this.backing.files.get(file.path) === file.observation.entry) {
+        this.backing.files.delete(file.path);
+      }
+    }
+    this.backing.historyReceipts.set(
+      journal.provisional.observation.entry,
+      journal.promoted
+    );
+    this.#compactHistoryReceipts(folderOf(journal.promoted.path));
   }
 
   async #recoverHistoryJournal(journal: MemoryHistoryJournal): Promise<void> {
@@ -797,13 +1083,15 @@ export function memoryHistoryVault(
 export interface SessionFixture {
   dependencies: DocumentSessionDependencies<
     MemoryPairObservation,
-    MemoryPairOwnership
+    MemoryPairOwnership,
+    MemoryHistoryObservation
   >;
   vault: MemoryWorkbenchVault;
   backing: MemoryWorkbenchBacking;
   repository: GalleyDocumentRepository<
     MemoryPairObservation,
-    MemoryPairOwnership
+    MemoryPairOwnership,
+    MemoryHistoryObservation
   >;
   history: HistoryRepository<MemoryHistoryObservation>;
   paths: ArtifactPaths;
@@ -905,6 +1193,19 @@ export async function makeSessionDeps(options: {
 
 function makeEntry(contents: string): MemoryEntry {
   return { identity: Symbol("memory-file"), version: 1, contents };
+}
+
+function folderOf(path: string): string {
+  const separator = path.lastIndexOf("/");
+  return separator < 0 ? "" : path.slice(0, separator);
+}
+
+function isOwnedPairMember(
+  current: MemoryEntry | null,
+  oldEntry: MemoryEntry | null,
+  newEntry: MemoryEntry
+): boolean {
+  return current === oldEntry || current === newEntry;
 }
 
 function throwIfAborted(signal?: AbortSignal): void {

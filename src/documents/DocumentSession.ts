@@ -16,7 +16,10 @@ import {
   type GalleySidecarV1
 } from "./GalleySidecar";
 import { sanitizeAuthoringDocument } from "../security/AuthoringSanitizer";
-import type { PreparedHistorySnapshot } from "./HistoryRepository";
+import type {
+  HistoryCommitPlan,
+  PreparedHistorySnapshot
+} from "./HistoryRepository";
 
 export interface DocumentSessionState {
   dirty: boolean;
@@ -29,7 +32,7 @@ export interface DocumentSessionState {
 
 export type SaveReason = "auto" | "explicit" | "overwrite";
 
-export interface DocumentHistory {
+export interface DocumentHistory<HistoryObservation = unknown> {
   prepare(
     documentId: string,
     html: string,
@@ -41,11 +44,23 @@ export interface DocumentHistory {
     signal?: AbortSignal
   ): Promise<unknown>;
   rollback(prepared: PreparedHistorySnapshot): Promise<void>;
+  plan(
+    prepared: PreparedHistorySnapshot,
+    signal?: AbortSignal
+  ): Promise<HistoryCommitPlan<HistoryObservation>>;
 }
 
-export interface DocumentSessionDependencies<Observation, Ownership> {
-  repository: GalleyDocumentRepository<Observation, Ownership>;
-  history: DocumentHistory;
+export interface DocumentSessionDependencies<
+  Observation,
+  Ownership,
+  HistoryObservation = unknown
+> {
+  repository: GalleyDocumentRepository<
+    Observation,
+    Ownership,
+    HistoryObservation
+  >;
+  history: DocumentHistory<HistoryObservation>;
   htmlPath: string;
   sidecarPath: string;
   now?: () => Date;
@@ -77,9 +92,17 @@ interface LoadedDocument<Observation> {
   sourceChanged: boolean;
 }
 
-export class DocumentSession<Observation, Ownership> {
-  readonly #repository: GalleyDocumentRepository<Observation, Ownership>;
-  readonly #history: DocumentHistory;
+export class DocumentSession<
+  Observation,
+  Ownership,
+  HistoryObservation = unknown
+> {
+  readonly #repository: GalleyDocumentRepository<
+    Observation,
+    Ownership,
+    HistoryObservation
+  >;
+  readonly #history: DocumentHistory<HistoryObservation>;
   readonly #paths: ArtifactPaths;
   readonly #now: () => Date;
   readonly #randomUUID: () => string;
@@ -99,7 +122,11 @@ export class DocumentSession<Observation, Ownership> {
   #lastSavedAt: string | null = null;
 
   private constructor(
-    dependencies: DocumentSessionDependencies<Observation, Ownership>,
+    dependencies: DocumentSessionDependencies<
+      Observation,
+      Ownership,
+      HistoryObservation
+    >,
     loaded: LoadedDocument<Observation>
   ) {
     this.#repository = dependencies.repository;
@@ -121,10 +148,14 @@ export class DocumentSession<Observation, Ownership> {
     this.#sourceChanged = loaded.sourceChanged;
   }
 
-  static async open<Observation, Ownership>(
-    dependencies: DocumentSessionDependencies<Observation, Ownership>,
+  static async open<Observation, Ownership, HistoryObservation = unknown>(
+    dependencies: DocumentSessionDependencies<
+      Observation,
+      Ownership,
+      HistoryObservation
+    >,
     signal?: AbortSignal
-  ): Promise<DocumentSession<Observation, Ownership>> {
+  ): Promise<DocumentSession<Observation, Ownership, HistoryObservation>> {
     const paths = {
       html: dependencies.htmlPath,
       sidecar: dependencies.sidecarPath
@@ -228,12 +259,20 @@ export class DocumentSession<Observation, Ownership> {
       let result;
       try {
         throwIfAborted(signal);
-        result = await this.#repository.replacePair(
-          this.#paths,
-          current.observation,
-          { html: targetHtml, sidecarJson },
-          signal
-        );
+        for (let attempt = 0; attempt < 128; attempt += 1) {
+          const historyPlan = await this.#history.plan(preparedHistory, signal);
+          result = await this.#repository.replacePairWithHistory(
+            this.#paths,
+            current.observation,
+            { html: targetHtml, sidecarJson },
+            historyPlan,
+            signal
+          );
+          if (result.status !== "history-conflict") break;
+        }
+        if (!result || result.status === "history-conflict") {
+          throw new Error("Galley save transaction did not converge.");
+        }
       } catch (error) {
         if (error instanceof DocumentPostCommitError) {
           await this.#finishPostCommitFailure(
@@ -427,8 +466,12 @@ export class DocumentSession<Observation, Ownership> {
   }
 }
 
-async function loadDocument<Observation, Ownership>(
-  repository: GalleyDocumentRepository<Observation, Ownership>,
+async function loadDocument<Observation, Ownership, HistoryObservation>(
+  repository: GalleyDocumentRepository<
+    Observation,
+    Ownership,
+    HistoryObservation
+  >,
   paths: ArtifactPaths,
   signal?: AbortSignal
 ): Promise<LoadedDocument<Observation>> {
@@ -445,8 +488,12 @@ async function loadDocument<Observation, Ownership>(
   return { snapshot, sidecar, document, sourceChanged: changed };
 }
 
-async function sourceChanged<Observation, Ownership>(
-  repository: GalleyDocumentRepository<Observation, Ownership>,
+async function sourceChanged<Observation, Ownership, HistoryObservation>(
+  repository: GalleyDocumentRepository<
+    Observation,
+    Ownership,
+    HistoryObservation
+  >,
   sidecar: GalleySidecarV1,
   signal?: AbortSignal
 ): Promise<boolean> {
@@ -504,10 +551,13 @@ function canonicalDocumentId(documentId: string): string {
 }
 
 function postCommitCause(error: DocumentPostCommitError<unknown>): unknown {
-  return error.operationError instanceof DOMException &&
+  if (
+    error.operationError instanceof DOMException &&
     error.operationError.name === "AbortError"
-    ? error.operationError
-    : error;
+  ) {
+    return error.operationError;
+  }
+  return error.operationError instanceof Error ? error.operationError : error;
 }
 
 function throwIfAborted(signal?: AbortSignal): void {

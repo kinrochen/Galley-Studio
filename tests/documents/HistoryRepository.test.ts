@@ -489,6 +489,23 @@ describe("HistoryRepository", () => {
       false
     );
   });
+
+  it("bounds hidden idempotency metadata during long-running retention", async () => {
+    const vault = memoryHistoryVault();
+    const repository = new HistoryRepository(vault, 20);
+
+    for (let index = 0; index < 60; index += 1) {
+      await repository.store(
+        DOCUMENT_ID,
+        `long-running-${index}`,
+        new Date(1_700_000_000_000 + index)
+      );
+    }
+
+    expect(await repository.list(DOCUMENT_ID)).toHaveLength(20);
+    expect(vault.backing.historyReceipts.size).toBeLessThanOrEqual(20);
+    expect(vault.journalCount()).toBe(0);
+  });
 });
 
 function deferred<T>() {

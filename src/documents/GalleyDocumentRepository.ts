@@ -4,6 +4,7 @@ import {
   sha256Text
 } from "./GalleySidecar";
 import { GalleyDocumentCodec } from "./GalleyDocumentCodec";
+import type { HistoryCommitPlan } from "./HistoryRepository";
 
 export interface ArtifactPaths {
   html: string;
@@ -19,6 +20,11 @@ export interface VaultPairSnapshot<Observation> {
 export type VaultReplacePairResult<Observation> =
   | { status: "committed"; observation: Observation }
   | { status: "conflict" };
+
+export type VaultReplacePairWithHistoryResult<Observation> =
+  | { status: "committed"; observation: Observation }
+  | { status: "conflict" }
+  | { status: "history-conflict" };
 
 export type VaultCreatePairResult<Observation, Ownership> =
   | {
@@ -37,7 +43,11 @@ export type VaultCreatePairResult<Observation, Ownership> =
  * pair. Created-member cleanup must likewise register durable,
  * identity-conditional recovery before it can throw.
  */
-export interface GalleyDocumentVault<Observation, Ownership> {
+export interface GalleyDocumentVault<
+  Observation,
+  Ownership,
+  HistoryObservation = unknown
+> {
   readPair(
     paths: ArtifactPaths,
     signal?: AbortSignal
@@ -50,6 +60,13 @@ export interface GalleyDocumentVault<Observation, Ownership> {
     next: { html: string; sidecarJson: string },
     signal?: AbortSignal
   ): Promise<VaultReplacePairResult<Observation>>;
+  replacePairWithHistoryTransactional(
+    paths: ArtifactPaths,
+    expected: Observation,
+    next: { html: string; sidecarJson: string },
+    history: HistoryCommitPlan<HistoryObservation>,
+    signal?: AbortSignal
+  ): Promise<VaultReplacePairWithHistoryResult<Observation>>;
   createPairTransactional(
     paths: ArtifactPaths,
     contents: { html: string; sidecarJson: string },
@@ -81,6 +98,11 @@ export type ReplacePairResult<Observation> =
   | { status: "committed"; snapshot: DocumentPairSnapshot<Observation> }
   | { status: "conflict" };
 
+export type ReplacePairWithHistoryResult<Observation> =
+  | { status: "committed"; snapshot: DocumentPairSnapshot<Observation> }
+  | { status: "conflict" }
+  | { status: "history-conflict" };
+
 export interface CreatedDocumentPair<Observation> {
   paths: ArtifactPaths;
   snapshot: DocumentPairSnapshot<Observation>;
@@ -109,11 +131,19 @@ export class DocumentPostCommitError<Observation>
   }
 }
 
-export class GalleyDocumentRepository<Observation, Ownership> {
+export class GalleyDocumentRepository<
+  Observation,
+  Ownership,
+  HistoryObservation = unknown
+> {
   readonly #identity = Symbol("GalleyDocumentRepository");
 
   constructor(
-    private readonly vault: GalleyDocumentVault<Observation, Ownership>
+    private readonly vault: GalleyDocumentVault<
+      Observation,
+      Ownership,
+      HistoryObservation
+    >
   ) {}
 
   async readPair(
@@ -240,6 +270,74 @@ export class GalleyDocumentRepository<Observation, Ownership> {
         throw error;
       }
     }
+  }
+
+  async replacePairWithHistory(
+    paths: ArtifactPaths,
+    expected: DocumentObservation<Observation>,
+    next: { html: string; sidecarJson: string },
+    history: HistoryCommitPlan<HistoryObservation>,
+    signal?: AbortSignal
+  ): Promise<ReplacePairWithHistoryResult<Observation>> {
+    validatePairPaths(paths);
+    await validatePairContents(next);
+    const expectedData = this.#observationData(expected);
+    throwIfAborted(signal);
+
+    let result: VaultReplacePairWithHistoryResult<Observation>;
+    try {
+      result = await this.vault.replacePairWithHistoryTransactional(
+        paths,
+        expectedData.vault,
+        next,
+        history,
+        signal
+      );
+    } catch (error) {
+      let recovered: DocumentPairSnapshot<Observation> | null = null;
+      try {
+        recovered = await this.readPair(paths);
+        if (
+          recovered &&
+          recovered.html === next.html &&
+          recovered.sidecarJson === next.sidecarJson
+        ) {
+          await validatePairContents({
+            html: recovered.html,
+            sidecarJson: recovered.sidecarJson
+          });
+          throw new DocumentPostCommitError(recovered, error);
+        }
+        if (
+          recovered &&
+          this.sameObservation(expected, recovered.observation)
+        ) {
+          throw error;
+        }
+      } catch (recoveryError) {
+        if (recoveryError instanceof DocumentPostCommitError) {
+          throw recoveryError;
+        }
+        if (recoveryError === error) throw error;
+        throw new DocumentPostCommitError<Observation>(null, error);
+      }
+      throw new DocumentPostCommitError<Observation>(null, error);
+    }
+
+    if (result.status !== "committed") return result;
+    let snapshot: DocumentPairSnapshot<Observation>;
+    try {
+      snapshot = await this.#verifyCommitted(paths, next, result.observation);
+    } catch (error) {
+      throw new DocumentPostCommitError<Observation>(null, error);
+    }
+    if (signal?.aborted) {
+      throw new DocumentPostCommitError<Observation>(
+        snapshot,
+        new DOMException("Aborted", "AbortError")
+      );
+    }
+    return { status: "committed", snapshot };
   }
 
   async #verifyCommitted(

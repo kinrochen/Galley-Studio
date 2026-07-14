@@ -9,6 +9,8 @@ DONE
   `b9a65aedd6443392213632a5827360f481d8f0af`
 - Independent-review R2 remediation base:
   `f098c7d26662db9cdb3327738fd4bd06337dc5c7`
+- Independent-review R3 remediation base:
+  `79daf6cc35f1b570c11aa5facc2eccdb2407b451`
 - Task commit: the commit containing this report; its exact SHA is recorded in
   the implementation handoff because a Git commit cannot contain its own hash.
 - Progress ledger: not edited
@@ -38,12 +40,13 @@ HTML/sidecar pairs:
   throw or crash between members is replayable. One-sided ABA replacements are
   preserved without retaining Galley's stale counterpart.
 - `HistoryRepository` prepares invisible owned `.pending` snapshots below a
-  sidecar-schema-compatible canonical lowercase UUID folder, promotes only
-  after the document CAS commits, and rolls back its own snapshot on precommit
-  failure. Promotion plus all observed retention removals form one idempotent
-  adapter transaction. Post-mutation failures roll forward from the durable
-  journal to exactly the newest 20 across independent repository/adapter
-  instances; pre-mutation and queued-abort paths durably clean pending files.
+  sidecar-schema-compatible canonical lowercase UUID folder and exposes an
+  opaque, observed retention plan. The document adapter commits the main pair,
+  promotes that exact prior-version preparation, and applies all retention
+  removals through one durable transaction journal. A pre-marker recovery rolls
+  the pair back and removes its preparation; a post-marker recovery rolls the
+  pair and history forward together. Post-mutation failures converge to exactly
+  the newest 20 across independent repository/adapter instances.
 - History ignores malformed and unrelated files. Pruning passes opaque observed
   handles to the adapter; an ABA/replacement causes a typed
   `history_prune_conflict` instead of path-only deletion.
@@ -77,6 +80,22 @@ HTML/sidecar pairs:
   not silently clear dirty state. Ambiguous post-commit verification/abort
   outcomes reconcile when possible and remain explicitly dirty/conflicted,
   including when history finalization also fails.
+- Every catchable adapter throw is reconciled generically at the repository
+  boundary. If replay proves the exact new pair, the session takes its
+  post-commit path and finalizes the associated history; if replay proves the
+  exact old observation, the original precommit error is preserved. Crash
+  conformance tests abandon the upper call stack at the vault boundary rather
+  than relying on test-only production error recognition.
+- Recovery is resource-scoped. Pair replay preflights the complete pair/history
+  ownership set before its first mutation. Identity loss durably removes the
+  active journal into a typed `transaction_recovery_conflict` quarantine for
+  only that pair and history transaction; unrelated pairs, source files, and
+  history folders remain usable across fresh adapters. Repeated reads of the
+  affected pair fail deterministically without changing raw bytes.
+- History idempotency receipts are acknowledged after repository commit and
+  compacted against retained visible files on later adapter entry, so recovery
+  metadata remains bounded with retention rather than growing for the lifetime
+  of the backing.
 - Reload validates a complete replacement before discarding local state and
   refreshes source status. A malformed reload leaves local content and dirty
   state untouched.
@@ -212,12 +231,61 @@ Tests       4 failed | 85 skipped (89)
   failures recover after restart; external replacements remain untouched while
   every still-owned counterpart is removed.
 
+### Independent review R3 remediation RED
+
+The four independent-review reproductions were added permanently before the
+R3 production changes. The ownership case covers both one-member and
+two-member identity loss, so the focused RED contained five failing cases:
+
+```text
+npm test -- tests/documents/DocumentSession.test.ts \
+  tests/documents/HistoryRepository.test.ts \
+  -t "caller-level commit-marker|ordinary commit-marker|ownership loss|hidden idempotency"
+Test Files  2 failed (2)
+Tests       5 failed | 108 skipped (113)
+```
+
+- A true caller-level commit-marker crash rolled the pair forward after reopen
+  but left its exact prior HTML invisible as an unassociated `.pending` file.
+- An ordinary marker fault produced a matching new pair while session cleanup
+  removed its required history and did not mark the state conflicted.
+- One- and two-member recovery ownership loss blocked unrelated source, pair,
+  and history reads, retried forever, and could mutate an earlier member before
+  detecting the conflict.
+- Sixty stores at limit 20 left 60 hidden idempotency receipts.
+
+### Independent review R3 remediation
+
+- `DocumentSession` now obtains a `HistoryCommitPlan` and passes it with the
+  target pair into `replacePairWithHistory`. The adapter persists one journal
+  containing the old/new pair members, provisional/promoted history handles,
+  and complete removal set before the first pair mutation.
+- Prepared-phase replay restores the old pair and removes its owned pending
+  history. Committed-phase replay restores the complete new pair, promotes the
+  exact pending prior HTML, finishes retention, and records an idempotent
+  receipt. A direct vault-boundary process-death test destroys the adapter
+  before any repository/session catch and proves recovery on a fresh adapter.
+- Repository reconciliation distinguishes exact recovered-new and
+  recovered-old outcomes for every ordinary catchable throw. The former is a
+  typed post-commit outcome; the latter preserves the original operation error.
+- Recovery entry points now select journals by affected pair, member path, or
+  history folder instead of sweeping the entire backing. All pair and history
+  ownership is preflighted before replay writes. Ownership loss creates a
+  durable typed quarantine and removes the retrying active journal.
+- The isolation test repeats affected reads across fresh adapters while proving
+  an unrelated text file, another valid pair, and another document's history
+  all remain readable and the affected raw bytes remain unchanged.
+- Successful history commit acknowledges its provisional receipt. Crash-only
+  unacknowledged receipts are compacted when their promoted file leaves the
+  retained set. The long-running retention test now bounds both the 20 visible
+  snapshots and hidden receipt metadata.
+
 ### Final focused GREEN
 
 ```text
 npm test -- tests/documents/HistoryRepository.test.ts tests/documents/DocumentSession.test.ts
 Test Files  2 passed (2)
-Tests       108 passed (108)
+Tests       113 passed (113)
 exit 0
 
 npm run test:typecheck
@@ -237,8 +305,10 @@ exit 0
 - Editing: body-only changes, exact shell preservation, whole-document
   sanitizer behavior, unsafe CSS/event/URL/script removal, shell/foreign-token
   rejection, sanitized no-op, and exact revert.
-- Save: clean no-op, auto/explicit success, exact prior history, matching strict
-  sidecar, HTML/sidecar changes, same-byte ABA, CAS race, overwrite metadata
+- Save: clean no-op, auto/explicit success, exact prior history, combined
+  pair/history recovery after ordinary throws and true caller-level restart,
+  matching strict sidecar, HTML/sidecar changes, same-byte ABA, CAS race,
+  overwrite metadata
   adoption, staged transaction/rollback failures, post-commit verification and
   history failure, concurrent independent sessions, edit/revert during save,
   and abort before, during, and after pair commit.
@@ -270,6 +340,9 @@ exit 0
 | Race after re-observation | adapter CAS rejects; raced pair preserved; local session dirty/conflicted |
 | Crash after replacement HTML/sidecar | raw backing is interrupted with journal; recreated adapter rolls back before exposing a read |
 | Crash after durable replacement marker | recreated adapter rolls forward the complete new pair before exposing a read |
+| Crash after combined save marker | recreated adapter rolls forward the complete new pair and promotes its exact prior HTML |
+| Ordinary throw after combined save marker | repository reconciles the recovered new pair; session remains dirty/conflicted and history is finalized |
+| Pair/history ownership loss before replay | all members are preflighted; affected transaction is typed/quarantined without raw mutation or unrelated-resource denial |
 | Recovery failure | read rejects and journal remains; later clean reopen completes replay |
 | Post-commit verification failure | new HTML and new matching sidecar remain; session dirty |
 | Overwrite after external HTML-only edit | exact latest external HTML stored in history; new matching local pair committed |
@@ -286,6 +359,7 @@ exit 0
 | History rollback/recovery failure | journal survives and a later adapter reopen completes cleanup/replay |
 | History snapshot ABA before prune | replacement preserved; typed prune conflict |
 | Cross-instance history pruning | stale removal re-lists until exactly 20 snapshots remain |
+| Long-running history retention | visible files remain at 20 and acknowledged/compacted receipts remain bounded |
 
 The main-pair interface has no path-based delete or general overwrite method.
 The history interface applies only complete observed-folder retention plans.
@@ -298,7 +372,7 @@ before exposing persistent state.
 ```text
 npm test -- tests/documents/HistoryRepository.test.ts tests/documents/DocumentSession.test.ts
 Test Files  2 passed (2)
-Tests       108 passed (108)
+Tests       113 passed (113)
 exit 0
 
 npm run test:typecheck
@@ -306,7 +380,7 @@ exit 0
 
 npm test
 Test Files  33 passed (33)
-Tests       801 passed (801)
+Tests       806 passed (806)
 exit 0
 
 npm run build
@@ -338,7 +412,9 @@ included in the final implementation handoff, after the commit exists.
 No known Task 3.1 logic defect remains. The future Obsidian composition task must
 implement the proven transaction protocol with durable recovery state, stable
 identity/version observations, exclusive pair creation/promotion, per-member
-identity-conditional cleanup from a whole-operation journal, and the same
-restart/failure-stage adapter-conformance coverage. This task
+identity-conditional cleanup from a whole-operation journal, a single durable
+pair-plus-history save boundary, scoped terminal recovery quarantine, bounded
+receipt acknowledgement/compaction, and the same restart/failure-stage
+adapter-conformance coverage. This task
 deliberately does not add that Obsidian runtime adapter or modify the composition
 root.
