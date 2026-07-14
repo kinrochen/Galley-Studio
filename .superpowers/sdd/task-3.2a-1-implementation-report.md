@@ -2,7 +2,7 @@
 
 ## Status
 
-DONE — independent-review R1 and R2 remediation included
+DONE — independent-review R1, R2, and R3 remediation included
 
 - Required base: `d3c65d5bc9f7f3f2201e3abc8ca99cce29a22d48`
 - Base HEAD verified before edits: exact match
@@ -258,13 +258,13 @@ Final post-report command results are recorded below after the last full gate:
 
 ```text
 npm test -- tests/documents/ObsidianVaultFileStore.test.ts tests/documents/ObsidianTransactionStore.test.ts
-2 files passed; 74 tests passed; exit 0
+2 files passed; 83 tests passed; exit 0
 
 npm run test:typecheck
 exit 0
 
 npm test
-40 files passed; 926 tests passed; exit 0
+40 files passed; 935 tests passed; exit 0
 
 npm run build
 exit 0
@@ -371,8 +371,10 @@ was added while hardening the outer await boundary.
   modification, abort, strict-reopen failure, drift, or verification failure is
   `transaction_write_ambiguous`; the updated manifest is not described as the
   previous phase.
-- Cleanup tracks whether any member was removed; a later abort/error becomes
-  an ambiguous cleanup result rather than a clean precommit abort.
+- Cleanup tracks whether any member was removed; a later conflict, explicit
+  ambiguous result, abort, or thrown error becomes an ambiguous cleanup result
+  rather than a clean pre-mutation conflict/error. Before the first successful
+  removal, conflict and thrown-error semantics remain unchanged.
 
 ### Path and directory hardening
 
@@ -485,6 +487,56 @@ exit 0
 npm test
 Test Files  40 passed (40)
 Tests       926 passed (926)
+exit 0
+
+npm run build
+exit 0
+```
+
+## Independent-review R3 remediation
+
+The independent R3 review at reviewed HEAD
+`00da9247642c903547114bcf99e0de439261fc01` found one remaining cleanup
+classification gap: a successful exact-owned removal followed by a later
+explicit conflict returned the pre-mutation `conflict` status even though the
+transaction record was already partially deleted.
+
+The permanent R3 matrix was written before the production fix. It targets a
+later staged blob, optional receipt, optional quarantine metadata, and the
+manifest, while retaining controls for a first-member conflict, a first-member
+throw, and post-mutation throw/abort/explicit-ambiguity:
+
+```text
+npm test -- tests/documents/ObsidianVaultFileStore.test.ts tests/documents/ObsidianTransactionStore.test.ts
+Test Files  1 failed | 1 passed (2)
+Tests       4 failed | 79 passed (83)
+exit 1
+```
+
+Cleanup now uses one mutation boundary for every removal outcome:
+
+- `mutated` becomes true only after an exact-owned member returns `removed`;
+- before that point, `conflict` remains `conflict` and a thrown error is
+  rethrown unchanged;
+- after that point, a later `conflict`, explicit `ambiguous` result, thrown
+  error, or abort all return `{ status: "ambiguous" }`;
+- peer replacements at later blob, receipt, quarantine, or manifest paths are
+  preserved, and no remaining member is falsely described as wholly untouched.
+
+### R3 regression GREEN
+
+```text
+npm test -- tests/documents/ObsidianVaultFileStore.test.ts tests/documents/ObsidianTransactionStore.test.ts
+Test Files  2 passed (2)
+Tests       83 passed (83)
+exit 0
+
+npm run test:typecheck
+exit 0
+
+npm test
+Test Files  40 passed (40)
+Tests       935 passed (935)
 exit 0
 
 npm run build

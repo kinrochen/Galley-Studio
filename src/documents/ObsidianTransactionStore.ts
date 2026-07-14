@@ -682,7 +682,9 @@ export class ObsidianTransactionStore {
         if (mutated) return { status: "ambiguous" };
         throw error;
       }
-      if (result.status === "conflict") return { status: "conflict" };
+      if (result.status === "conflict") {
+        return mutated ? { status: "ambiguous" } : { status: "conflict" };
+      }
       if (result.status === "ambiguous") return { status: "ambiguous" };
       mutated = true;
     }

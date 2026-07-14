@@ -4,6 +4,7 @@ import { sha256Text } from "../../src/documents/GalleySidecar";
 import { ObsidianVaultFileStore } from "../../src/documents/ObsidianVaultFileStore";
 import {
   ObsidianTransactionStore,
+  type TransactionRecord,
   type TransactionReceiptPlan,
   type TransactionScope
 } from "../../src/documents/ObsidianTransactionStore";
@@ -536,6 +537,168 @@ describe("ObsidianTransactionStore", () => {
     });
   });
 
+  it("reports ambiguous when a later blob conflicts after the first blob was removed", async () => {
+    const backing = new PersistentObsidianBacking();
+    let firstPath = "";
+    let secondPath = "";
+    const files = new ObsidianVaultFileStore(
+      persistentObsidianVault(backing, {
+        afterDelete(path) {
+          if (path === firstPath) backing.replace(secondPath, "peer-blob");
+        }
+      })
+    );
+    const store = makeStoreWithFiles(files, [ID_A]);
+    let record = await store.prepare({ kind: "owned-cleanup", scope: SCOPE, blobs: BLOBS });
+    record = await advanceToCompleted(store, record);
+    firstPath = record.blobs[0]!.path;
+    secondPath = record.blobs[1]!.path;
+
+    await expect(store.cleanup(record)).resolves.toEqual({ status: "ambiguous" });
+    expect(backing.read(firstPath)).toBeNull();
+    expect(backing.read(secondPath)).toBe("peer-blob");
+    expect(backing.read(`.galley/transactions/${ID_A}/manifest.json`)).not.toBeNull();
+  });
+
+  it("reports ambiguous when an optional receipt conflicts after blob removal", async () => {
+    const backing = new PersistentObsidianBacking();
+    const receiptPath = `.galley/transactions/${ID_A}/receipt.json`;
+    let firstPath = "";
+    const files = new ObsidianVaultFileStore(
+      persistentObsidianVault(backing, {
+        afterDelete(path) {
+          if (path === firstPath) backing.replace(receiptPath, "peer-receipt");
+        }
+      })
+    );
+    const store = makeStoreWithFiles(files, [ID_A]);
+    let record = await store.prepare({ kind: "owned-cleanup", scope: SCOPE, blobs: BLOBS });
+    await store.writeReceipt(record, receiptPlan());
+    record = await advanceToCompleted(store, record);
+    firstPath = record.blobs[0]!.path;
+
+    await expect(store.cleanup(record)).resolves.toEqual({ status: "ambiguous" });
+    expect(backing.read(firstPath)).toBeNull();
+    expect(backing.read(receiptPath)).toBe("peer-receipt");
+    expect(backing.read(`.galley/transactions/${ID_A}/manifest.json`)).not.toBeNull();
+  });
+
+  it("reports ambiguous when quarantine conflicts after receipt removal", async () => {
+    const backing = new PersistentObsidianBacking();
+    const receiptPath = `.galley/transactions/${ID_A}/receipt.json`;
+    const quarantinePath = `.galley/transactions/${ID_A}/quarantine.json`;
+    const files = new ObsidianVaultFileStore(
+      persistentObsidianVault(backing, {
+        afterDelete(path) {
+          if (path === receiptPath) backing.replace(quarantinePath, "peer-quarantine");
+        }
+      })
+    );
+    const store = makeStoreWithFiles(files, [ID_A]);
+    let record = await store.prepare({ kind: "owned-cleanup", scope: SCOPE, blobs: BLOBS });
+    const plan = receiptPlan();
+    await store.writeReceipt(record, plan);
+    await expect(
+      store.verifyReceipt(record, {
+        ...plan,
+        pair: { ...plan.pair, htmlHash: "f".repeat(64) }
+      })
+    ).rejects.toMatchObject({ code: "transaction_receipt_invalid" });
+    record = await advanceToCompleted(store, record);
+
+    await expect(store.cleanup(record)).resolves.toEqual({ status: "ambiguous" });
+    expect(backing.read(receiptPath)).toBeNull();
+    expect(backing.read(quarantinePath)).toBe("peer-quarantine");
+    expect(backing.read(`.galley/transactions/${ID_A}/manifest.json`)).not.toBeNull();
+  });
+
+  it("reports ambiguous when the manifest conflicts after a blob was removed", async () => {
+    const backing = new PersistentObsidianBacking();
+    const manifestPath = `.galley/transactions/${ID_A}/manifest.json`;
+    let firstPath = "";
+    let manifestText = "";
+    const files = new ObsidianVaultFileStore(
+      persistentObsidianVault(backing, {
+        afterDelete(path) {
+          if (path === firstPath) backing.replace(manifestPath, manifestText);
+        }
+      })
+    );
+    const store = makeStoreWithFiles(files, [ID_A]);
+    let record = await store.prepare({ kind: "owned-cleanup", scope: SCOPE, blobs: BLOBS });
+    record = await advanceToCompleted(store, record);
+    firstPath = record.blobs[0]!.path;
+    manifestText = backing.read(manifestPath)!;
+
+    await expect(store.cleanup(record)).resolves.toEqual({ status: "ambiguous" });
+    expect(backing.read(firstPath)).toBeNull();
+    expect(backing.read(manifestPath)).toBe(manifestText);
+  });
+
+  it("keeps a conflict classification when no cleanup member was removed", async () => {
+    const backing = new PersistentObsidianBacking();
+    const store = makeStore(backing, [ID_A]);
+    let record = await store.prepare({ kind: "owned-cleanup", scope: SCOPE, blobs: BLOBS });
+    record = await advanceToCompleted(store, record);
+    const pathsBefore = backing.paths();
+    backing.replace(record.blobs[0]!.path, "peer-first");
+
+    await expect(store.cleanup(record)).resolves.toEqual({ status: "conflict" });
+    expect(backing.paths()).toEqual(pathsBefore);
+    expect(backing.read(record.blobs[0]!.path)).toBe("peer-first");
+  });
+
+  it.each(["throw", "abort", "ambiguous"] as const)(
+    "reports ambiguous after one removal when the next removal ends with %s",
+    async (mode) => {
+      const backing = new PersistentObsidianBacking();
+      const files = new ObsidianVaultFileStore(persistentObsidianVault(backing));
+      const store = makeStoreWithFiles(files, [ID_A]);
+      let record = await store.prepare({ kind: "owned-cleanup", scope: SCOPE, blobs: BLOBS });
+      record = await advanceToCompleted(store, record);
+      const remove = files.removeOwned.bind(files);
+      const controller = new AbortController();
+      let calls = 0;
+      files.removeOwned = async (owned, signal) => {
+        calls += 1;
+        if (calls === 2) {
+          if (mode === "throw") throw new Error("injected cleanup failure");
+          if (mode === "ambiguous") {
+            return {
+              status: "ambiguous",
+              operation: "remove",
+              outcome: "unknown",
+              aborted: false
+            };
+          }
+        }
+        const result = await remove(owned, signal);
+        if (calls === 1 && mode === "abort") controller.abort();
+        return result;
+      };
+
+      await expect(store.cleanup(record, controller.signal)).resolves.toEqual({
+        status: "ambiguous"
+      });
+    }
+  );
+
+  it("rethrows a removal error when cleanup has not mutated any member", async () => {
+    const backing = new PersistentObsidianBacking();
+    const files = new ObsidianVaultFileStore(persistentObsidianVault(backing));
+    const store = makeStoreWithFiles(files, [ID_A]);
+    let record = await store.prepare({ kind: "owned-cleanup", scope: SCOPE, blobs: BLOBS });
+    record = await advanceToCompleted(store, record);
+    const injected = new Error("first removal failed");
+    files.removeOwned = async () => {
+      throw injected;
+    };
+
+    await expect(store.cleanup(record)).rejects.toBe(injected);
+    expect(backing.read(record.blobs[0]!.path)).not.toBeNull();
+    expect(backing.read(`.galley/transactions/${ID_A}/manifest.json`)).not.toBeNull();
+  });
+
   it("cleans a completed transaction through only verified store-owned paths", async () => {
     const backing = new PersistentObsidianBacking();
     const store = makeStore(backing, [ID_A]);
@@ -645,6 +808,15 @@ function receiptPlan(): TransactionReceiptPlan {
     },
     historyHashes: ["c".repeat(64), "d".repeat(64)]
   };
+}
+
+async function advanceToCompleted(
+  store: ObsidianTransactionStore,
+  record: TransactionRecord
+): Promise<TransactionRecord> {
+  let current = await store.transition(record, "applying");
+  current = await store.transition(current, "committed");
+  return store.transition(current, "completed");
 }
 
 async function rewriteManifest(
