@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { extractHtmlDocument } from "../../src/generation/HtmlResponseExtractor";
+import {
+  recoveryDependentFragments,
+  wrapBodyFragment
+} from "../fixtures/htmlBoundaryCorpus";
 
 describe("extractHtmlDocument", () => {
   it("extracts one fenced full document without keeping prose", () => {
@@ -27,19 +31,28 @@ describe("extractHtmlDocument", () => {
     expect(extractHtmlDocument(response)).toBe(html);
   });
 
-  it("keeps a nonmatching raw-text end candidate before the real closing tag", () => {
+  it("keeps ordinary script text before its exact closing tag", () => {
     const html =
-      '<!doctype html><html><body><script>const x = "</fake";</script><p>x</p></body></html>';
+      "<!doctype html><html><body><script>alert(1)</script><p>x</p></body></html>";
 
     expect(extractHtmlDocument(html)).toBe(html);
   });
 
-  it("does not tokenize shell-looking text inside a closed raw-text element", () => {
+  it("keeps entity-encoded less-than text outside raw tokenizer substates", () => {
     const html =
-      '<!doctype html><html><body><script>const shell = "</body></html>";</script><p>x</p></body></html>';
+      "<!doctype html><html><body><title>&lt;/body&gt;</title><p>x</p></body></html>";
 
     expect(extractHtmlDocument(html)).toBe(html);
   });
+
+  it.each(recoveryDependentFragments)(
+    "rejects recovery-dependent $label",
+    ({ fragment }) => {
+      expect(() => extractHtmlDocument(wrapBodyFragment(fragment))).toThrow(
+        /complete|single|fence|shell|invalid|malformed/i
+      );
+    }
+  );
 
   it.each([
     ["prose only", "Here is an article, but it is not HTML."],

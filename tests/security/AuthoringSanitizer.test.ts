@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { sanitizeAuthoringDocument } from "../../src/security/AuthoringSanitizer";
+import {
+  recoveryDependentFragments,
+  wrapBodyFragment
+} from "../fixtures/htmlBoundaryCorpus";
 
 describe("sanitizeAuthoringDocument", () => {
   it("removes executable content before rendering", () => {
@@ -179,6 +183,15 @@ describe("sanitizeAuthoringDocument", () => {
     expect(result.html).toContain('content="</head><body>"');
     expect(result.html).toContain('title="</body></html>"');
   });
+
+  it.each(recoveryDependentFragments)(
+    "rejects recovery-dependent $label before DOMPurify",
+    ({ fragment }) => {
+      expect(() =>
+        sanitizeAuthoringDocument(wrapBodyFragment(fragment))
+      ).toThrow(/document|doctype|body|shell|malformed|invalid/i);
+    }
+  );
 
   it.each([
     "<p>fragment</p>",

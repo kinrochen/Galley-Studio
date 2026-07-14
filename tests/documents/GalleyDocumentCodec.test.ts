@@ -3,6 +3,7 @@ import {
   GalleyDocumentCodec,
   type GalleyDocument
 } from "../../src/documents/GalleyDocumentCodec";
+import { recoveryDependentFragments } from "../fixtures/htmlBoundaryCorpus";
 
 describe("GalleyDocumentCodec", () => {
   it("parses and deterministically serializes the independent document shell", () => {
@@ -57,7 +58,7 @@ describe("GalleyDocumentCodec", () => {
     const document: GalleyDocument = {
       doctype: "<!DOCTYPE html>",
       lang: "en",
-      headHtml: "<title>safe </head><body></title>",
+      headHtml: "<title>safe &lt;/head&gt;&lt;body&gt;</title>",
       bodyHtml: "<article>body</article>"
     };
 
@@ -70,6 +71,22 @@ describe("GalleyDocumentCodec", () => {
     );
     expect(roundTrip.bodyHtml).toBe("<article>body</article>");
   });
+
+  it.each(recoveryDependentFragments)(
+    "rejects recovery-dependent $label during fragment serialization",
+    ({ fragment }) => {
+      const document: GalleyDocument = {
+        doctype: "<!DOCTYPE html>",
+        lang: "en",
+        headHtml: "<title>safe</title>",
+        bodyHtml: fragment
+      };
+
+      expect(() => GalleyDocumentCodec.serialize(document)).toThrow(
+        /fragment|shell|context|comment|raw|malformed|invalid|control|namespace|foreign/i
+      );
+    }
+  );
 
   it("rejects head content that migrates into the body on document reparse", () => {
     const document: GalleyDocument = {

@@ -1,3 +1,16 @@
+/**
+ * Galley accepts a deliberately strict lexical subset of HTML before any
+ * browser parser sees Authoring output. This is not an HTML error-recovery
+ * implementation: declarations, tags, attributes, comments, namespaces, and
+ * raw-text content that depend on browser recovery fail closed.
+ *
+ * Accepted markup has one case-insensitive `<!DOCTYPE html>`, well-formed
+ * comments, ASCII tag/attribute names, whitespace-delimited attributes, and
+ * exact end tags. Quoted attribute values remain opaque so ordinary values may
+ * contain `<`/`>`. Foreign namespaces and ambiguous raw/RCDATA `<` constructs
+ * are outside the subset.
+ */
+
 export interface HtmlDocumentRange {
   start: number;
   end: number;
@@ -10,7 +23,19 @@ export interface HtmlShellOptions {
 
 type HtmlToken =
   | {
-      kind: "text" | "comment" | "declaration" | "doctype";
+      kind: "text";
+      start: number;
+      end: number;
+      raw: string;
+    }
+  | {
+      kind: "comment";
+      start: number;
+      end: number;
+      raw: string;
+    }
+  | {
+      kind: "doctype";
       start: number;
       end: number;
       raw: string;
@@ -29,11 +54,13 @@ type HtmlToken =
       end: number;
       raw: string;
       name: string;
-      selfClosing: boolean;
+      selfClosing: false;
     };
 
-const HTML5_DOCTYPE_PATTERN = /^<!doctype\s+html\s*>$/i;
+const HTML5_DOCTYPE_PATTERN = /^<!doctype html>$/i;
+const CANONICAL_DOCTYPE_LENGTH = "<!DOCTYPE html>".length;
 const SHELL_NAMES = new Set(["html", "head", "body"]);
+const FOREIGN_CONTENT_NAMES = new Set(["svg", "math"]);
 const RAW_TEXT_NAMES = new Set([
   "iframe",
   "noembed",
@@ -44,6 +71,8 @@ const RAW_TEXT_NAMES = new Set([
   "textarea",
   "xmp"
 ]);
+const FORBIDDEN_CONTROL_PATTERN =
+  /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/;
 
 export function locateHtmlDocument(
   source: string,
@@ -126,6 +155,10 @@ export function assertShellFreeHtmlFragment(
 }
 
 function scanHtml(source: string): HtmlToken[] {
+  if (FORBIDDEN_CONTROL_PATTERN.test(source)) {
+    throw new Error("HTML contains a forbidden control character");
+  }
+
   const tokens: HtmlToken[] = [];
   let index = 0;
   let textStart = 0;
@@ -144,10 +177,7 @@ function scanHtml(source: string): HtmlToken[] {
 
   while (index < source.length) {
     if (rawTextName) {
-      const closing = findRawTextClosing(source, index, rawTextName);
-      if (!closing) {
-        throw new Error(`unterminated raw-text element <${rawTextName}>`);
-      }
+      const closing = readRawTextClosing(source, index, rawTextName);
       flushText(closing.start);
       tokens.push(closing);
       index = closing.end;
@@ -162,19 +192,21 @@ function scanHtml(source: string): HtmlToken[] {
     }
 
     const token = readMarkupToken(source, index);
-    if (!token) {
-      index += 1;
-      continue;
-    }
-
     flushText(index);
     tokens.push(token);
     index = token.end;
     textStart = index;
+
     if (token.kind === "startTag") {
       if (token.name === "plaintext") {
-        rawTextName = "plaintext";
-      } else if (RAW_TEXT_NAMES.has(token.name)) {
+        throw new Error("the <plaintext> content model is unsupported");
+      }
+      if (RAW_TEXT_NAMES.has(token.name)) {
+        if (token.selfClosing) {
+          throw new Error(
+            `raw-text element <${token.name}> cannot use self-closing syntax`
+          );
+        }
         rawTextName = token.name;
       }
     }
@@ -187,234 +219,273 @@ function scanHtml(source: string): HtmlToken[] {
   return tokens;
 }
 
-function readMarkupToken(
-  source: string,
-  start: number
-): HtmlToken | undefined {
+function readMarkupToken(source: string, start: number): HtmlToken {
   if (source.startsWith("<!--", start)) {
-    const end = findCommentEnd(source, start);
-    return {
-      kind: "comment",
-      start,
-      end,
-      raw: source.slice(start, end)
-    };
+    return readStrictComment(source, start);
   }
 
-  if (source.startsWith("<!", start) || source.startsWith("<?", start)) {
-    return readDeclaration(source, start);
+  if (source.startsWith("<!", start)) {
+    const end = start + CANONICAL_DOCTYPE_LENGTH;
+    const raw = source.slice(start, end);
+    if (!HTML5_DOCTYPE_PATTERN.test(raw)) {
+      throw new Error("only the canonical HTML5 doctype declaration is allowed");
+    }
+    return { kind: "doctype", start, end, raw };
   }
 
-  const tagStart = source[start + 1] === "/" ? start + 2 : start + 1;
-  if (!isTagNameCharacter(source[tagStart])) {
-    return undefined;
+  if (source.startsWith("<?", start)) {
+    throw new Error("processing instructions are unsupported");
   }
-  return readTag(source, start);
+
+  if (source[start + 1] === "/") {
+    return readStrictEndTag(source, start);
+  }
+
+  if (isAsciiLetter(source[start + 1])) {
+    return readStrictStartTag(source, start);
+  }
+
+  throw new Error("ambiguous less-than markup is unsupported");
 }
 
-function findCommentEnd(source: string, start: number): number {
-  const contentStart = start + 4;
-  if (source[contentStart] === ">") {
-    return contentStart + 1;
-  }
-  if (source[contentStart] === "-" && source[contentStart + 1] === ">") {
-    return contentStart + 2;
-  }
-
-  for (let index = contentStart; index < source.length; index += 1) {
-    if (source.startsWith("<!--", index)) {
-      throw new Error("nested HTML comment opener is ambiguous");
-    }
-    if (source.startsWith("-->", index)) {
-      return index + 3;
-    }
-    if (source.startsWith("--!>", index)) {
-      return index + 4;
-    }
-  }
-  throw new Error("unterminated HTML comment");
-}
-
-function readDeclaration(source: string, start: number): HtmlToken {
-  let quote = "";
-  for (let index = start + 2; index < source.length; index += 1) {
-    const character = source[index] ?? "";
-    if (quote) {
-      if (character === quote) {
-        quote = "";
-      }
-      continue;
-    }
-    if (character === '"' || character === "'") {
-      quote = character;
-      continue;
-    }
-    if (character === ">") {
-      const end = index + 1;
-      const raw = source.slice(start, end);
-      return {
-        kind: /^<!doctype(?:\s|>)/i.test(raw) ? "doctype" : "declaration",
-        start,
-        end,
-        raw
-      };
-    }
-  }
-  throw new Error(
-    quote ? "unterminated quote in declaration" : "unterminated declaration"
-  );
-}
-
-function readTag(
+function readStrictComment(
   source: string,
   start: number
-): Extract<HtmlToken, { kind: "startTag" | "endTag" }> {
-  const closing = source[start + 1] === "/";
-  const nameStart = start + (closing ? 2 : 1);
-  let cursor = nameStart;
-  while (cursor < source.length && isTagNameCharacter(source[cursor])) {
-    cursor += 1;
-  }
-  const name = source.slice(nameStart, cursor).toLowerCase();
-  if (!name) {
-    throw new Error("tag is missing a name");
+): Extract<HtmlToken, { kind: "comment" }> {
+  const contentStart = start + 4;
+  const endMarker = source.indexOf("-->", contentStart);
+  if (endMarker < 0) {
+    throw new Error("unterminated or malformed HTML comment");
   }
 
-  type AttributeState =
-    | "beforeName"
-    | "name"
-    | "afterName"
-    | "beforeValue"
-    | "doubleQuotedValue"
-    | "singleQuotedValue"
-    | "unquotedValue"
-    | "afterQuotedValue";
-
-  let state: AttributeState = "beforeName";
-  for (let index = cursor; index < source.length; index += 1) {
-    const character = source[index] ?? "";
-
-    if (state === "doubleQuotedValue") {
-      if (character === '"') {
-        state = "afterQuotedValue";
-      }
-      continue;
-    }
-
-    if (state === "singleQuotedValue") {
-      if (character === "'") {
-        state = "afterQuotedValue";
-      }
-      continue;
-    }
-
-    if (character === ">") {
-      const end = index + 1;
-      const raw = source.slice(start, end);
-      return {
-        kind: closing ? "endTag" : "startTag",
-        start,
-        end,
-        raw,
-        name,
-        selfClosing: /\/\s*>$/.test(raw)
-      };
-    }
-
-    if (state === "unquotedValue") {
-      if (isHtmlWhitespace(character)) {
-        state = "beforeName";
-      }
-      continue;
-    }
-
-    if (state === "beforeValue") {
-      if (isHtmlWhitespace(character)) {
-        continue;
-      }
-      if (character === '"') {
-        state = "doubleQuotedValue";
-      } else if (character === "'") {
-        state = "singleQuotedValue";
-      } else {
-        state = "unquotedValue";
-      }
-      continue;
-    }
-
-    if (state === "name") {
-      if (isHtmlWhitespace(character)) {
-        state = "afterName";
-      } else if (character === "=") {
-        state = "beforeValue";
-      } else if (character === "/") {
-        state = "afterName";
-      }
-      continue;
-    }
-
-    if (state === "afterName") {
-      if (isHtmlWhitespace(character) || character === "/") {
-        continue;
-      }
-      if (character === "=") {
-        state = "beforeValue";
-      } else {
-        state = "name";
-      }
-      continue;
-    }
-
-    if (state === "afterQuotedValue") {
-      if (isHtmlWhitespace(character) || character === "/") {
-        state = "beforeName";
-      } else {
-        state = "name";
-      }
-      continue;
-    }
-
-    if (!isHtmlWhitespace(character) && character !== "/") {
-      state = "name";
-    }
+  const content = source.slice(contentStart, endMarker);
+  if (
+    content.startsWith(">") ||
+    content.startsWith("->") ||
+    content.endsWith("-") ||
+    content.includes("<!--") ||
+    content.includes("--")
+  ) {
+    throw new Error("HTML comment requires browser error recovery");
   }
-  throw new Error(
-    state === "doubleQuotedValue" || state === "singleQuotedValue"
-      ? `unterminated quote in <${name}> tag`
-      : `unterminated <${name}> tag`
-  );
+
+  const end = endMarker + 3;
+  return {
+    kind: "comment",
+    start,
+    end,
+    raw: source.slice(start, end)
+  };
 }
 
-function findRawTextClosing(
+function readStrictStartTag(
+  source: string,
+  start: number
+): Extract<HtmlToken, { kind: "startTag" }> {
+  let cursor = start + 1;
+  const nameStart = cursor;
+  cursor = readTagName(source, cursor);
+  const name = source.slice(nameStart, cursor).toLowerCase();
+  assertHtmlNamespaceName(name);
+
+  const attributes = new Set<string>();
+  while (cursor < source.length) {
+    const character = source[cursor] ?? "";
+    if (character === ">") {
+      return startTagToken(source, start, cursor + 1, name, false);
+    }
+    if (character === "/") {
+      if (source[cursor + 1] !== ">") {
+        throw new Error(`stray slash in <${name}> tag`);
+      }
+      return startTagToken(source, start, cursor + 2, name, true);
+    }
+    if (!isHtmlWhitespace(character)) {
+      throw new Error(`attributes in <${name}> must be whitespace-delimited`);
+    }
+
+    cursor = skipHtmlWhitespace(source, cursor);
+    if (source[cursor] === ">") {
+      return startTagToken(source, start, cursor + 1, name, false);
+    }
+    if (source[cursor] === "/") {
+      if (source[cursor + 1] !== ">") {
+        throw new Error(`stray slash in <${name}> tag`);
+      }
+      return startTagToken(source, start, cursor + 2, name, true);
+    }
+
+    const attributeStart = cursor;
+    cursor = readAttributeName(source, cursor, name);
+    const attributeName = source.slice(attributeStart, cursor).toLowerCase();
+    if (attributeName === "xmlns") {
+      throw new Error("namespace declaration attributes are unsupported");
+    }
+    if (attributes.has(attributeName)) {
+      throw new Error(`duplicate attribute ${attributeName} in <${name}>`);
+    }
+    attributes.add(attributeName);
+    const nameEnd = cursor;
+    const equals = skipHtmlWhitespace(source, cursor);
+    if (source[equals] !== "=") {
+      cursor = nameEnd;
+      continue;
+    }
+
+    cursor = skipHtmlWhitespace(source, equals + 1);
+    const quote = source[cursor];
+    if (quote === '"' || quote === "'") {
+      const valueEnd = source.indexOf(quote, cursor + 1);
+      if (valueEnd < 0) {
+        throw new Error(`unterminated quoted ${attributeName} attribute`);
+      }
+      cursor = valueEnd + 1;
+      continue;
+    }
+
+    const valueStart = cursor;
+    while (
+      cursor < source.length &&
+      !isHtmlWhitespace(source[cursor] ?? "") &&
+      source[cursor] !== ">"
+    ) {
+      if (isForbiddenUnquotedValueCharacter(source[cursor] ?? "")) {
+        throw new Error(
+          `invalid character in unquoted ${attributeName} attribute`
+        );
+      }
+      cursor += 1;
+    }
+    if (cursor === valueStart) {
+      throw new Error(`attribute ${attributeName} is missing a value`);
+    }
+  }
+
+  throw new Error(`unterminated <${name}> tag`);
+}
+
+function readStrictEndTag(
+  source: string,
+  start: number
+): Extract<HtmlToken, { kind: "endTag" }> {
+  let cursor = start + 2;
+  const nameStart = cursor;
+  cursor = readTagName(source, cursor);
+  const name = source.slice(nameStart, cursor).toLowerCase();
+  assertHtmlNamespaceName(name);
+  cursor = skipHtmlWhitespace(source, cursor);
+  if (source[cursor] !== ">") {
+    throw new Error(`end tag </${name}> must not contain attributes or slashes`);
+  }
+
+  const end = cursor + 1;
+  return {
+    kind: "endTag",
+    start,
+    end,
+    raw: source.slice(start, end),
+    name,
+    selfClosing: false
+  };
+}
+
+function readRawTextClosing(
   source: string,
   start: number,
   name: string
-): Extract<HtmlToken, { kind: "endTag" }> | undefined {
-  if (name === "plaintext") {
-    return undefined;
+): Extract<HtmlToken, { kind: "endTag" }> {
+  const candidate = source.indexOf("<", start);
+  if (candidate < 0) {
+    throw new Error(`unterminated raw-text element <${name}>`);
   }
 
-  let cursor = start;
-  while (cursor < source.length) {
-    const candidate = source.indexOf("<", cursor);
-    if (candidate < 0) {
-      return undefined;
-    }
-    if (source[candidate + 1] === "/") {
-      const token = readMarkupToken(source, candidate);
-      if (token?.kind === "endTag" && token.name === name) {
-        if (
-          name === "script" &&
-          source.slice(start, candidate).includes("<!--")
-        ) {
-          throw new Error("ambiguous escaped content in <script> element");
-        }
-        return token;
-      }
-    }
-    cursor = candidate + 1;
+  let token: HtmlToken;
+  try {
+    token = readMarkupToken(source, candidate);
+  } catch {
+    throw new Error(`ambiguous less-than content in <${name}> element`);
   }
-  return undefined;
+  if (token.kind !== "endTag" || token.name !== name) {
+    throw new Error(`ambiguous less-than content in <${name}> element`);
+  }
+  return token;
+}
+
+function startTagToken(
+  source: string,
+  start: number,
+  end: number,
+  name: string,
+  selfClosing: boolean
+): Extract<HtmlToken, { kind: "startTag" }> {
+  return {
+    kind: "startTag",
+    start,
+    end,
+    raw: source.slice(start, end),
+    name,
+    selfClosing
+  };
+}
+
+function readTagName(source: string, start: number): number {
+  if (!isAsciiLetter(source[start])) {
+    throw new Error("tag name must start with an ASCII letter");
+  }
+  let cursor = start + 1;
+  while (isTagNameCharacter(source[cursor])) {
+    cursor += 1;
+  }
+  return cursor;
+}
+
+function readAttributeName(
+  source: string,
+  start: number,
+  tagName: string
+): number {
+  if (!isAsciiLetter(source[start])) {
+    throw new Error(`attribute name in <${tagName}> must start with a letter`);
+  }
+  let cursor = start + 1;
+  while (isAttributeNameCharacter(source[cursor])) {
+    cursor += 1;
+  }
+  return cursor;
+}
+
+function assertHtmlNamespaceName(name: string): void {
+  if (FOREIGN_CONTENT_NAMES.has(name)) {
+    throw new Error(`foreign-content element <${name}> is unsupported`);
+  }
+}
+
+function skipHtmlWhitespace(source: string, start: number): number {
+  let cursor = start;
+  while (isHtmlWhitespace(source[cursor] ?? "")) {
+    cursor += 1;
+  }
+  return cursor;
+}
+
+function isAsciiLetter(character: string | undefined): boolean {
+  return Boolean(character && /[a-z]/i.test(character));
+}
+
+function isTagNameCharacter(character: string | undefined): boolean {
+  return Boolean(character && /[a-z0-9-]/i.test(character));
+}
+
+function isAttributeNameCharacter(character: string | undefined): boolean {
+  return Boolean(character && /[a-z0-9._-]/i.test(character));
+}
+
+function isHtmlWhitespace(character: string): boolean {
+  return /[\t\n\r ]/.test(character);
+}
+
+function isForbiddenUnquotedValueCharacter(character: string): boolean {
+  return character === '"' || character === "'" || /[`=<]/.test(character);
 }
 
 function validateCandidate(
@@ -482,7 +553,6 @@ function validateCandidate(
 
     if (state === "inHead") {
       if (isEndTag(token, "head")) {
-        assertPlainShellEndTag(token, "head");
         state = "afterHead";
       } else if (isDocumentControlToken(token)) {
         throw documentError("a shell tag is nested or repeated inside head");
@@ -492,7 +562,6 @@ function validateCandidate(
 
     if (state === "inBody") {
       if (isEndTag(token, "body")) {
-        assertPlainShellEndTag(token, "body");
         state = "afterBody";
       } else if (isDocumentControlToken(token)) {
         throw documentError("a shell tag is nested or repeated inside body");
@@ -505,7 +574,6 @@ function validateCandidate(
         continue;
       }
       if (isEndTag(token, "html")) {
-        assertPlainShellEndTag(token, "html");
         state = "afterHtml";
         continue;
       }
@@ -545,7 +613,6 @@ function validateOutside(
 function isBoundaryTrivia(token: HtmlToken): boolean {
   return (
     token.kind === "comment" ||
-    token.kind === "declaration" ||
     (token.kind === "text" && !token.raw.trim())
   );
 }
@@ -578,23 +645,6 @@ function assertNonSelfClosingShellTag(
   if (token.selfClosing) {
     throw documentError(`shell start tag <${token.name}> cannot self-close`);
   }
-}
-
-function assertPlainShellEndTag(
-  token: Extract<HtmlToken, { kind: "endTag" }>,
-  name: "html" | "head" | "body"
-): void {
-  if (!new RegExp(`^<\\/${name}\\s*>$`, "i").test(token.raw)) {
-    throw documentError(`shell end tag </${name}> is malformed`);
-  }
-}
-
-function isTagNameCharacter(character: string | undefined): boolean {
-  return Boolean(character && !/[\t\n\f\r />]/.test(character));
-}
-
-function isHtmlWhitespace(character: string): boolean {
-  return /[\t\n\f\r ]/.test(character);
 }
 
 function documentError(message: string): Error {
