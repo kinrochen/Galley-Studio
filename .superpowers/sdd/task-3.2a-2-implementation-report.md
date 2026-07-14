@@ -2,7 +2,7 @@
 
 ## Status
 
-DONE — R1 remediation included
+DONE — R1 and R2 remediation included
 
 - Required base: `2ae5c19cc9571d8985618b7c920713ce1388f89f`
 - Base HEAD and clean worktree verified before the formal RED
@@ -28,10 +28,12 @@ The adapter now provides:
 - canonical pair/history scope serialization, durable scope locks, and restart routing indexes;
 - precommit rollback, postcommit roll-forward, exact target-drift quarantine, and idempotent re-entry;
 - exact reconciliation to `committed`, `precommit`, `conflict`, or `unknown`;
-- plugin-style integration through real `GalleyDocumentRepository`, `HistoryRepository`, and `DocumentSession` instances.
+- plugin-style integration through real `GalleyDocumentRepository`, `HistoryRepository`, and `DocumentSession` instances;
 - identity-proven deletion ownership that never treats matching path, bytes, hash,
   or length as authority to delete a newly-created replacement;
-- retryable history-only committed receipts through explicit acknowledgement.
+- retryable history-only committed receipts through explicit acknowledgement;
+- fresh-runtime compaction of exact orphan combined receipts without losing or
+  duplicating pair/history state.
 
 ## TDD evidence
 
@@ -71,23 +73,41 @@ of new-identity replacements in pair-create, pending-history, owned-cleanup,
 promoted-final, and live-provisional paths, and that an exact history-only
 retry after `after-completed` incorrectly returned `lost`.
 
+### R2 formal RED
+
+The R2 blocker and cleanup crash matrix were added before production changes
+and run against R1 HEAD `5ed471adb56b8ded043b856918786ac895c2d834`:
+
+```text
+npm test -- tests/documents/ObsidianWorkbenchVault.test.ts tests/documents/ObsidianTransactionRecovery.test.ts
+
+Test Files  1 failed | 1 passed (2)
+Tests       4 failed | 57 passed (61)
+exit 1
+```
+
+The fresh-runtime test reproduced `Galley history retention did not converge.`
+after all 128 lock retries. The other three tests proved that no orphan
+compaction, and therefore no crashable `WAL -> locks -> indexes` cleanup, was
+being attempted.
+
 ### Final GREEN
 
 ```text
 npm test -- tests/documents/ObsidianWorkbenchVault.test.ts tests/documents/ObsidianTransactionRecovery.test.ts
 Test Files  2 passed (2)
-Tests       57 passed (57)
+Tests       63 passed (63)
 
 npm test -- tests/documents/ObsidianVaultFileStore.test.ts tests/documents/ObsidianTransactionStore.test.ts tests/documents/ObsidianWorkbenchVault.test.ts tests/documents/ObsidianTransactionRecovery.test.ts
 Test Files  4 passed (4)
-Tests       152 passed (152)
+Tests       158 passed (158)
 
 npm run test:typecheck
 exit 0
 
 npm test
 Test Files  42 passed (42)
-Tests       1004 passed (1004)
+Tests       1010 passed (1010)
 
 npm run build
 exit 0
@@ -124,6 +144,14 @@ target may be removed only when the current observation has the same `TFile`
 identity and exact path/text/hash/length as the registered original. Matching
 path, bytes, hash, length, or stat without identity never grants deletion
 ownership.
+
+A second backing-keyed ephemeral registry binds a combined transaction ID to
+the exact provisional identity whose live `HistoryRepository` continuation can
+still consume the receipt. Combined transactions register it at the committed
+boundary, before postcommit crash hooks. Recreated adapters over the same Vault
+therefore retain the WAL for the original handle; a fresh Vault/runtime has no
+entry and may compact only after durable proof succeeds. Acknowledgement
+forgets both continuation and deletion provenance.
 
 Pair paths must be distinct same-stem `.galley.html`/`.galley.json` paths.
 History paths are re-derived under
@@ -214,6 +242,15 @@ whose roles bind provisional, final, observed, and removal paths with hashes
 and lengths. Consequently a content-hash multiset with changed roles or paths
 does not verify.
 
+Fresh-runtime orphan combined recovery is deliberately stricter than ordinary
+roll-forward. Before deleting proof it requires a valid committed/completed
+manifest, the exact after-pair bytes, exact promoted final, exact retained
+observations, absent provisional/removals, and a matching combined receipt. A
+committed record may first write its exact receipt and transition to completed
+only after that full forward state is already proved. Missing/tampered proof or
+external drift remains locked and becomes a scoped recovery conflict/target
+quarantine; it is never compacted.
+
 ## Concurrency and cleanup
 
 Each adapter serializes by canonical pair and history keys, but in-memory
@@ -229,14 +266,21 @@ CAS remain authoritative across adapter recreation. The active marker is
 abandoned on simulated crash/throw so a recreated adapter can recover.
 
 Normal pair success cleans WAL while still holding its durable lock.
-History-only and combined success retain WAL, receipt, exact locks, and scope
-indexes until `HistoryRepository` calls `acknowledgeRetention`;
+History-only and live-continuation combined success retain WAL, receipt, exact
+locks, and scope indexes until `HistoryRepository` calls `acknowledgeRetention`;
 acknowledgement then cleans WAL, releases exact locks, removes exact scope
 indexes, and forgets deletion provenance. The retention ID is bound when the
 transaction becomes committed. An exact same-plan retry verifies the durable
 receipt and final state and returns the idempotent `created` result; a changed
-retry plan returns `lost`. Generic postcommit recovery across a true restart
-may finalize only when it requires no deletion.
+retry plan returns `lost`.
+
+When the continuation registry is absent after a true restart, exact orphan
+combined proof is compacted in the crash-replayable order `WAL -> pair/history
+locks -> pair/history scope indexes`. The consumed pending-preparation WAL is
+removed only when its signed path/hash/length exactly match the combined plan
+whose forward state and receipt were just verified. Empty transaction
+tombstones use their signed scope index to finish all matching locks/indexes;
+non-empty partial proof stays fail-closed.
 
 ## Crash points and tested outcomes
 
@@ -250,7 +294,10 @@ Deterministic crash hooks cover:
 - after each history removal;
 - after commit marker;
 - after receipt;
-- after completed marker.
+- after completed marker;
+- after recovery WAL cleanup;
+- after recovery lock cleanup;
+- after recovery index cleanup.
 
 Permanent tests cover pair replacement and creation at every applicable point,
 one-sided creation, partial owned cleanup, history-only retention, combined
@@ -272,6 +319,14 @@ replacement is preserved and quarantined. The negative control recreates the
 adapter over the same Vault and confirms that the exact originally registered
 identity is still cleanable. Exact after-completed history retry, changed-plan
 retry, and repeated acknowledgement are also covered.
+
+The R2 matrix completes a combined save without acknowledging its receipt,
+discards the Vault/adapter/repository, and stores again through a fresh runtime.
+It proves exact retention 20, one unchanged combined snapshot, the exact new
+pair, no duplicate/lost finals, and complete WAL/lock/index compaction. Each of
+the three cleanup boundaries crashes and converges on another fresh adapter.
+Fresh receipt tamper and external pair drift are negative controls that retain
+proof/locks and return a scoped recovery conflict instead of cleaning.
 
 ## Reconciliation and quarantine outcomes
 
@@ -326,6 +381,10 @@ does not block an unrelated pair or history document.
   length, and stat match. Recovery does not guess ownership. A postcommit path
   that requires no deletion can still be verified and completed from durable
   WAL/receipt/scope evidence.
+- The retention-continuation registry is likewise process-local and keyed by
+  the live Vault object. That limitation is intentional: losing it changes a
+  completed combined record from “retain for this handle” to “compact only
+  after exact durable forward-state and receipt proof.”
 - Obsidian's `Vault.create` does not expose a typed collision result. The file
   layer pre-observes and re-verifies the returned identity/bytes; an uncertain
   post-call result remains ambiguous rather than being guessed successful.

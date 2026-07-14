@@ -64,7 +64,10 @@ export type ObsidianWorkbenchCrashPoint =
   | "after-history-removal"
   | "after-commit"
   | "after-receipt"
-  | "after-completed";
+  | "after-completed"
+  | "after-recovery-wal-cleanup"
+  | "after-recovery-lock-cleanup"
+  | "after-recovery-index-cleanup";
 
 export interface ObsidianWorkbenchCrashContext {
   readonly transactionId: string;
@@ -183,6 +186,10 @@ const DELETION_OWNERSHIP = new WeakMap<
   object,
   Map<string, Map<string, VaultFileObservation>>
 >();
+const RETENTION_CONTINUATIONS = new WeakMap<
+  object,
+  Map<string, VaultFileObservation>
+>();
 
 interface ScopeIndexData {
   readonly schemaVersion: 1;
@@ -208,6 +215,7 @@ export class ObsidianWorkbenchVault
   readonly #historyHandles = new WeakMap<ObsidianHistoryObservation, HistoryObservationData>();
   readonly #queues = new Map<string, Promise<void>>();
   readonly #deletionOwnership: Map<string, Map<string, VaultFileObservation>>;
+  readonly #retentionContinuations: Map<string, VaultFileObservation>;
 
   constructor(vault: Vault, options: ObsidianWorkbenchVaultOptions = {}) {
     this.#files = new ObsidianVaultFileStore(vault);
@@ -217,6 +225,12 @@ export class ObsidianWorkbenchVault
       DELETION_OWNERSHIP.set(this.#files.backingIdentity, ownership);
     }
     this.#deletionOwnership = ownership;
+    let continuations = RETENTION_CONTINUATIONS.get(this.#files.backingIdentity);
+    if (!continuations) {
+      continuations = new Map();
+      RETENTION_CONTINUATIONS.set(this.#files.backingIdentity, continuations);
+    }
+    this.#retentionContinuations = continuations;
     this.#options = options;
     this.#transactions = new ObsidianTransactionStore(this.#files, {
       ...(options.randomUUID ? { randomUUID: options.randomUUID } : {}),
@@ -803,6 +817,7 @@ export class ObsidianWorkbenchVault
               await this.#releaseLocks(record, lockKinds(metadata.operation));
               await this.#removeScopeIndexes(record);
               this.#forgetDeletionOwnership(record.id);
+              this.#forgetRetentionContinuation(record.id);
             }
           } catch {
             // Recovery retains exact durable proof for a later scoped entry.
@@ -883,6 +898,9 @@ export class ObsidianWorkbenchVault
           await this.#crashPoint("after-sidecar", current);
           await this.#applyHistoryForward(plan, current, signal);
           current = await this.#transactions.transition(current, "committed", signal);
+          const continuation = this.#trustedHistory(history.provisional);
+          continuation.retentionId = current.id;
+          this.#rememberRetentionContinuation(current.id, continuation.file);
           await this.#crashPoint("after-commit", current);
           await this.#transactions.writeReceipt(
             current,
@@ -892,7 +910,6 @@ export class ObsidianWorkbenchVault
           await this.#crashPoint("after-receipt", current);
           current = await this.#transactions.transition(current, "completed", signal);
           await this.#crashPoint("after-completed", current);
-          this.#trustedHistory(history.provisional).retentionId = current.id;
           this.#abandonActive(current.id);
           return {
             status: "committed",
@@ -945,7 +962,9 @@ export class ObsidianWorkbenchVault
           pair.sidecar.text === next.sidecarJson &&
           (await this.#historyIsForward(plan))
         ) {
-          this.#trustedHistory(history.provisional).retentionId = record.id;
+          const continuation = this.#trustedHistory(history.provisional);
+          continuation.retentionId = record.id;
+          this.#rememberRetentionContinuation(record.id, continuation.file);
           return {
             status: "committed",
             observation: this.#pairObservation(checked, pair.html, pair.sidecar)
@@ -1073,12 +1092,20 @@ export class ObsidianWorkbenchVault
     record: TransactionRecord,
     signal?: AbortSignal
   ): Promise<void> {
-    for (const folder of (await scopeIndexFolders(record.scope)).reverse()) {
-      const path = `${folder}/${record.id}.json`;
+    await this.#removeScopeIndexesFor(record.scope, record.id, signal);
+  }
+
+  async #removeScopeIndexesFor(
+    scope: TransactionScope,
+    transactionId: string,
+    signal?: AbortSignal
+  ): Promise<void> {
+    for (const folder of (await scopeIndexFolders(scope)).reverse()) {
+      const path = `${folder}/${transactionId}.json`;
       const current = await this.#files.readTextStable(path, signal);
       if (!current) continue;
-      await parseScopeIndex(current.text, record.id, record.scope);
-      await this.#removeExact(current, record.id, signal);
+      await parseScopeIndex(current.text, transactionId, scope);
+      await this.#removeExact(current, transactionId, signal);
     }
   }
 
@@ -1114,7 +1141,7 @@ export class ObsidianWorkbenchVault
       }
       if (await this.#transactionFolderEmpty(id, signal)) {
         await this.#releaseScopeLocks(index.scope, id, signal);
-        await this.#removeExact(currentIndex, id, signal);
+        await this.#removeScopeIndexesFor(index.scope, id, signal);
         continue;
       }
       try {
@@ -1124,7 +1151,7 @@ export class ObsidianWorkbenchVault
           const remaining = await this.#files.readTextStable(entry.path, signal);
           if (remaining && sameExact(remaining, owned)) {
             await this.#releaseScopeLocks(index.scope, id, signal);
-            await this.#removeExact(remaining, id, signal);
+            await this.#removeScopeIndexesFor(index.scope, id, signal);
           } else if (remaining) {
             throw new ObsidianWorkbenchRecoveryConflictError(id);
           }
@@ -1215,7 +1242,13 @@ export class ObsidianWorkbenchVault
     try {
       record = await this.#transactions.open(record.id, signal);
     } catch {
-      if (await this.#transactionFolderEmpty(record.id, signal)) return;
+      const cleaning = ACTIVE_TRANSACTIONS.get(record.id);
+      if (cleaning) await cleaning;
+      if (await this.#transactionFolderEmpty(record.id, signal)) {
+        await this.#releaseScopeLocks(record.scope, record.id, signal);
+        await this.#removeScopeIndexes(record, signal);
+        return;
+      }
       throw new ObsidianWorkbenchRecoveryConflictError(record.id);
     }
     try {
@@ -1267,6 +1300,50 @@ export class ObsidianWorkbenchVault
       throw new ObsidianWorkbenchRecoveryConflictError(record.id);
     }
 
+    if (
+      rollForward &&
+      record.kind === "pair-history" &&
+      !this.#hasRetentionContinuation(record.id)
+    ) {
+      if (metadata.operation !== "pair-history" || !history) {
+        throw new ObsidianWorkbenchRecoveryConflictError(record.id);
+      }
+      const forwardDrift = await this.#orphanCombinedForwardDrift(
+        pairPlan,
+        history,
+        signal
+      );
+      if (forwardDrift) {
+        await this.#transactions.quarantineTargetDrift(record, forwardDrift, signal);
+        throw new ObsidianWorkbenchRecoveryConflictError(record.id);
+      }
+      const receiptPlan = await this.#receiptPlan(
+        record.scope.pair,
+        { html: pairPlan.afterHtml, sidecarJson: pairPlan.afterSidecar },
+        history
+      );
+      try {
+        if (record.phase === "committed") {
+          await this.#transactions.writeReceipt(record, receiptPlan, signal);
+          record = await this.#transactions.transition(record, "completed", signal);
+        }
+        await this.#transactions.verifyReceipt(record, receiptPlan, signal);
+      } catch (error) {
+        if (
+          error instanceof TransactionReceiptInvalidError ||
+          error instanceof TransactionRecordInvalidError ||
+          error instanceof TransactionRecordUnstableError ||
+          error instanceof TransactionWriteConflictError
+        ) {
+          throw new ObsidianWorkbenchRecoveryConflictError(record.id);
+        }
+        throw error;
+      }
+      await this.#compactConsumedPending(history, signal);
+      await this.#compactOrphanCombined(record, signal);
+      return;
+    }
+
     if (rollForward) {
       if (metadata.operation !== "history-retention") {
         await this.#recoverPairState(pairPlan, true, record, signal);
@@ -1292,7 +1369,8 @@ export class ObsidianWorkbenchVault
         }
       }
       if (
-        record.kind === "pair-history" ||
+        (record.kind === "pair-history" &&
+          this.#hasRetentionContinuation(record.id)) ||
         (record.kind === "history-retention" && this.#hasDeletionOwnership(record.id))
       ) {
         return;
@@ -1382,6 +1460,169 @@ export class ObsidianWorkbenchVault
     }
     void rollForward;
     return bad.length > 0 ? bad : null;
+  }
+
+  async #orphanCombinedForwardDrift(
+    pair: ReturnType<typeof pairPlanFromRecord>,
+    history: HistoryPlanData,
+    signal?: AbortSignal
+  ): Promise<readonly {
+    path: string;
+    state: "absent" | "present" | "unreadable";
+    sha256?: string;
+    byteLength?: number;
+  }[] | null> {
+    const required = new Map<
+      string,
+      { text: string; sha256: string; byteLength: number }
+    >([
+      [
+        pair.paths.html,
+        {
+          text: pair.afterHtml,
+          sha256: await sha256Text(pair.afterHtml),
+          byteLength: byteLength(pair.afterHtml)
+        }
+      ],
+      [
+        pair.paths.sidecar,
+        {
+          text: pair.afterSidecar,
+          sha256: await sha256Text(pair.afterSidecar),
+          byteLength: byteLength(pair.afterSidecar)
+        }
+      ],
+      [
+        history.finalPath,
+        {
+          text: history.provisional.text,
+          sha256: history.provisional.sha256,
+          byteLength: history.provisional.byteLength
+        }
+      ]
+    ]);
+    const removed = new Set(history.removals.map(({ path }) => path));
+    for (const item of history.observed) {
+      if (item.path === history.provisional.path || removed.has(item.path)) continue;
+      required.set(item.path, {
+        text: item.text,
+        sha256: item.sha256,
+        byteLength: item.byteLength
+      });
+    }
+    const absent = new Set([
+      history.provisional.path,
+      ...history.removals.map(({ path }) => path)
+    ]);
+    const bad: {
+      path: string;
+      state: "absent" | "present" | "unreadable";
+      sha256?: string;
+      byteLength?: number;
+    }[] = [];
+    for (const [path, expected] of [...required].sort(([left], [right]) =>
+      compareText(left, right)
+    )) {
+      let current: VaultFileObservation | null;
+      try {
+        current = await this.#files.readTextStable(path, signal);
+      } catch {
+        bad.push({ path, state: "unreadable" });
+        continue;
+      }
+      if (!current) {
+        bad.push({ path, state: "absent" });
+        continue;
+      }
+      if (
+        current.text !== expected.text ||
+        current.sha256 !== expected.sha256 ||
+        current.byteLength !== expected.byteLength
+      ) {
+        bad.push({
+          path,
+          state: "present",
+          sha256: current.sha256,
+          byteLength: current.byteLength
+        });
+      }
+    }
+    for (const path of [...absent].sort(compareText)) {
+      let current: VaultFileObservation | null;
+      try {
+        current = await this.#files.readTextStable(path, signal);
+      } catch {
+        bad.push({ path, state: "unreadable" });
+        continue;
+      }
+      if (current) {
+        bad.push({
+          path,
+          state: "present",
+          sha256: current.sha256,
+          byteLength: current.byteLength
+        });
+      }
+    }
+    return bad.length > 0 ? bad : null;
+  }
+
+  async #compactOrphanCombined(
+    record: TransactionRecord,
+    signal?: AbortSignal
+  ): Promise<void> {
+    const cleanup = await this.#transactions.cleanup(record, signal);
+    if (cleanup.status !== "cleaned") {
+      throw new ObsidianWorkbenchRecoveryConflictError(record.id);
+    }
+    await this.#crashPoint("after-recovery-wal-cleanup", record);
+    await this.#releaseLocks(record, ["pair", "history"], signal);
+    await this.#crashPoint("after-recovery-lock-cleanup", record);
+    await this.#removeScopeIndexes(record, signal);
+    await this.#crashPoint("after-recovery-index-cleanup", record);
+    this.#forgetDeletionOwnership(record.id);
+    this.#forgetRetentionContinuation(record.id);
+  }
+
+  async #compactConsumedPending(
+    history: HistoryPlanData,
+    signal?: AbortSignal
+  ): Promise<void> {
+    if (await this.#files.readTextStable(history.provisional.path, signal)) {
+      throw new ObsidianWorkbenchRecoveryConflictError("combined-pending-present");
+    }
+    const matches: TransactionRecord[] = [];
+    for (const candidate of await this.#transactions.listAll(signal)) {
+      if (
+        candidate.kind !== "owned-cleanup" ||
+        candidate.scope.historyDocumentId !== history.documentId
+      ) {
+        continue;
+      }
+      const metadata = await parseMetadata(blobText(candidate, "metadata"));
+      if (metadata.operation !== "history-pending") continue;
+      const plan = await parseOwnershipPlan(blobText(candidate, "ownership-plan"));
+      if (plan.path !== history.provisional.path) continue;
+      if (
+        plan.sha256 !== history.provisional.sha256 ||
+        plan.byteLength !== history.provisional.byteLength ||
+        (candidate.phase !== "committed" && candidate.phase !== "completed")
+      ) {
+        throw new ObsidianWorkbenchRecoveryConflictError(candidate.id);
+      }
+      matches.push(candidate);
+    }
+    if (matches.length > 1) {
+      throw new ObsidianWorkbenchRecoveryConflictError(matches[0]!.id);
+    }
+    for (const pending of matches) {
+      const cleanup = await this.#transactions.cleanup(pending, signal, true);
+      if (cleanup.status !== "cleaned") {
+        throw new ObsidianWorkbenchRecoveryConflictError(pending.id);
+      }
+      await this.#removeScopeIndexes(pending, signal);
+      this.#forgetDeletionOwnership(pending.id);
+    }
   }
 
   async #transactionFolderEmpty(
@@ -1877,6 +2118,21 @@ export class ObsidianWorkbenchVault
 
   #forgetDeletionOwnership(transactionId: string): void {
     this.#deletionOwnership.delete(transactionId);
+  }
+
+  #rememberRetentionContinuation(
+    transactionId: string,
+    provisional: VaultFileObservation
+  ): void {
+    this.#retentionContinuations.set(transactionId, provisional);
+  }
+
+  #hasRetentionContinuation(transactionId: string): boolean {
+    return this.#retentionContinuations.has(transactionId);
+  }
+
+  #forgetRetentionContinuation(transactionId: string): void {
+    this.#retentionContinuations.delete(transactionId);
   }
 
   async #removeProvenOwned(
