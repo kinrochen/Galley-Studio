@@ -69,6 +69,7 @@ export class SkillSession {
   readonly #requiredFiles = new Set<string>();
   readonly #loadedFiles = new Set<string>();
   readonly #auditFiles: string[] = [];
+  readonly #seenToolCallIds = new Set<string>();
   readonly #capabilities: ProviderCapabilities;
   #usedToolCalls = false;
   #usedInjection = false;
@@ -130,14 +131,13 @@ export class SkillSession {
         this.#injectFiles(required, true);
         const retry = await this.#request(false, signal);
         this.#appendAssistant(retry);
-        if (retry.toolCalls.length > 0) {
-          throw invalidToolResponse();
-        }
+        this.#acceptFinalContent(retry);
         return;
       }
 
       this.#appendAssistant(result);
       if (result.toolCalls.length === 0) {
+        this.#acceptFinalContent(result);
         if (missing.length === 0) {
           return;
         }
@@ -173,16 +173,14 @@ export class SkillSession {
 
   async complete(prompt: string, signal: AbortSignal): Promise<string> {
     await this.bootstrap(signal);
+    await this.ensureFiles([...this.#requiredFiles], signal);
     this.#throwIfAborted(signal);
     this.#messages.push({ role: "user", content: prompt });
 
     if (!this.#capabilities.tools) {
       const result = await this.#request(false, signal);
       this.#appendAssistant(result);
-      if (result.toolCalls.length > 0) {
-        throw invalidToolResponse();
-      }
-      return result.content;
+      return this.#acceptFinalContent(result);
     }
 
     let toolRounds = 0;
@@ -198,18 +196,12 @@ export class SkillSession {
         this.#injectFiles([...this.#requiredFiles], true);
         const retry = await this.#request(false, signal);
         this.#appendAssistant(retry);
-        if (retry.toolCalls.length > 0) {
-          throw invalidToolResponse();
-        }
-        return retry.content;
+        return this.#acceptFinalContent(retry);
       }
 
       this.#appendAssistant(result);
       if (result.toolCalls.length === 0) {
-        if (result.finishReason === "tool_calls") {
-          throw invalidToolResponse();
-        }
-        return result.content;
+        return this.#acceptFinalContent(result);
       }
 
       toolRounds += 1;
@@ -250,6 +242,9 @@ export class SkillSession {
   #processToolCalls(toolCalls: readonly ChatToolCall[]): ValidatedRead[] {
     const validated = this.#validateToolCalls(toolCalls);
     const contents = validated.map((read) => this.#vfs.read(read.path));
+    for (const read of validated) {
+      this.#seenToolCallIds.add(read.id);
+    }
     validated.forEach((read, index) => {
       const content = contents[index];
       if (content === undefined) {
@@ -272,6 +267,7 @@ export class SkillSession {
         typeof call.id !== "string" ||
         call.id.length === 0 ||
         ids.has(call.id) ||
+        this.#seenToolCallIds.has(call.id) ||
         call.name !== READ_SKILL_FILE_TOOL.name ||
         typeof call.argumentsJson !== "string"
       ) {
@@ -312,6 +308,16 @@ export class SkillSession {
       }
       return { id: call.id, path: normalized };
     });
+  }
+
+  #acceptFinalContent(result: ChatTurnResult): string {
+    if (
+      result.toolCalls.length > 0 ||
+      result.finishReason === "tool_calls"
+    ) {
+      throw invalidToolResponse();
+    }
+    return result.content;
   }
 
   #injectFiles(paths: readonly string[], includeLoaded = false): void {

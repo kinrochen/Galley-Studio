@@ -31,7 +31,7 @@ function cloneRequest(request: ChatRequest): ChatRequest {
       : {
           tools: request.tools.map((tool) => ({
             ...tool,
-            parameters: { ...tool.parameters }
+            parameters: structuredClone(tool.parameters)
           }))
         })
   };
@@ -56,7 +56,7 @@ export class ScriptedChatClient implements ChatClient {
     request: ChatRequest,
     _signal: AbortSignal
   ): Promise<ChatTurnResult> {
-    this.requests.push(request);
+    this.requests.push(cloneRequest(request));
     const step = this.#steps.shift();
     if (step === undefined) {
       throw new Error("Unexpected ChatClient request after script exhausted");
