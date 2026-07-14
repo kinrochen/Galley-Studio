@@ -1,0 +1,43 @@
+export interface GalleySettings {
+  baseUrl: string;
+  model: string;
+  secretId: string;
+  temperature: number;
+  timeoutMs: number;
+  contextWindow: number;
+  outputFolder: string;
+  activeSkillVersion: string;
+}
+
+export const DEFAULT_SETTINGS: GalleySettings = {
+  baseUrl: "https://api.openai.com/v1",
+  model: "",
+  secretId: "",
+  temperature: 0.4,
+  timeoutMs: 120_000,
+  contextWindow: 128_000,
+  outputFolder: "",
+  activeSkillVersion: "bundled"
+};
+
+export function normalizeSettings(value: unknown): GalleySettings {
+  const input =
+    typeof value === "object" && value !== null
+      ? (value as Record<string, unknown>)
+      : {};
+
+  return {
+    ...DEFAULT_SETTINGS,
+    baseUrl: String(input.baseUrl ?? DEFAULT_SETTINGS.baseUrl).replace(/\/+$/, ""),
+    model: String(input.model ?? ""),
+    secretId: String(input.secretId ?? ""),
+    temperature: clamp(Number(input.temperature ?? 0.4), 0, 2),
+    timeoutMs: clamp(Number(input.timeoutMs ?? 120_000), 10_000, 600_000),
+    contextWindow: clamp(Number(input.contextWindow ?? 128_000), 8_000, 2_000_000),
+    outputFolder: String(input.outputFolder ?? ""),
+    activeSkillVersion: String(input.activeSkillVersion ?? "bundled")
+  };
+}
+
+const clamp = (value: number, min: number, max: number): number =>
+  Math.min(max, Math.max(min, value));
