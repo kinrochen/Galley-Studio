@@ -68,12 +68,30 @@ class FakeEditor implements HugeRteEditor {
   emit(event: string): void {
     for (const listener of this.listeners.get(event) ?? []) listener();
   }
+
+  listenerCount(): number {
+    return [...this.listeners.values()].reduce(
+      (count, listeners) => count + listeners.size,
+      0
+    );
+  }
 }
 
 class FakeRuntime implements HugeRteRuntime {
   options: HugeRteInitOptions | undefined;
   editors: FakeEditor[] = [];
-  mode: "single" | "zero" | "multiple" | "mixed" | "unexpected" | "reject" | "deferred" = "single";
+  mode:
+    | "single"
+    | "zero"
+    | "multiple"
+    | "multi-setup"
+    | "extra-setup"
+    | "repeat-setup"
+    | "mixed"
+    | "unexpected"
+    | "reject"
+    | "deferred"
+    | "deferred-multi-setup" = "single";
   rejection = new Error("init failed");
   private resolveDeferred: ((value: unknown) => void) | undefined;
 
@@ -93,6 +111,26 @@ class FakeRuntime implements HugeRteRuntime {
       const second = new FakeEditor(target, initial);
       this.editors.push(second);
       return this.editors;
+    }
+    if (
+      this.mode === "multi-setup" ||
+      this.mode === "extra-setup" ||
+      this.mode === "deferred-multi-setup"
+    ) {
+      const second = new FakeEditor(target, initial);
+      this.editors.push(second);
+      options.setup(second);
+      if (this.mode === "extra-setup") return [editor];
+      if (this.mode === "deferred-multi-setup") {
+        return new Promise((resolve) => {
+          this.resolveDeferred = resolve;
+        });
+      }
+      return this.editors;
+    }
+    if (this.mode === "repeat-setup") {
+      options.setup(editor);
+      return [editor];
     }
     if (this.mode === "mixed") return [editor, { targetElm: target }];
     if (this.mode === "unexpected") {
@@ -364,6 +402,53 @@ describe("HugeRteAdapter lifecycle", () => {
       expect(document.head.querySelector("style[data-galley-hugerte-skin]")).toBeNull();
       expect(runtime.editors.every((editor) => editor.removeCount === 1)).toBe(true);
     }
+  });
+
+  it("detaches listeners and removes every editor when multiple editors run setup", async () => {
+    const runtime = new FakeRuntime();
+    runtime.mode = "multi-setup";
+    const adapter = makeAdapter(runtime);
+
+    await expect(
+      adapter.mount(document.createElement("div"), "<p>one</p>", mountOptions())
+    ).rejects.toMatchObject({ code: "editor_init_invalid" });
+
+    expect(runtime.editors.map((editor) => editor.listenerCount())).toEqual([0, 0]);
+    expect(runtime.editors.map((editor) => editor.removeCount)).toEqual([1, 1]);
+  });
+
+  it("fails closed for omitted, extra, and repeated setup editors", async () => {
+    for (const mode of ["zero", "extra-setup", "repeat-setup"] as const) {
+      const runtime = new FakeRuntime();
+      runtime.mode = mode;
+      const adapter = makeAdapter(runtime);
+
+      await expect(
+        adapter.mount(document.createElement("div"), "<p>one</p>", mountOptions())
+      ).rejects.toMatchObject({ code: "editor_init_invalid" });
+
+      expect(runtime.editors.every((editor) => editor.listenerCount() === 0)).toBe(true);
+      expect(runtime.editors.every((editor) => editor.removeCount === 1)).toBe(true);
+    }
+  });
+
+  it("cleans every setup editor when destroy races a malformed multiple init", async () => {
+    const runtime = new FakeRuntime();
+    runtime.mode = "deferred-multi-setup";
+    const adapter = makeAdapter(runtime);
+    const mounting = adapter.mount(
+      document.createElement("div"),
+      "<p>one</p>",
+      mountOptions()
+    );
+
+    await vi.waitFor(() => expect(runtime.editors).toHaveLength(2));
+    adapter.destroy();
+    runtime.resolve();
+
+    await expect(mounting).rejects.toMatchObject({ code: "editor_mount_cancelled" });
+    expect(runtime.editors.map((editor) => editor.listenerCount())).toEqual([0, 0]);
+    expect(runtime.editors.map((editor) => editor.removeCount)).toEqual([1, 1]);
   });
 
   it("cancels and cleans an exact editor when destroyed during asynchronous mount", async () => {

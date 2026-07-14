@@ -21,9 +21,14 @@ remains a separate textarea adapter.
   destroy-before-resolve interleavings. Both RED failures rolled `newest` back
   to `old`; the final implementation preserves the last write without emitting
   `onChange`.
-- Final focused gate: 5 files, 25 tests passed.
+- R2 remediation RED/GREEN covered two editors both running `setup`, setup-only
+  editors omitted from the init result, extra and repeated setup, and destroy
+  racing a malformed multiple init. RED retained seven listeners on the first
+  editor; GREEN leaves every listener count at zero and removes each editor
+  exactly once.
+- Final focused gate: 5 files, 28 tests passed.
 - Final type gate: `npm run test:typecheck` passed.
-- Final full gate: 38 files, 840 tests passed.
+- Final full gate: 38 files, 843 tests passed.
 - Final production gate: `npm run build` passed, including deterministic asset
   regeneration, TypeScript, and production esbuild.
 
@@ -40,6 +45,10 @@ that temporary `window.hugerte` / `window.hugeRTE` registration does not leak.
   loader.
 - HugeRTE accepts exactly one initialized editor for the owned target. Rejected,
   malformed, cancelled, duplicate, and destroyed lifecycles fail closed.
+- Every editor passed to `setup` receives its own binding tuple and setup count.
+  Acceptance requires one returned editor, one matching setup binding, one
+  setup call, and the exact owned target. Failure cleanup de-duplicates returned
+  candidates and setup-only editors before detaching and removing each one.
 - Programmatic initialization and `setHtml` suppress change callbacks; user
   input/change/undo/redo events bridge to the adapter callback.
 - While mounting is asynchronous, `setHtml` updates both the expected body and
@@ -98,8 +107,8 @@ TypeScript constants. Two consecutive generator runs were byte-identical.
 
 ## Build and release evidence
 
-- `main.js`: 2,322,823 bytes, SHA-256
-  `30b55507bbce7567b389b0e8efcd7de39cfea942a9ecea370bae06e492f4032a`.
+- `main.js`: 2,322,791 bytes, SHA-256
+  `c3c61ddccfbc4bc15e88c22fed6a2828d0cca655aed0d6458bc4a1bb89c1b8a8`.
 - `styles.css`: 1 byte, SHA-256
   `01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b`.
 - Bundle inspection found the exact plugin list, generated skin marker, and

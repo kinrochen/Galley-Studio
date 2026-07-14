@@ -96,6 +96,13 @@ interface MountToken {
   cancelled: boolean;
 }
 
+interface EditorBinding {
+  setupCount: number;
+  policyListener: () => void;
+  changeListener: () => void;
+  selectionListener: () => void;
+}
+
 interface SharedSkin {
   count: number;
   style: HTMLStyleElement;
@@ -109,14 +116,11 @@ export class HugeRteAdapter implements HtmlEditorAdapter {
   private html = "";
   private target: HTMLTextAreaElement | undefined;
   private editor: HugeRteEditor | undefined;
-  private setupEditor: HugeRteEditor | undefined;
   private mountToken: MountToken | undefined;
   private releaseSkin: (() => void) | undefined;
-  private policyListener: (() => void) | undefined;
-  private changeListener: (() => void) | undefined;
-  private selectionListener: (() => void) | undefined;
   private suppressChanges = true;
   private pendingHtmlWrite = false;
+  private readonly editorBindings = new Map<HugeRteEditor, EditorBinding>();
   private readonly removedEditors = new WeakSet<object>();
 
   constructor(private readonly runtimeLoader: HugeRteRuntimeLoader = loadBundledRuntime) {}
@@ -162,12 +166,13 @@ export class HugeRteAdapter implements HtmlEditorAdapter {
         editors.length === 1
           ? editors[0]
           : undefined;
+      const binding = editor ? this.editorBindings.get(editor) : undefined;
       if (
         !editor ||
-        editor !== this.setupEditor ||
+        this.editorBindings.size !== 1 ||
+        binding?.setupCount !== 1 ||
         editor.targetElm !== target
       ) {
-        for (const candidate of editors) this.removeEditor(candidate);
         throw new EditorLifecycleError(
           "editor_init_invalid",
           "HugeRTE did not return exactly the editor mounted for Galley's target"
@@ -185,8 +190,10 @@ export class HugeRteAdapter implements HtmlEditorAdapter {
       this.suppressChanges = false;
     } catch (error) {
       const cancelled = token.cancelled;
-      for (const candidate of editorCandidates(initResult)) this.removeEditor(candidate);
-      if (this.setupEditor) this.removeEditor(this.setupEditor);
+      this.removeEditors([
+        ...editorCandidates(initResult),
+        ...this.editorBindings.keys()
+      ]);
       this.cleanupOwnedMount();
       this.phase = "destroyed";
       if (cancelled) {
@@ -239,17 +246,21 @@ export class HugeRteAdapter implements HtmlEditorAdapter {
     if (this.mountToken) {
       this.mountToken.cancelled = true;
     }
-    if (this.editor) this.removeEditor(this.editor);
-    if (this.setupEditor) this.removeEditor(this.setupEditor);
+    this.removeEditors([
+      ...(this.editor ? [this.editor] : []),
+      ...this.editorBindings.keys()
+    ]);
     this.cleanupOwnedMount();
     this.phase = "destroyed";
   }
 
   private bindEditor(editor: HugeRteEditor, options: HtmlEditorMountOptions): void {
-    this.setupEditor = editor;
+    const existing = this.editorBindings.get(editor);
+    if (existing) {
+      existing.setupCount += 1;
+      return;
+    }
     const policyListener = (): void => installDataAttributeFilters(editor);
-    this.policyListener = policyListener;
-    editor.on("PreInit", policyListener);
     const changeListener = (): void => {
       if (
         this.phase !== "mounted" ||
@@ -274,10 +285,21 @@ export class HugeRteAdapter implements HtmlEditorAdapter {
           : null;
       options.onSelectionChange?.(element);
     };
-    this.changeListener = changeListener;
-    this.selectionListener = selectionListener;
+    this.editorBindings.set(editor, {
+      setupCount: 1,
+      policyListener,
+      changeListener,
+      selectionListener
+    });
+    editor.on("PreInit", policyListener);
     editor.on(CHANGE_EVENTS, changeListener);
     editor.on(SELECTION_EVENTS, selectionListener);
+  }
+
+  private removeEditors(editors: Iterable<HugeRteEditor>): void {
+    for (const editor of new Set(editors)) {
+      this.removeEditor(editor);
+    }
   }
 
   private removeEditor(editor: HugeRteEditor): void {
@@ -285,10 +307,12 @@ export class HugeRteAdapter implements HtmlEditorAdapter {
       return;
     }
     this.removedEditors.add(editor);
-    if (editor === this.setupEditor) {
-      if (this.policyListener) editor.off("PreInit", this.policyListener);
-      if (this.changeListener) editor.off(CHANGE_EVENTS, this.changeListener);
-      if (this.selectionListener) editor.off(SELECTION_EVENTS, this.selectionListener);
+    const binding = this.editorBindings.get(editor);
+    if (binding) {
+      editor.off("PreInit", binding.policyListener);
+      editor.off(CHANGE_EVENTS, binding.changeListener);
+      editor.off(SELECTION_EVENTS, binding.selectionListener);
+      this.editorBindings.delete(editor);
     }
     editor.remove();
   }
@@ -297,10 +321,7 @@ export class HugeRteAdapter implements HtmlEditorAdapter {
     this.target?.remove();
     this.target = undefined;
     this.editor = undefined;
-    this.setupEditor = undefined;
-    this.policyListener = undefined;
-    this.changeListener = undefined;
-    this.selectionListener = undefined;
+    this.editorBindings.clear();
     this.pendingHtmlWrite = false;
     this.mountToken = undefined;
     this.releaseSkin?.();
