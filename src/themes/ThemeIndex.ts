@@ -1,6 +1,25 @@
+import { fromMarkdown } from "mdast-util-from-markdown";
+import { gfmFromMarkdown } from "mdast-util-gfm";
+import { gfm } from "micromark-extension-gfm";
+
 const REGISTERED_THEME_HEADING = "已注册主题";
+const THEME_TABLE_HEADERS = [
+  "主题",
+  "主色",
+  "适用场景",
+  "组件库文件",
+  "正文下划线 CSS"
+] as const;
 const THEME_FILE_PATTERN =
   /^references\/theme-([a-z0-9]+(?:-[a-z0-9]+)*)\.md$/;
+
+interface MdastNode {
+  type: string;
+  depth?: number;
+  value?: string;
+  alt?: string | null;
+  children?: MdastNode[];
+}
 
 export interface ThemeDefinition {
   id: string;
@@ -12,28 +31,38 @@ export interface ThemeDefinition {
 }
 
 export function parseThemeIndex(markdown: string): ThemeDefinition[] {
-  const lines = markdown.replaceAll("\r\n", "\n").split("\n");
-  const headingIndex = lines.findIndex(
-    (line) => headingText(line) === REGISTERED_THEME_HEADING
+  const tree = fromMarkdown(markdown, {
+    extensions: [gfm()],
+    mdastExtensions: [gfmFromMarkdown()]
+  });
+  const children = tree.children as MdastNode[];
+  const headingIndex = children.findIndex(
+    (node) =>
+      node.type === "heading" &&
+      node.depth === 2 &&
+      renderedText(node) === REGISTERED_THEME_HEADING
   );
   if (headingIndex < 0) {
     throw new Error("Theme index is missing the registered-theme heading");
   }
 
-  let tableIndex = headingIndex + 1;
-  while (tableIndex < lines.length && lines[tableIndex]?.trim() === "") {
-    tableIndex += 1;
+  let table: MdastNode | undefined;
+  for (let index = headingIndex + 1; index < children.length; index += 1) {
+    const node = children[index];
+    if (node === undefined) {
+      break;
+    }
+    if (node.type === "heading" && (node.depth ?? 6) <= 2) {
+      break;
+    }
+    if (isThemeTable(node)) {
+      table = node;
+      break;
+    }
   }
-
-  const header = parseTableRow(lines[tableIndex]);
-  const separator = parseTableRow(lines[tableIndex + 1]);
-  if (
-    header === undefined ||
-    header.length !== 5 ||
-    separator === undefined ||
-    separator.length !== 5 ||
-    !separator.every((cell) => /^:?-{3,}:?$/.test(cell.trim()))
-  ) {
+  const rows = table?.children;
+  const header = rows?.[0]?.children;
+  if (!rows || !header || header.length !== 5) {
     throw new Error(
       "Theme index is missing the five-column registered-theme table"
     );
@@ -41,18 +70,13 @@ export function parseThemeIndex(markdown: string): ThemeDefinition[] {
 
   const themes: ThemeDefinition[] = [];
   const seenIds = new Set<string>();
-  for (let lineIndex = tableIndex + 2; lineIndex < lines.length; lineIndex += 1) {
-    const line = lines[lineIndex];
-    if (line === undefined || !line.trim().startsWith("|")) {
-      break;
-    }
-
-    const cells = parseTableRow(line);
-    if (cells === undefined || cells.length !== 5) {
+  for (const row of rows.slice(1)) {
+    const cells = row.children;
+    if (!cells || cells.length !== 5) {
       throw new Error("Every registered theme row must contain five cells");
     }
     const [name, primaryColor, useCases, file, underlineCss] = cells.map(
-      cleanCell
+      (cell) => renderedText(cell).trim()
     );
     if (!name || !primaryColor || !useCases || !underlineCss) {
       throw new Error("Registered theme cells must not be empty");
@@ -87,50 +111,29 @@ export function parseThemeIndex(markdown: string): ThemeDefinition[] {
   return themes;
 }
 
-function headingText(line: string): string | undefined {
-  return /^#{1,6}\s+(.+?)\s*#*\s*$/.exec(line)?.[1]?.trim();
+function renderedText(node: MdastNode): string {
+  if (node.type === "html") {
+    return "";
+  }
+  if (typeof node.value === "string") {
+    return node.value;
+  }
+  if (node.type === "image" || node.type === "imageReference") {
+    return node.alt ?? "";
+  }
+  if (node.type === "break") {
+    return "\n";
+  }
+  return node.children?.map(renderedText).join("") ?? "";
 }
 
-function parseTableRow(line: string | undefined): string[] | undefined {
-  if (!line?.trim().startsWith("|")) {
-    return undefined;
-  }
-
-  const trimmed = line.trim();
-  const content = trimmed.endsWith("|")
-    ? trimmed.slice(1, -1)
-    : trimmed.slice(1);
-  const cells: string[] = [];
-  let cell = "";
-  let escaped = false;
-  for (const character of content) {
-    if (escaped) {
-      cell += character;
-      escaped = false;
-      continue;
-    }
-    if (character === "\\") {
-      escaped = true;
-      cell += character;
-      continue;
-    }
-    if (character === "|") {
-      cells.push(cell.trim());
-      cell = "";
-      continue;
-    }
-    cell += character;
-  }
-  if (escaped) {
-    cell += "\\";
-  }
-  cells.push(cell.trim());
-  return cells;
-}
-
-function cleanCell(cell: string): string {
-  return cell
-    .replace(/`([^`]*)`/g, "$1")
-    .replaceAll("\\|", "|")
-    .trim();
+function isThemeTable(node: MdastNode): boolean {
+  const header =
+    node.type === "table" ? node.children?.[0]?.children : undefined;
+  return (
+    header?.length === THEME_TABLE_HEADERS.length &&
+    header.every(
+      (cell, index) => renderedText(cell).trim() === THEME_TABLE_HEADERS[index]
+    )
+  );
 }

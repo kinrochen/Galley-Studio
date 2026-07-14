@@ -152,6 +152,108 @@ describe("BuiltInThemeRepository", () => {
       /Theme file is not registered: references\/theme-missing\.md/
     );
   });
+
+  it("ignores a registered-theme table decoy inside fenced code", () => {
+    const vfs = themeVfs(`
+# Theme index
+
+\`\`\`md
+${registeredSection(
+  "| Fenced decoy | #000 | articles | `references/theme-fenced-decoy.md` | underline |"
+)}
+\`\`\`
+
+${registeredSection(
+  "| Real | #fff | essays | `references/theme-real.md` | underline |"
+)}
+`, ["fenced-decoy", "real"]);
+
+    expect(new BuiltInThemeRepository(vfs).list().map((theme) => theme.id)).toEqual([
+      "real"
+    ]);
+  });
+
+  it("ignores a registered-theme table decoy inside an HTML comment", () => {
+    const vfs = themeVfs(`
+# Theme index
+
+<!--
+${registeredSection(
+  "| Comment decoy | #000 | articles | `references/theme-comment-decoy.md` | underline |"
+)}
+-->
+
+${registeredSection(
+  "| Real | #fff | essays | `references/theme-real.md` | underline |"
+)}
+`, ["comment-decoy", "real"]);
+
+    expect(new BuiltInThemeRepository(vfs).list().map((theme) => theme.id)).toEqual([
+      "real"
+    ]);
+  });
+
+  it("ignores an unrelated table in the registered-theme section", () => {
+    const vfs = themeVfs(`
+# Theme index
+
+## 已注册主题
+
+| A | B | C | D | E |
+|---|---|---|---|---|
+| unrelated | values | must | not | parse |
+
+| 主题 | 主色 | 适用场景 | 组件库文件 | 正文下划线 CSS |
+|---|---|---|---|---|
+| Real | #fff | essays | \`references/theme-real.md\` | underline |
+`, ["real"]);
+
+    expect(new BuiltInThemeRepository(vfs).list().map((theme) => theme.id)).toEqual([
+      "real"
+    ]);
+  });
+
+  it("fails closed when registered-theme syntax exists only in code or comments", () => {
+    const vfs = themeVfs(`
+# Theme index
+
+\`\`\`md
+${registeredSection(
+  "| Fenced decoy | #000 | articles | `references/theme-fenced-decoy.md` | underline |"
+)}
+\`\`\`
+
+<!--
+${registeredSection(
+  "| Comment decoy | #fff | essays | `references/theme-comment-decoy.md` | underline |"
+)}
+-->
+`, ["fenced-decoy", "comment-decoy"]);
+
+    expect(() => new BuiltInThemeRepository(vfs)).toThrow(
+      /registered-theme heading/
+    );
+  });
+
+  it("fails closed when a real heading has no real table in its section", () => {
+    const vfs = themeVfs(`
+# Theme index
+
+## 已注册主题
+
+No registered table is present.
+
+\`\`\`md
+| 主题 | 主色 | 适用场景 | 组件库文件 | 正文下划线 CSS |
+|---|---|---|---|---|
+| Fenced decoy | #000 | articles | \`references/theme-fenced-decoy.md\` | underline |
+\`\`\`
+`, ["fenced-decoy"]);
+
+    expect(() => new BuiltInThemeRepository(vfs)).toThrow(
+      /registered-theme table/
+    );
+  });
 });
 
 function registeredTable(rows: string): string {
@@ -163,4 +265,26 @@ function registeredTable(rows: string): string {
 |---|---|---|---|---|
 ${rows}
 `;
+}
+
+function registeredSection(rows: string): string {
+  return `## 已注册主题
+
+| 主题 | 主色 | 适用场景 | 组件库文件 | 正文下划线 CSS |
+|---|---|---|---|---|
+${rows}`;
+}
+
+function themeVfs(
+  index: string,
+  themeIds: readonly string[]
+): SkillVirtualFileSystem {
+  return new SkillVirtualFileSystem(
+    new Map([
+      ["references/theme-index.md", index],
+      ...themeIds.map(
+        (id) => [`references/theme-${id}.md`, `components for ${id}`] as const
+      )
+    ])
+  );
 }
