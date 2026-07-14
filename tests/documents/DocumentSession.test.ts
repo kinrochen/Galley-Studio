@@ -951,6 +951,95 @@ describe("DocumentSession", () => {
     expect(fixture.backing.journalCount()).toBe(1);
   });
 
+  it.each(["invalid-sidecar", "invalid-html", "wrong-hash"] as const)(
+    "rejects %s bytes when explicitly resolving a quarantined pair",
+    async (variant) => {
+      const hooks: MemoryWorkbenchHooks = {};
+      const fixture = await makeSessionDeps({ hooks });
+      for (let index = 0; index < 20; index += 1) {
+        await fixture.history.store(
+          fixture.sidecar.documentId,
+          `retained-${index}`,
+          new Date(1_700_000_000_000 + index)
+        );
+      }
+      const session = await DocumentSession.open(fixture.dependencies);
+      session.updateBody("<article><p>invalid resolution target</p></article>");
+      const targetHtml = session.html();
+      const acceptedHtml =
+        variant === "invalid-html"
+          ? "<article><p>not a standalone Galley shell</p></article>"
+          : targetHtml;
+      const acceptedSidecarJson =
+        variant === "invalid-sidecar"
+          ? "not a Galley sidecar"
+          : `${JSON.stringify(
+              {
+                ...fixture.sidecar,
+                htmlHash:
+                  variant === "wrong-hash"
+                    ? fixture.sidecar.htmlHash
+                    : await sha256Text(acceptedHtml)
+              },
+              null,
+              2
+            )}\n`;
+      hooks.beforeHistoryRemove = () => {
+        fixture.vault.writeExternally(TEST_PATHS.html, acceptedHtml);
+        fixture.vault.writeExternally(
+          TEST_PATHS.sidecar,
+          acceptedSidecarJson
+        );
+        throw new Error("invalid accepted-pair interruption");
+      };
+
+      await expect(session.save("explicit")).rejects.toMatchObject({
+        code: "document_commit_ambiguous"
+      });
+      const journal = fixture.backing.pairJournals.get(TEST_PATHS.html);
+      const conflict = fixture.backing.recoveryConflicts.get(TEST_PATHS.html);
+      const durableBytes = fixture.backing
+        .rawPaths()
+        .map((path) => [path, fixture.backing.rawRead(path)] as const);
+      expect(fixture.backing.journalCount()).toBe(1);
+      expect(
+        fixture.backing.rawPaths().filter((path) => path.endsWith(".pending"))
+      ).toHaveLength(1);
+      expect(
+        fixture.backing
+          .rawPaths()
+          .filter(
+            (path) =>
+              path.startsWith(".galley/history/") && path.endsWith(".html")
+          )
+      ).toHaveLength(20);
+
+      const resolver = MemoryWorkbenchVault.reopen(fixture.backing);
+      await expect(
+        resolver.acceptCurrentPairAndAbandonQuarantinedTransaction(
+          TEST_PATHS,
+          { html: acceptedHtml, sidecarJson: acceptedSidecarJson }
+        )
+      ).rejects.toThrow();
+
+      expect(fixture.backing.rawRead(TEST_PATHS.html)).toBe(acceptedHtml);
+      expect(fixture.backing.rawRead(TEST_PATHS.sidecar)).toBe(
+        acceptedSidecarJson
+      );
+      expect(
+        fixture.backing
+          .rawPaths()
+          .map((path) => [path, fixture.backing.rawRead(path)] as const)
+      ).toEqual(durableBytes);
+      expect(fixture.backing.pairJournals.get(TEST_PATHS.html)).toBe(journal);
+      expect(fixture.backing.recoveryConflicts.get(TEST_PATHS.html)).toBe(
+        conflict
+      );
+      expect(fixture.backing.journalCount()).toBe(1);
+      expect(fixture.backing.historyReceipts.size).toBe(0);
+    }
+  );
+
   it("reload discards local content only after a valid reread and refreshes source status", async () => {
     const fixture = await makeSessionDeps();
     const session = await DocumentSession.open(fixture.dependencies);

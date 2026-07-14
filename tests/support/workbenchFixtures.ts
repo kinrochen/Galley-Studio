@@ -750,7 +750,19 @@ export class MemoryWorkbenchVault
     if (!conflict || conflict.paths.sidecar !== paths.sidecar) {
       throw new Error("No quarantined Galley transaction exists for this pair.");
     }
+    GalleyDocumentCodec.parse(accepted.html);
+    const acceptedSidecar = GalleySidecarV1Schema.parse(
+      JSON.parse(accepted.sidecarJson) as unknown
+    );
+    if (acceptedSidecar.htmlHash !== (await sha256Text(accepted.html))) {
+      throw new Error(
+        "The accepted Galley sidecar does not match the exact accepted HTML."
+      );
+    }
+
     const journal = conflict.journal;
+    // Hashing is asynchronous. Re-observe the exact bytes immediately before
+    // the synchronous history cleanup and quarantine removal below.
     const currentHtml = this.backing.files.get(paths.html);
     const currentSidecar = this.backing.files.get(paths.sidecar);
     if (

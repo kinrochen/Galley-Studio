@@ -15,6 +15,8 @@ DONE
   `2a5f28b5e695af972435a388a96c7b85efc7497c`
 - Independent-review R5 remediation base:
   `acf09ea1b3e5c16b891605cc0bfab1c49056f927`
+- Independent-review R6 remediation base:
+  `0741b71f0f94509c43238ff906f2d1cd41191e19`
 - Task commit: the commit containing this report; its exact SHA is recorded in
   the implementation handoff because a Git commit cannot contain its own hash.
 - Progress ledger: not edited
@@ -382,9 +384,12 @@ starting from exactly 20, with no receipt or resolution path.
   remain unchanged across reopen.
 - The reference adapter exposes explicit
   `acceptCurrentPairAndAbandonQuarantinedTransaction`. Resolution requires both
-  current pair members to exactly match caller-supplied accepted bytes, retries
-  deferred history rollback only when it has become ownership-safe, removes
-  only the exact owned pending handle, and then clears the journal/conflict.
+  current pair members to exactly match caller-supplied accepted bytes, strict
+  parsing of the accepted HTML and sidecar, and a sidecar hash matching the
+  exact accepted HTML. After the asynchronous hash, it re-observes the current
+  exact bytes immediately before synchronous cleanup, retries deferred history
+  rollback only when it has become ownership-safe, removes only the exact owned
+  pending handle, and then clears the journal/conflict.
   The permanent resolution test accepts a strict hash-matching external
   sidecar, preserves both accepted pair members byte-for-byte, restores normal
   pair/history access, and leaves the exact original 20 history snapshots with
@@ -393,12 +398,44 @@ starting from exactly 20, with no receipt or resolution path.
   full counted transaction; create-mode cleanup remains independently
   decidable and never enters quarantine.
 
+### Independent review R6 remediation RED
+
+Three permanent acceptance-boundary cases were added before changing the
+resolver:
+
+```text
+npm test -- tests/documents/DocumentSession.test.ts \
+  -t "explicitly resolving a quarantined pair"
+Test Files  1 failed (1)
+Tests       3 failed | 90 skipped (93)
+```
+
+Malformed sidecar JSON, invalid standalone HTML paired with a strict matching
+sidecar, and a valid strict sidecar carrying the wrong exact HTML hash were all
+accepted. Each promise resolved, allowing the resolver to clear durable
+pending, journal, and conflict state without first proving a valid Galley pair.
+
+### Independent review R6 remediation
+
+- Explicit acceptance now parses HTML with `GalleyDocumentCodec`, parses JSON
+  and validates it with `GalleySidecarV1Schema`, hashes the exact accepted HTML
+  with `sha256Text`, and requires exact equality with `sidecar.htmlHash`. Every
+  semantic check completes before history rollback or cleanup can mutate state.
+- Hashing is asynchronous, so the resolver re-observes both current pair members
+  and compares their exact bytes with the accepted values immediately before
+  the remaining synchronous critical cleanup section.
+- The three permanent negative cases assert that rejection preserves every raw
+  external byte, the exact same full journal and conflict objects, one pending
+  preparation, 20 recognized history snapshots, one counted journal, and zero
+  receipts. The existing valid strict, hash-matching resolution case remains
+  green and still clears the owned quarantine safely.
+
 ### Final focused GREEN
 
 ```text
 npm test -- tests/documents/HistoryRepository.test.ts tests/documents/DocumentSession.test.ts
 Test Files  2 passed (2)
-Tests       119 passed (119)
+Tests       122 passed (122)
 exit 0
 
 npm run test:typecheck
@@ -413,7 +450,9 @@ exit 0
   sidecar-compatible UUID canonicalization, malformed/unrelated preservation,
   traversal rejection, promotion/rollback/recovery failure, ABA pruning
   conflict, queued abort, restart, recoverable ambiguous rollback to pending,
-  unsafe rollback preflight, and explicit quarantine resolution.
+  unsafe rollback preflight, explicit quarantine resolution, and rejection of
+  malformed HTML/sidecar or exact-hash-mismatching accepted pairs without any
+  durable-state mutation.
 - Open: valid shell, malformed/strict sidecar failures, hash mismatch, invalid
   shell, contradictory pair paths, exact source hash, and missing source.
 - Editing: body-only changes, exact shell preservation, whole-document
@@ -463,7 +502,8 @@ exit 0
 | Pair/history ownership loss before replay | all members are preflighted; complete journal remains counted and resource-scoped without unrelated-resource denial |
 | Safe history rollback before quarantine | promoted history is removed, owned removals are restored, and exact prior HTML returns to one pending preparation beside exactly 20 recognized snapshots |
 | Unsafe history rollback before quarantine | preflight performs no mutation; external history bytes and complete transaction payload remain quarantined for later resolution |
-| Explicit external-pair acceptance | caller-selected exact pair bytes are preserved; owned pending state and full quarantine clear; exact history becomes accessible |
+| Invalid external-pair acceptance | malformed HTML/sidecar or wrong exact hash is rejected before rollback/cleanup; every external byte and the exact pending, journal, conflict, history, and receipt state remain unchanged |
+| Valid external-pair acceptance | strict, exact-hash-matching caller-selected bytes are rechecked immediately before cleanup and preserved; owned pending state and full quarantine clear; exact history becomes accessible |
 | Recovery failure | read rejects and journal remains; later clean reopen completes replay |
 | Post-commit verification failure | new HTML and new matching sidecar remain; session dirty |
 | Overwrite after external HTML-only edit | exact latest external HTML stored in history; new matching local pair committed |
@@ -494,7 +534,7 @@ before exposing persistent state.
 ```text
 npm test -- tests/documents/HistoryRepository.test.ts tests/documents/DocumentSession.test.ts
 Test Files  2 passed (2)
-Tests       119 passed (119)
+Tests       122 passed (122)
 exit 0
 
 npm run test:typecheck
@@ -502,7 +542,7 @@ exit 0
 
 npm test
 Test Files  33 passed (33)
-Tests       812 passed (812)
+Tests       815 passed (815)
 exit 0
 
 npm run build
@@ -538,7 +578,9 @@ identity-conditional cleanup from a whole-operation journal, a single durable
 pair-plus-history save boundary, scoped recoverable quarantine, bounded
 receipt acknowledgement/compaction, exact combined-receipt reconciliation,
 full-payload quarantine with ownership-safe history rollback and explicit
-resolution, mode-aware create cleanup, and the same restart/failure-stage
+resolution whose accepted HTML/sidecar is strictly validated and exact-hash
+matched before mutation, with a final exact-byte recheck after asynchronous
+validation, mode-aware create cleanup, and the same restart/failure-stage
 adapter-conformance coverage. This task
 deliberately does not add that Obsidian runtime adapter or modify the composition
 root.
