@@ -98,6 +98,63 @@ describe("ObsidianTransactionStore", () => {
     expect(JSON.parse(backing.read(manifestPath)!).phase).toBe("prepared");
   });
 
+  it("classifies abort after a successful manifest phase write as transaction ambiguity", async () => {
+    const backing = new PersistentObsidianBacking();
+    const controller = new AbortController();
+    const files = new ObsidianVaultFileStore(persistentObsidianVault(backing));
+    const store = makeStoreWithFiles(files, [ID_A]);
+    const record = await store.prepare({ kind: "pair-replace", scope: SCOPE, blobs: BLOBS });
+    abortAfterManifestModify(files, controller);
+    await expect(store.transition(record, "applying", controller.signal)).rejects.toMatchObject({
+      code: "transaction_write_ambiguous",
+      transactionId: ID_A,
+      outcome: "applied"
+    });
+    expect(JSON.parse(backing.read(`.galley/transactions/${ID_A}/manifest.json`)!).phase).toBe(
+      "applying"
+    );
+  });
+
+  it("classifies strict reopen failure after a manifest phase write as transaction ambiguity", async () => {
+    const backing = new PersistentObsidianBacking();
+    const files = new ObsidianVaultFileStore(persistentObsidianVault(backing));
+    const store = makeStoreWithFiles(files, [ID_A]);
+    const record = await store.prepare({ kind: "pair-replace", scope: SCOPE, blobs: BLOBS });
+    failManifestReopenAfterModify(files);
+    await expect(store.transition(record, "applying")).rejects.toMatchObject({
+      code: "transaction_write_ambiguous",
+      transactionId: ID_A,
+      outcome: "applied"
+    });
+    await expect(makeStore(backing, [ID_B]).open(ID_A)).resolves.toMatchObject({
+      phase: "applying"
+    });
+  });
+
+  it("preserves the complete WAL when abort lands after manifest creation", async () => {
+    const backing = new PersistentObsidianBacking();
+    const controller = new AbortController();
+    const files = new ObsidianVaultFileStore(persistentObsidianVault(backing));
+    abortAfterManifestCreate(files, controller);
+    const store = makeStoreWithFiles(files, [ID_A]);
+    await expect(
+      store.prepare(
+        { kind: "owned-cleanup", scope: SCOPE, blobs: [{ role: "metadata", text: "owned" }] },
+        controller.signal
+      )
+    ).rejects.toMatchObject({
+      code: "transaction_write_ambiguous",
+      transactionId: ID_A,
+      outcome: "applied"
+    });
+    expect(backing.read(`.galley/transactions/${ID_A}/manifest.json`)).not.toBeNull();
+    expect(backing.read(`.galley/transactions/${ID_A}/blob-metadata.json`)).toBe("owned");
+    await expect(makeStore(backing, [ID_B]).open(ID_A)).resolves.toMatchObject({
+      id: ID_A,
+      phase: "prepared"
+    });
+  });
+
   it("binds receipts to the transaction, pair hashes, and exact history plan", async () => {
     const backing = new PersistentObsidianBacking();
     const store = makeStore(backing, [ID_A]);
@@ -207,6 +264,93 @@ describe("ObsidianTransactionStore", () => {
     expect(backing.read("victim")).toBe("preserve");
   });
 
+  it("rejects forged external ownership and never reads or deletes its victim", async () => {
+    const backing = new PersistentObsidianBacking({ "notes/victim.txt": "preserve" });
+    const files = new ObsidianVaultFileStore(persistentObsidianVault(backing));
+    const store = makeStoreWithFiles(files, [ID_A]);
+    let record = await store.prepare({
+      kind: "owned-cleanup",
+      scope: SCOPE,
+      blobs: [{ role: "metadata", text: "owned" }]
+    });
+    record = await store.transition(record, "applying");
+    record = await store.transition(record, "committed");
+    record = await store.transition(record, "completed");
+    const victim = await files.readTextStable("notes/victim.txt");
+    const forged = {
+      ...record,
+      blobs: [{ ...record.blobs[0], ownership: victim }]
+    } as any;
+    await expect(store.cleanup(forged)).rejects.toMatchObject({
+      code: "transaction_handle_untrusted"
+    });
+    expect(backing.read("notes/victim.txt")).toBe("preserve");
+  });
+
+  it("rejects a forged phase instead of skipping the durable forward graph", async () => {
+    const backing = new PersistentObsidianBacking();
+    const store = makeStore(backing, [ID_A]);
+    const record = await store.prepare({ kind: "pair-replace", scope: SCOPE, blobs: BLOBS });
+    const forged = { ...record, phase: "applying" } as any;
+    await expect(store.transition(forged, "committed")).rejects.toMatchObject({
+      code: "transaction_handle_untrusted"
+    });
+    expect(JSON.parse(backing.read(`.galley/transactions/${ID_A}/manifest.json`)!).phase).toBe(
+      "prepared"
+    );
+  });
+
+  it("binds receipt scope to the durable manifest instead of a forged public scope", async () => {
+    const backing = new PersistentObsidianBacking();
+    const store = makeStore(backing, [ID_A]);
+    const record = await store.prepare({ kind: "pair-history", scope: SCOPE, blobs: BLOBS });
+    const other = {
+      pair: { html: "notes/other.galley.html", sidecar: "notes/other.galley.json" },
+      historyDocumentId: SCOPE.historyDocumentId
+    };
+    const forged = { ...record, scope: other } as any;
+    const plan = {
+      ...receiptPlan(),
+      pair: {
+        ...receiptPlan().pair,
+        htmlPath: other.pair.html,
+        sidecarPath: other.pair.sidecar
+      }
+    };
+    await expect(store.writeReceipt(forged, plan)).rejects.toMatchObject({
+      code: "transaction_handle_untrusted"
+    });
+    expect(backing.read(`.galley/transactions/${ID_A}/receipt.json`)).toBeNull();
+  });
+
+  it("deep-freezes records and rejects cloned, foreign-store, and stale handles", async () => {
+    const backing = new PersistentObsidianBacking();
+    const first = makeStore(backing, [ID_A]);
+    const prepared = await first.prepare({ kind: "pair-replace", scope: SCOPE, blobs: BLOBS });
+    expect(Object.isFrozen(prepared)).toBe(true);
+    expect(Object.isFrozen(prepared.scope)).toBe(true);
+    expect(Object.isFrozen(prepared.scope.pair)).toBe(true);
+    expect(Object.isFrozen(prepared.blobs)).toBe(true);
+    expect(Object.isFrozen(prepared.blobs[0])).toBe(true);
+    const cloned = structuredClone(prepared);
+    await expect(first.transition(cloned, "applying")).rejects.toMatchObject({
+      code: "transaction_handle_untrusted"
+    });
+
+    const second = makeStore(backing, [ID_B]);
+    await expect(second.transition(prepared, "applying")).rejects.toMatchObject({
+      code: "transaction_handle_untrusted"
+    });
+    const reopened = await second.open(ID_A);
+    const applying = await second.transition(reopened, "applying");
+    await expect(first.transition(prepared, "applying")).rejects.toMatchObject({
+      code: "transaction_write_conflict"
+    });
+    await expect(second.transition(applying, "committed")).resolves.toMatchObject({
+      phase: "committed"
+    });
+  });
+
   it("cleans a completed transaction through only verified store-owned paths", async () => {
     const backing = new PersistentObsidianBacking();
     const store = makeStore(backing, [ID_A]);
@@ -233,14 +377,72 @@ describe("ObsidianTransactionStore", () => {
 });
 
 function makeStore(backing: PersistentObsidianBacking, ids: string[]): ObsidianTransactionStore {
+  return makeStoreWithFiles(
+    new ObsidianVaultFileStore(persistentObsidianVault(backing)),
+    ids
+  );
+}
+
+function makeStoreWithFiles(
+  files: ObsidianVaultFileStore,
+  ids: string[]
+): ObsidianTransactionStore {
   let index = 0;
   return new ObsidianTransactionStore(
-    new ObsidianVaultFileStore(persistentObsidianVault(backing)),
+    files,
     {
       randomUUID: () => ids[Math.min(index++, ids.length - 1)]!,
       now: () => new Date("2026-07-15T00:00:00.000Z")
     }
   );
+}
+
+function abortAfterManifestCreate(
+  files: ObsidianVaultFileStore,
+  controller: AbortController
+): void {
+  const create = files.createExclusive.bind(files);
+  files.createExclusive = async (path, text, signal) => {
+    const result = await create(path, text, signal);
+    if (path.endsWith("/manifest.json") && result.status === "created") {
+      controller.abort();
+    }
+    return result;
+  };
+}
+
+function abortAfterManifestModify(
+  files: ObsidianVaultFileStore,
+  controller: AbortController
+): void {
+  const modify = files.modifyOwned.bind(files);
+  files.modifyOwned = async (owned, text, signal) => {
+    const result = await modify(owned, text, signal);
+    if (owned.path.endsWith("/manifest.json") && result.status === "modified") {
+      controller.abort();
+    }
+    return result;
+  };
+}
+
+function failManifestReopenAfterModify(files: ObsidianVaultFileStore): void {
+  const modify = files.modifyOwned.bind(files);
+  const read = files.readTextStable.bind(files);
+  let failReopen = false;
+  files.modifyOwned = async (owned, text, signal) => {
+    const result = await modify(owned, text, signal);
+    if (owned.path.endsWith("/manifest.json") && result.status === "modified") {
+      failReopen = true;
+    }
+    return result;
+  };
+  files.readTextStable = async (path, signal) => {
+    if (failReopen && path.endsWith("/manifest.json")) {
+      failReopen = false;
+      throw new Error("injected strict reopen failure");
+    }
+    return read(path, signal);
+  };
 }
 
 function receiptPlan(): TransactionReceiptPlan {

@@ -77,10 +77,13 @@ export class VaultFileReadUnstableError extends Error {
 
 export class VaultMutationAmbiguousError extends Error {
   readonly code = "vault_mutation_ambiguous";
-  readonly aborted = true;
 
-  constructor(readonly operation: "create-folder") {
-    super("Galley observed cancellation after a possible vault mutation.");
+  constructor(
+    readonly operation: "create-folder",
+    readonly aborted: boolean,
+    readonly operationError?: unknown
+  ) {
+    super("Galley could not prove a possible vault mutation outcome.");
     this.name = "VaultMutationAmbiguousError";
   }
 }
@@ -208,12 +211,7 @@ export class ObsidianVaultFileStore {
       created = await this.vault.create(normalized, text);
     } catch (error) {
       const current = await this.#observeAfterPossibleMutation(normalized);
-      if (current && current.text !== text) return { status: "collision" };
-      if (current === null) throw error;
-      if (current === undefined) {
-        return ambiguity("create", null, signal, error, false);
-      }
-      return ambiguity("create", current, signal, error, current.text === text);
+      return ambiguity("create", current ?? null, signal, error, false);
     }
     const current = await this.#observeAfterPossibleMutation(normalized);
     if (signal?.aborted) {
@@ -250,7 +248,7 @@ export class ObsidianVaultFileStore {
         after ?? null,
         signal,
         error,
-        after?.identity === owned.identity && after.text === nextText
+        false
       );
     }
     const after = await this.#observeAfterPossibleMutation(path);
@@ -282,7 +280,7 @@ export class ObsidianVaultFileStore {
       await this.vault.delete(owned.identity);
     } catch (error) {
       const after = await this.#observeAfterPossibleMutation(path);
-      return ambiguity("remove", after ?? null, signal, error, after === null);
+      return ambiguity("remove", after ?? null, signal, error, false);
     }
     const after = await this.#observeAfterPossibleMutation(path);
     if (signal?.aborted) {
@@ -310,17 +308,24 @@ export class ObsidianVaultFileStore {
         if (!this.vault.getFolderByPath(current)) throw new VaultFolderConflictError();
         continue;
       }
+      let created: TFolder;
       try {
-        await this.vault.createFolder(current);
+        created = await this.vault.createFolder(current);
       } catch (error) {
-        if (this.vault.getFolderByPath(current)) continue;
-        if (this.vault.getAbstractFileByPath(current)) {
-          throw new VaultFolderConflictError();
-        }
-        throw error;
+        throw new VaultMutationAmbiguousError(
+          "create-folder",
+          signal?.aborted === true,
+          error
+        );
       }
-      if (signal?.aborted) {
-        throw new VaultMutationAmbiguousError("create-folder");
+      if (
+        signal?.aborted ||
+        this.vault.getFolderByPath(current) !== created
+      ) {
+        throw new VaultMutationAmbiguousError(
+          "create-folder",
+          signal?.aborted === true
+        );
       }
     }
   }
@@ -353,16 +358,13 @@ export class ObsidianVaultFileStore {
       }
       return { status: "created", folder: { path: normalized, identity: folder } };
     } catch (error) {
-      if (this.vault.getAbstractFileByPath(normalized)) {
-        return {
-          status: "ambiguous",
-          operation: "create",
-          outcome: "unknown",
-          aborted: signal?.aborted === true,
-          error
-        };
-      }
-      throw error;
+      return {
+        status: "ambiguous",
+        operation: "create",
+        outcome: "unknown",
+        aborted: signal?.aborted === true,
+        error
+      };
     }
   }
 
@@ -406,8 +408,11 @@ export class ObsidianVaultFileStore {
     if (this.vault.getFolderByPath(path) !== owned.identity) return { status: "conflict" };
     if ((await this.list(path, signal)).length > 0) return { status: "conflict" };
     throwIfAborted(signal);
+    if (this.vault.getFolderByPath(path) !== owned.identity) {
+      return { status: "conflict" };
+    }
     try {
-      await this.vault.delete(owned.identity);
+      await this.vault.adapter.rmdir(path, false);
     } catch (error) {
       return {
         status: "ambiguous",
@@ -504,7 +509,7 @@ export function canonicalVaultPath(path: string): string {
     path.includes("\\") ||
     path.startsWith("/") ||
     path.normalize("NFC") !== path ||
-    /[\u0000-\u001f\u007f]/u.test(path) ||
+    /[\p{Cc}\p{Cf}]/u.test(path) ||
     /^[a-z]:/iu.test(path) ||
     /^[a-z][a-z0-9+.-]*:/iu.test(path) ||
     path.split("/").some((segment) => segment === "" || segment === "." || segment === "..")

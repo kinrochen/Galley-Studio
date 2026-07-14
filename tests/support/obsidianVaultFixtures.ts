@@ -25,8 +25,11 @@ interface FakeFolderNode {
 export interface PersistentObsidianHooks {
   afterRead?(path: string, backing: PersistentObsidianBacking): void;
   afterCreate?(path: string, backing: PersistentObsidianBacking): void;
+  afterCreateFolder?(path: string, backing: PersistentObsidianBacking): void;
   afterModify?(path: string, backing: PersistentObsidianBacking): void;
   afterDelete?(path: string, backing: PersistentObsidianBacking): void;
+  beforeRmdir?(path: string, backing: PersistentObsidianBacking): void;
+  afterRmdir?(path: string, backing: PersistentObsidianBacking): void;
 }
 
 export class PersistentObsidianBacking {
@@ -130,6 +133,22 @@ export function persistentObsidianVault(
         (node.kind === "file" ? files : folders).push(candidate);
       }
       return { files: files.sort(), folders: folders.sort() };
+    },
+    async rmdir(path: string, recursive: boolean): Promise<void> {
+      hooks.beforeRmdir?.(path, backing);
+      const node = backing.nodes.get(path);
+      if (node?.kind !== "folder") throw new Error("Missing folder");
+      const hasChildren = [...backing.nodes.keys()].some((candidate) =>
+        candidate.startsWith(`${path}/`)
+      );
+      if (hasChildren && !recursive) throw new Error("Folder is not empty");
+      if (hasChildren) {
+        for (const candidate of [...backing.nodes.keys()]) {
+          if (candidate.startsWith(`${path}/`)) backing.nodes.delete(candidate);
+        }
+      }
+      backing.nodes.delete(path);
+      hooks.afterRmdir?.(path, backing);
     }
   } as DataAdapter;
 
@@ -163,6 +182,7 @@ export function persistentObsidianVault(
       const folder = makeFolder(path);
       backing.nodes.set(path, { kind: "folder", folder });
       backing.createdPaths.push(path);
+      hooks.afterCreateFolder?.(path, backing);
       return folder;
     },
     async read(file: TFile): Promise<string> {

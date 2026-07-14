@@ -57,7 +57,6 @@ export interface StoredTransactionBlob {
   readonly text: string;
   readonly byteLength: number;
   readonly sha256: string;
-  readonly ownership: VaultOwnedFile;
 }
 
 export interface TransactionRecord {
@@ -70,8 +69,6 @@ export interface TransactionRecord {
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly checksum: string;
-  readonly manifestOwnership: VaultOwnedFile;
-  readonly folderOwnership: VaultOwnedFolder;
 }
 
 export interface TransactionReceiptPlan {
@@ -88,7 +85,6 @@ export interface VerifiedTransactionReceipt extends TransactionReceiptPlan {
   readonly schemaVersion: 1;
   readonly transactionId: string;
   readonly checksum: string;
-  readonly ownership: VaultOwnedFile;
 }
 
 export interface ObsidianTransactionStoreOptions {
@@ -127,9 +123,22 @@ export class TransactionWriteConflictError extends Error {
 export class TransactionWriteAmbiguousError extends Error {
   readonly code = "transaction_write_ambiguous";
 
-  constructor(readonly operation: unknown) {
+  constructor(
+    readonly transactionId: string,
+    readonly outcome: "applied" | "unknown",
+    readonly operationError: unknown
+  ) {
     super("Galley could not prove the transaction metadata mutation outcome.");
     this.name = "TransactionWriteAmbiguousError";
+  }
+}
+
+export class TransactionHandleUntrustedError extends Error {
+  readonly code = "transaction_handle_untrusted";
+
+  constructor() {
+    super("Galley transaction handle does not belong to this store instance.");
+    this.name = "TransactionHandleUntrustedError";
   }
 }
 
@@ -167,6 +176,22 @@ interface ReceiptData extends TransactionReceiptPlan {
   checksum: string;
 }
 
+interface OwnedStoredTransactionBlob extends StoredTransactionBlob {
+  readonly ownership: VaultOwnedFile;
+}
+
+interface OpenedTransaction {
+  readonly record: TransactionRecord;
+  readonly blobs: readonly OwnedStoredTransactionBlob[];
+  readonly manifestOwnership: VaultOwnedFile;
+  readonly folderOwnership: VaultOwnedFolder;
+}
+
+interface TrustedTransactionHandle {
+  readonly id: string;
+  readonly manifestOwnership: VaultOwnedFile;
+}
+
 const BLOB_FILENAMES: Readonly<Record<TransactionBlobRole, string>> = {
   "pair-html-before": "blob-pair-html-before.txt",
   "pair-html-after": "blob-pair-html-after.txt",
@@ -195,6 +220,7 @@ export class ObsidianTransactionStore {
   readonly #randomUUID: () => string;
   readonly #now: () => Date;
   readonly #maxPrepareAttempts: number;
+  readonly #handles = new WeakMap<TransactionRecord, TrustedTransactionHandle>();
 
   constructor(
     private readonly files: ObsidianVaultFileStore,
@@ -229,10 +255,15 @@ export class ObsidianTransactionStore {
       const folderResult = await this.files.createFolderExclusive(folderPath, signal);
       if (folderResult.status === "collision") continue;
       if (folderResult.status === "ambiguous") {
-        throw new TransactionWriteAmbiguousError(folderResult);
+        throw new TransactionWriteAmbiguousError(
+          id,
+          folderResult.outcome === "applied" ? "applied" : "unknown",
+          folderResult
+        );
       }
 
-      const ownedBlobs: StoredTransactionBlob[] = [];
+      const ownedBlobs: OwnedStoredTransactionBlob[] = [];
+      let manifest: TransactionManifest;
       try {
         for (const blob of blobs) {
           throwIfAborted(signal);
@@ -241,7 +272,11 @@ export class ObsidianTransactionStore {
           const result = await this.files.createExclusive(path, blob.text, signal);
           if (result.status !== "created") {
             if (result.status === "ambiguous") {
-              throw new TransactionWriteAmbiguousError(result);
+              throw new TransactionWriteAmbiguousError(
+                id,
+                result.outcome === "applied" ? "applied" : "unknown",
+                result
+              );
             }
             throw new TransactionWriteConflictError();
           }
@@ -272,22 +307,60 @@ export class ObsidianTransactionStore {
           createdAt: timestamp,
           updatedAt: timestamp
         };
-        const manifest = await signed(unsigned);
-        const result = await this.files.createExclusive(
-          `${folderPath}/${MANIFEST_NAME}`,
-          serializeCanonical(manifest),
-          signal
-        );
-        if (result.status !== "created") {
-          if (result.status === "ambiguous") {
-            throw new TransactionWriteAmbiguousError(result);
-          }
-          throw new TransactionWriteConflictError();
-        }
-        return await this.open(id, signal);
+        manifest = await signed(unsigned);
       } catch (error) {
         await this.#cleanupIncomplete(ownedBlobs, folderResult.folder);
         throw error;
+      }
+
+      const manifestPath = `${folderPath}/${MANIFEST_NAME}`;
+      let manifestResult;
+      try {
+        manifestResult = await this.files.createExclusive(
+          manifestPath,
+          serializeCanonical(manifest),
+          signal
+        );
+      } catch (error) {
+        const current = await this.#observeAfterPossibleManifest(manifestPath);
+        if (current === null) {
+          await this.#cleanupIncomplete(ownedBlobs, folderResult.folder);
+          throw error;
+        }
+        throw new TransactionWriteAmbiguousError(id, "unknown", error);
+      }
+      if (manifestResult.status === "collision") {
+        throw new TransactionWriteAmbiguousError(
+          id,
+          "unknown",
+          new TransactionWriteConflictError()
+        );
+      }
+      if (manifestResult.status === "ambiguous") {
+        throw new TransactionWriteAmbiguousError(
+          id,
+          manifestResult.outcome === "applied" ? "applied" : "unknown",
+          manifestResult
+        );
+      }
+      if (signal?.aborted) {
+        throw new TransactionWriteAmbiguousError(
+          id,
+          "applied",
+          new DOMException("Aborted", "AbortError")
+        );
+      }
+      try {
+        const opened = await this.#openStrict(id);
+        if (signal?.aborted) {
+          throw new DOMException("Aborted", "AbortError");
+        }
+        if (!sameOwned(opened.manifestOwnership, manifestResult.file)) {
+          throw new TransactionRecordInvalidError();
+        }
+        return this.#brand(opened);
+      } catch (error) {
+        throw new TransactionWriteAmbiguousError(id, "applied", error);
       }
     }
     throw new Error("Galley could not allocate a unique transaction folder.");
@@ -296,7 +369,7 @@ export class ObsidianTransactionStore {
   async open(id: string, signal?: AbortSignal): Promise<TransactionRecord> {
     const canonicalId = requireCanonicalUuid(id);
     try {
-      return await this.#openStrict(canonicalId, signal);
+      return this.#brand(await this.#openStrict(canonicalId, signal));
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") throw error;
       await this.#quarantineBestEffort(canonicalId, "record-invalid");
@@ -330,40 +403,64 @@ export class ObsidianTransactionStore {
     next: TransactionPhase,
     signal?: AbortSignal
   ): Promise<TransactionRecord> {
-    if (NEXT_PHASE[record.phase] !== next || !isPhase(next)) {
+    const current = await this.#currentFor(record, signal);
+    if (NEXT_PHASE[current.record.phase] !== next || !isPhase(next)) {
       throw new TransactionPhaseInvalidError();
-    }
-    throwIfAborted(signal);
-    const current = await this.#openStrict(requireCanonicalUuid(record.id), signal);
-    if (!sameOwned(current.manifestOwnership, record.manifestOwnership)) {
-      throw new TransactionWriteConflictError();
     }
     const manifest = await signed({
       schemaVersion: 1 as const,
-      transactionId: current.id,
-      kind: current.kind,
+      transactionId: current.record.id,
+      kind: current.record.kind,
       phase: next,
-      scope: current.scope,
-      blobs: current.blobs.map(({ role, filename, byteLength, sha256 }) => ({
+      scope: current.record.scope,
+      blobs: current.record.blobs.map(({ role, filename, byteLength, sha256 }) => ({
         role,
         filename,
         byteLength,
         sha256
       })),
-      createdAt: current.createdAt,
+      createdAt: current.record.createdAt,
       updatedAt: validTimestamp(this.#now())
     });
     const result = await this.files.modifyOwned(
-      record.manifestOwnership,
+      current.manifestOwnership,
       serializeCanonical(manifest),
       signal
     );
     if (result.status === "conflict") throw new TransactionWriteConflictError();
     if (result.status === "ambiguous") {
-      await this.#quarantineBestEffort(record.id, "write-ambiguous");
-      throw new TransactionWriteAmbiguousError(result);
+      throw new TransactionWriteAmbiguousError(
+        current.record.id,
+        result.outcome === "applied" ? "applied" : "unknown",
+        result
+      );
     }
-    return await this.open(record.id, signal);
+    if (signal?.aborted) {
+      throw new TransactionWriteAmbiguousError(
+        current.record.id,
+        "applied",
+        new DOMException("Aborted", "AbortError")
+      );
+    }
+    try {
+      const reopened = await this.#openStrict(current.record.id);
+      if (signal?.aborted) {
+        throw new DOMException("Aborted", "AbortError");
+      }
+      if (
+        reopened.record.phase !== next ||
+        !sameOwned(reopened.manifestOwnership, result.file)
+      ) {
+        throw new TransactionRecordInvalidError();
+      }
+      return this.#brand(reopened);
+    } catch (error) {
+      throw new TransactionWriteAmbiguousError(
+        current.record.id,
+        "applied",
+        error
+      );
+    }
   }
 
   async writeReceipt(
@@ -371,28 +468,38 @@ export class ObsidianTransactionStore {
     plan: TransactionReceiptPlan,
     signal?: AbortSignal
   ): Promise<VerifiedTransactionReceipt> {
-    const current = await this.#openStrict(requireCanonicalUuid(record.id), signal);
-    if (!sameOwned(current.manifestOwnership, record.manifestOwnership)) {
-      throw new TransactionWriteConflictError();
-    }
+    const current = await this.#currentFor(record, signal);
     const checked = validReceiptPlan(plan);
     if (
-      checked.pair.htmlPath !== record.scope.pair.html ||
-      checked.pair.sidecarPath !== record.scope.pair.sidecar
+      checked.pair.htmlPath !== current.record.scope.pair.html ||
+      checked.pair.sidecarPath !== current.record.scope.pair.sidecar
     ) {
       throw new TransactionReceiptInvalidError();
     }
     const receipt = await signed({
       schemaVersion: 1 as const,
-      transactionId: record.id,
+      transactionId: current.record.id,
       pair: checked.pair,
       historyHashes: [...checked.historyHashes]
     });
-    const path = `${transactionFolder(record.id)}/${RECEIPT_NAME}`;
+    const path = `${transactionFolder(current.record.id)}/${RECEIPT_NAME}`;
     const result = await this.files.createExclusive(path, serializeCanonical(receipt), signal);
-    if (result.status === "ambiguous") throw new TransactionWriteAmbiguousError(result);
+    if (result.status === "ambiguous") {
+      throw new TransactionWriteAmbiguousError(
+        current.record.id,
+        result.outcome === "applied" ? "applied" : "unknown",
+        result
+      );
+    }
     if (result.status === "collision") return await this.verifyReceipt(record, checked, signal);
-    return { ...receipt, ownership: result.file };
+    if (signal?.aborted) {
+      throw new TransactionWriteAmbiguousError(
+        current.record.id,
+        "applied",
+        new DOMException("Aborted", "AbortError")
+      );
+    }
+    return freezeReceipt(receipt);
   }
 
   async verifyReceipt(
@@ -400,15 +507,16 @@ export class ObsidianTransactionStore {
     expected: TransactionReceiptPlan,
     signal?: AbortSignal
   ): Promise<VerifiedTransactionReceipt> {
+    const current = await this.#currentFor(record, signal);
     try {
       const plan = validReceiptPlan(expected);
       if (
-        plan.pair.htmlPath !== record.scope.pair.html ||
-        plan.pair.sidecarPath !== record.scope.pair.sidecar
+        plan.pair.htmlPath !== current.record.scope.pair.html ||
+        plan.pair.sidecarPath !== current.record.scope.pair.sidecar
       ) {
         throw new TransactionReceiptInvalidError();
       }
-      const path = `${transactionFolder(requireCanonicalUuid(record.id))}/${RECEIPT_NAME}`;
+      const path = `${transactionFolder(current.record.id)}/${RECEIPT_NAME}`;
       const owned = await this.files.readTextStable(path, signal);
       if (!owned || owned.byteLength > MAX_MANIFEST_BYTES) {
         throw new TransactionReceiptInvalidError();
@@ -421,7 +529,7 @@ export class ObsidianTransactionStore {
         "historyHashes",
         "checksum"
       ]);
-      if (value.schemaVersion !== 1 || value.transactionId !== record.id) {
+      if (value.schemaVersion !== 1 || value.transactionId !== current.record.id) {
         throw new TransactionReceiptInvalidError();
       }
       const parsedPlan = validReceiptPlan({
@@ -431,7 +539,7 @@ export class ObsidianTransactionStore {
       const checksum = stringValue(value.checksum);
       const unsigned = {
         schemaVersion: 1 as const,
-        transactionId: record.id,
+        transactionId: current.record.id,
         pair: parsedPlan.pair,
         historyHashes: [...parsedPlan.historyHashes]
       };
@@ -442,9 +550,9 @@ export class ObsidianTransactionStore {
       ) {
         throw new TransactionReceiptInvalidError();
       }
-      return { ...unsigned, checksum, ownership: owned };
+      return freezeReceipt({ ...unsigned, checksum });
     } catch (error) {
-      await this.#quarantineBestEffort(record.id, "receipt-invalid");
+      await this.#quarantineBestEffort(current.record.id, "receipt-invalid");
       if (error instanceof TransactionReceiptInvalidError) throw error;
       throw new TransactionReceiptInvalidError();
     }
@@ -454,22 +562,35 @@ export class ObsidianTransactionStore {
     record: TransactionRecord,
     signal?: AbortSignal
   ): Promise<{ status: "cleaned" | "conflict" | "ambiguous" }> {
-    if (record.phase !== "completed") throw new TransactionPhaseInvalidError();
-    throwIfAborted(signal);
+    let currentRecord: OpenedTransaction;
+    try {
+      currentRecord = await this.#currentFor(record, signal);
+    } catch (error) {
+      if (
+        error instanceof TransactionRecordInvalidError ||
+        error instanceof TransactionWriteConflictError
+      ) {
+        return { status: "conflict" };
+      }
+      throw error;
+    }
+    if (currentRecord.record.phase !== "completed") {
+      throw new TransactionPhaseInvalidError();
+    }
     const known: VaultOwnedFile[] = [
-      record.manifestOwnership,
-      ...record.blobs.map(({ ownership }) => ownership)
+      currentRecord.manifestOwnership,
+      ...currentRecord.blobs.map(({ ownership }) => ownership)
     ];
     for (const owned of known) {
       const current = await this.files.readTextStable(owned.path, signal);
       if (!sameOwned(current, owned)) return { status: "conflict" };
     }
-    const folderPath = transactionFolder(record.id);
+    const folderPath = transactionFolder(currentRecord.record.id);
     const allowed = new Set([
       MANIFEST_NAME,
       RECEIPT_NAME,
       QUARANTINE_NAME,
-      ...record.blobs.map(({ role }) => BLOB_FILENAMES[role])
+      ...currentRecord.record.blobs.map(({ role }) => BLOB_FILENAMES[role])
     ]);
     const entries = await this.files.list(folderPath, signal);
     if (entries.some(({ name, kind }) => kind !== "file" || !allowed.has(name))) {
@@ -480,12 +601,32 @@ export class ObsidianTransactionStore {
       const owned = await this.files.readTextStable(`${folderPath}/${name}`, signal);
       if (owned) optional.push(owned);
     }
-    for (const owned of [...record.blobs.map(({ ownership }) => ownership), ...optional, record.manifestOwnership]) {
-      const result = await this.files.removeOwned(owned, signal);
+    let mutated = false;
+    for (const owned of [
+      ...currentRecord.blobs.map(({ ownership }) => ownership),
+      ...optional,
+      currentRecord.manifestOwnership
+    ]) {
+      let result;
+      try {
+        result = await this.files.removeOwned(owned, signal);
+      } catch (error) {
+        if (mutated) return { status: "ambiguous" };
+        throw error;
+      }
       if (result.status === "conflict") return { status: "conflict" };
       if (result.status === "ambiguous") return { status: "ambiguous" };
+      mutated = true;
     }
-    const folder = await this.files.removeEmptyFolderOwned(record.folderOwnership, signal);
+    let folder;
+    try {
+      folder = await this.files.removeEmptyFolderOwned(
+        currentRecord.folderOwnership,
+        signal
+      );
+    } catch {
+      return { status: "ambiguous" };
+    }
     return folder.status === "removed"
       ? { status: "cleaned" }
       : folder.status === "conflict"
@@ -493,7 +634,7 @@ export class ObsidianTransactionStore {
         : { status: "ambiguous" };
   }
 
-  async #openStrict(id: string, signal?: AbortSignal): Promise<TransactionRecord> {
+  async #openStrict(id: string, signal?: AbortSignal): Promise<OpenedTransaction> {
     const folderPath = transactionFolder(id);
     const manifestOwned = await this.files.readTextStable(
       `${folderPath}/${MANIFEST_NAME}`,
@@ -503,7 +644,7 @@ export class ObsidianTransactionStore {
       throw new TransactionRecordInvalidError();
     }
     const manifest = await parseManifest(manifestOwned.text, id);
-    const storedBlobs: StoredTransactionBlob[] = [];
+    const storedBlobs: OwnedStoredTransactionBlob[] = [];
     for (const blob of manifest.blobs) {
       const path = `${folderPath}/${BLOB_FILENAMES[blob.role]}`;
       const owned = await this.files.readTextStable(path, signal);
@@ -526,22 +667,49 @@ export class ObsidianTransactionStore {
       ({ path, kind }) => path === folderPath && kind === "folder"
     );
     if (!folderEntry) throw new TransactionRecordInvalidError();
-    return {
+    const record: TransactionRecord = {
       schemaVersion: 1,
       id,
       kind: manifest.kind,
       phase: manifest.phase,
       scope: manifest.scope,
-      blobs: storedBlobs,
+      blobs: storedBlobs.map(({ ownership: _ownership, ...blob }) => blob),
       createdAt: manifest.createdAt,
       updatedAt: manifest.updatedAt,
-      checksum: manifest.checksum,
+      checksum: manifest.checksum
+    };
+    return {
+      record,
+      blobs: storedBlobs,
       manifestOwnership: manifestOwned,
       folderOwnership: {
         path: folderPath,
         identity: folderEntry.identity as VaultOwnedFolder["identity"]
       }
     };
+  }
+
+  async #currentFor(
+    record: TransactionRecord,
+    signal?: AbortSignal
+  ): Promise<OpenedTransaction> {
+    const handle = this.#handles.get(record);
+    if (!handle) throw new TransactionHandleUntrustedError();
+    throwIfAborted(signal);
+    const current = await this.#openStrict(handle.id, signal);
+    if (!sameOwned(current.manifestOwnership, handle.manifestOwnership)) {
+      throw new TransactionWriteConflictError();
+    }
+    return current;
+  }
+
+  #brand(opened: OpenedTransaction): TransactionRecord {
+    const record = freezeRecord(opened.record);
+    this.#handles.set(record, {
+      id: record.id,
+      manifestOwnership: opened.manifestOwnership
+    });
+    return record;
   }
 
   async #quarantineBestEffort(id: string, reason: string): Promise<void> {
@@ -561,7 +729,7 @@ export class ObsidianTransactionStore {
   }
 
   async #cleanupIncomplete(
-    blobs: readonly StoredTransactionBlob[],
+    blobs: readonly OwnedStoredTransactionBlob[],
     folder: VaultOwnedFolder
   ): Promise<void> {
     for (const blob of [...blobs].reverse()) {
@@ -569,6 +737,38 @@ export class ObsidianTransactionStore {
     }
     await this.files.removeEmptyFolderOwned(folder).catch(() => undefined);
   }
+
+  async #observeAfterPossibleManifest(
+    path: string
+  ): Promise<VaultOwnedFile | null | undefined> {
+    try {
+      return await this.files.readTextStable(path);
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+function freezeRecord(record: TransactionRecord): TransactionRecord {
+  const pair = Object.freeze({ ...record.scope.pair });
+  const scope = Object.freeze({
+    pair,
+    ...(record.scope.historyDocumentId === undefined
+      ? {}
+      : { historyDocumentId: record.scope.historyDocumentId })
+  });
+  const blobs = Object.freeze(
+    record.blobs.map((blob) => Object.freeze({ ...blob }))
+  );
+  return Object.freeze({ ...record, scope, blobs });
+}
+
+function freezeReceipt(
+  receipt: Omit<VerifiedTransactionReceipt, never>
+): VerifiedTransactionReceipt {
+  const pair = Object.freeze({ ...receipt.pair });
+  const historyHashes = Object.freeze([...receipt.historyHashes]);
+  return Object.freeze({ ...receipt, pair, historyHashes });
 }
 
 async function parseManifest(text: string, expectedId: string): Promise<TransactionManifest> {

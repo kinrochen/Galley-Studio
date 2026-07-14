@@ -85,6 +85,42 @@ describe("ObsidianVaultFileStore", () => {
     expect(backing.read("a.txt")).toBe("external");
   });
 
+  it("does not claim applied ownership when failed create leaves peer same bytes", async () => {
+    const backing = new PersistentObsidianBacking();
+    const store = new ObsidianVaultFileStore(
+      persistentObsidianVault(backing, {
+        afterCreate(path) {
+          backing.replace(path, "mine");
+          throw new Error("create returned no identity");
+        }
+      })
+    );
+    await expect(store.createExclusive("a.txt", "mine")).resolves.toMatchObject({
+      status: "ambiguous",
+      operation: "create",
+      outcome: "unknown"
+    });
+    expect(backing.read("a.txt")).toBe("mine");
+  });
+
+  it("does not downgrade create-then-peer-replacement-then-throw to collision", async () => {
+    const backing = new PersistentObsidianBacking();
+    const store = new ObsidianVaultFileStore(
+      persistentObsidianVault(backing, {
+        afterCreate(path) {
+          backing.replace(path, "peer");
+          throw new Error("after possible create");
+        }
+      })
+    );
+    await expect(store.createExclusive("a.txt", "mine")).resolves.toMatchObject({
+      status: "ambiguous",
+      operation: "create",
+      outcome: "unknown"
+    });
+    expect(backing.read("a.txt")).toBe("peer");
+  });
+
   it("conditionally modifies and removes only exact owned identity and bytes", async () => {
     const backing = new PersistentObsidianBacking({ "a.txt": "one" });
     const store = new ObsidianVaultFileStore(persistentObsidianVault(backing));
@@ -201,4 +237,54 @@ describe("ObsidianVaultFileStore", () => {
       code: "vault_folder_conflict"
     });
   });
+
+  it("classifies folder-create abort and throw after possible mutation as ambiguous", async () => {
+    const backing = new PersistentObsidianBacking();
+    const controller = new AbortController();
+    const store = new ObsidianVaultFileStore(
+      persistentObsidianVault(backing, {
+        afterCreateFolder(path) {
+          if (path !== "created") return;
+          controller.abort();
+          throw new Error("after folder mutation");
+        }
+      })
+    );
+    await expect(store.ensureFolder("created", controller.signal)).rejects.toMatchObject({
+      code: "vault_mutation_ambiguous",
+      aborted: true
+    });
+    expect(backing.nodes.get("created")?.kind).toBe("folder");
+  });
+
+  it("uses non-recursive empty-folder removal and preserves a racing child", async () => {
+    const backing = new PersistentObsidianBacking();
+    let injected = false;
+    const store = new ObsidianVaultFileStore(
+      persistentObsidianVault(backing, {
+        beforeRmdir(path) {
+          if (injected) return;
+          injected = true;
+          backing.replace(`${path}/peer.txt`, "peer");
+        }
+      })
+    );
+    await store.ensureFolder("folder");
+    const folder = await store.createFolderExclusive("owned");
+    if (folder.status !== "created") throw new Error("expected folder");
+    await expect(store.removeEmptyFolderOwned(folder.folder)).resolves.toMatchObject({
+      status: "ambiguous"
+    });
+    expect(backing.read("owned/peer.txt")).toBe("peer");
+  });
+
+  it.each(["notes/a\u0080b.txt", "notes/a\u0085b.txt", "notes/a\u009fb.txt", "notes/a\u200bb.txt"])(
+    "rejects Unicode control or format path %j",
+    async (path) => {
+      const store = new ObsidianVaultFileStore(persistentObsidianVault());
+      await expect(store.readTextStable(path)).rejects.toMatchObject({
+        code: "vault_path_invalid"
+      });
+    }
+  );
 });

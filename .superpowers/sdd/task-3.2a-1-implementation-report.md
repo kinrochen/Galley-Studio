@@ -2,7 +2,7 @@
 
 ## Status
 
-DONE
+DONE — independent-review R1 remediation included
 
 - Required base: `d3c65d5bc9f7f3f2201e3abc8ca99cce29a22d48`
 - Base HEAD verified before edits: exact match
@@ -129,7 +129,8 @@ are evidence only.
   `ObsidianTransactionStoreOptions`.
 - Explicit errors: `TransactionRecordInvalidError`,
   `TransactionPhaseInvalidError`, `TransactionWriteConflictError`,
-  `TransactionWriteAmbiguousError`, and `TransactionReceiptInvalidError`.
+  `TransactionWriteAmbiguousError`, `TransactionHandleUntrustedError`, and
+  `TransactionReceiptInvalidError`.
 - Operations: `prepare`, `open`, `list`, `transition`, `writeReceipt`,
   `verifyReceipt`, and `cleanup`.
 
@@ -238,13 +239,13 @@ Final post-report command results are recorded below after the last full gate:
 
 ```text
 npm test -- tests/documents/ObsidianVaultFileStore.test.ts tests/documents/ObsidianTransactionStore.test.ts
-2 files passed; 49 tests passed; exit 0
+2 files passed; 64 tests passed; exit 0
 
 npm run test:typecheck
 exit 0
 
 npm test
-40 files passed; 901 tests passed; exit 0
+40 files passed; 916 tests passed; exit 0
 
 npm run build
 exit 0
@@ -274,10 +275,97 @@ structural port.
   reopens fresh exact owned handles from durable bytes. Task 3.2a.2 must still
   use durable intent before target mutation and never treat stats as ownership.
 - `Vault.create` does not expose a typed collision-vs-after-create error in the
-  1.11.4 declaration. The wrapper therefore fails safe: pre-existing and
-  different-byte races are collisions, while an exception followed by the
-  requested same bytes is ambiguous rather than falsely claiming ownership.
+  1.11.4 declaration. The wrapper therefore reports only a precheck-visible
+  existing path as `collision`. Once `Vault.create` has been invoked, any throw
+  without a returned `TFile` identity is `ambiguous/unknown`, regardless of the
+  current bytes, and the current file is preserved.
 - This primitive stores and verifies recovery material but does not decide
   old/new pair roll-forward, rollback, history retention, combined receipts,
   or explicit quarantine resolution. Those behaviors belong exclusively to
   Task 3.2a.2, which was not started here.
+
+## Independent-review R1 remediation
+
+The independent review at reviewed HEAD `bbcb8c575a7f6465366f9de11e951f8cfc9cde41`
+reported a nine-case adversarial matrix. All cases were first made permanent,
+then run before production remediation:
+
+```text
+npm test -- tests/documents/ObsidianVaultFileStore.test.ts tests/documents/ObsidianTransactionStore.test.ts
+Test Files  2 failed (2)
+Tests       14 failed | 49 passed (63)
+exit 1
+```
+
+Four additional parameter rows cover C1/format controls, and a non-recursive
+folder-deletion race was added from the same review, hence 14 initial failures
+for the nine finding groups. A further post-manifest strict-reopen failure test
+was added while hardening the outer await boundary.
+
+### Provenance and durable authority
+
+- Public `TransactionRecord` and `StoredTransactionBlob` values are now pure
+  data: no `TFile`, `TFolder`, or owned observation is exposed through them.
+- Every `prepare`, `open`, and `list` result is recursively frozen at the
+  record, scope, pair, blob-array, and blob levels. The store records an
+  unforgeable private `WeakMap` provenance entry containing the canonical
+  transaction ID and exact manifest ownership snapshot.
+- `transition`, receipt write/verification, and cleanup reject a forged,
+  structured-cloned, or foreign-store record with
+  `transaction_handle_untrusted`. A fresh store can strictly `open` the durable
+  record to obtain its own valid handle. A once-valid stale handle fails exact
+  manifest ownership comparison with `transaction_write_conflict`.
+- After provenance validation, every operation derives the transaction folder
+  from the trusted canonical ID and strictly reopens the current durable
+  manifest. Durable phase and scope—not public object fields—authorize the
+  phase edge and receipt pair. Cleanup derives its closed paths from the
+  reopened manifest and uses only the reopened internal owned observations.
+  Injecting an exact observation for an external victim cannot cause even a
+  victim-path read through cleanup.
+
+### Possible-mutation handling
+
+- Once `Vault.create` is invoked and throws without a returned `TFile`, a
+  present same-byte peer, present different-byte peer, unstable re-observation,
+  or verified absence is never promoted to owned success/collision. The result
+  is typed `ambiguous` with `outcome: "unknown"`; only a precheck-visible path
+  is a collision.
+- Folder creation normal-return and throw paths verify the exact returned
+  `TFolder`; abort, replacement, or any thrown call is
+  `vault_mutation_ambiguous`, never a benign existing-folder race or plain
+  post-mutation `AbortError`.
+- Prepared blobs may be cleaned only before a durable manifest could exist.
+  Once manifest creation returns created/ambiguous/collision or a post-call
+  observation is unprovable, the staged blobs and manifest are preserved.
+  Abort after manifest creation and strict-reopen failure both throw
+  `transaction_write_ambiguous` carrying canonical transaction ID and
+  `applied/unknown` outcome. A fresh store reopens the complete WAL.
+- Phase update uses the strictly reopened durable phase. After exact manifest
+  modification, abort, strict-reopen failure, drift, or verification failure is
+  `transaction_write_ambiguous`; the updated manifest is not described as the
+  previous phase.
+- Cleanup tracks whether any member was removed; a later abort/error becomes
+  an ambiguous cleanup result rather than a clean precommit abort.
+
+### Path and directory hardening
+
+- `canonicalVaultPath` now rejects Unicode general categories `Cc` and `Cf`,
+  covering C0, DEL, C1 including `U+0085`, and prohibited format controls such
+  as `U+200B`, in addition to all earlier path restrictions.
+- Empty owned transaction folders are removed with
+  `DataAdapter.rmdir(path, false)`, the declared non-recursive primitive. The
+  persistent fixture now implements that exact contract. A child injected
+  after listing but before removal is preserved and the operation becomes
+  ambiguous instead of recursively deleting the child.
+
+### R1 regression GREEN
+
+```text
+npm test -- tests/documents/ObsidianVaultFileStore.test.ts tests/documents/ObsidianTransactionStore.test.ts
+Test Files  2 passed (2)
+Tests       64 passed (64)
+exit 0
+
+npm run test:typecheck
+exit 0
+```
