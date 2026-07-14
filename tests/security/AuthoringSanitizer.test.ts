@@ -103,10 +103,77 @@ describe("sanitizeAuthoringDocument", () => {
     );
   });
 
+  it("classifies percent-decoded URL views without rewriting safe encoded paths", () => {
+    const result = sanitizeAuthoringDocument(
+      '<!doctype html><html><head></head><body><a id="encoded-colon" href="javascript%3Aalert(1)">x</a><a id="encoded-name" href="jav%61script:alert(1)">x</a><a id="encoded-control" href="%0Ajavascript:alert(1)">x</a><a id="encoded-network" href="%2f%2fevil.example/x">x</a><img id="double-encoded" src="%252f%252fevil.example/x"><a id="malformed-encoding" href="images/bad%2">x</a><a id="too-deep" href="%252525252F%252525252Fevil.example/x">x</a><img id="safe-encoded" src="images/a%20b.png"></body></html>'
+    );
+    const parsed = new DOMParser().parseFromString(result.html, "text/html");
+
+    for (const id of [
+      "encoded-colon",
+      "encoded-name",
+      "encoded-control",
+      "encoded-network",
+      "malformed-encoding",
+      "too-deep"
+    ]) {
+      expect(parsed.querySelector(`#${id}`)?.hasAttribute("href")).toBe(false);
+    }
+    expect(parsed.querySelector("#double-encoded")?.hasAttribute("src")).toBe(
+      false
+    );
+    expect(parsed.querySelector("#safe-encoded")?.getAttribute("src")).toBe(
+      "images/a%20b.png"
+    );
+    expect(result.removed.filter(({ kind }) => kind === "url")).toEqual([
+      { kind: "url", name: "href" },
+      { kind: "url", name: "href" },
+      { kind: "url", name: "href" },
+      { kind: "url", name: "href" },
+      { kind: "url", name: "src" },
+      { kind: "url", name: "href" },
+      { kind: "url", name: "href" }
+    ]);
+  });
+
+  it("reports invalid link targets while retaining blank-target hardening", () => {
+    const result = sanitizeAuthoringDocument(
+      '<!doctype html><html><head></head><body><a id="top" href="#x" target="_top">top</a><a id="blank" href="#x" target="_blank" rel="external">blank</a></body></html>'
+    );
+    const parsed = new DOMParser().parseFromString(result.html, "text/html");
+
+    expect(parsed.querySelector("#top")?.hasAttribute("target")).toBe(false);
+    expect(result.removed).toContainEqual({
+      kind: "attribute",
+      name: "target"
+    });
+    expect(parsed.querySelector("#blank")?.getAttribute("target")).toBe(
+      "_blank"
+    );
+    expect(parsed.querySelector("#blank")?.getAttribute("rel")?.split(" ")).toEqual(
+      expect.arrayContaining(["external", "noopener", "noreferrer"])
+    );
+  });
+
+  it("allows fake shell markup in comments and quoted attributes", () => {
+    const result = sanitizeAuthoringDocument(
+      '<!doctype html><html><head><meta name="x" content="</head><body>"><!-- </head><body> --></head><body><p title="</body></html>">safe</p><!-- </body></html> --></body></html>'
+    );
+
+    expect(result.html).toContain('content="</head><body>"');
+    expect(result.html).toContain('title="</body></html>"');
+  });
+
   it.each([
     "<p>fragment</p>",
     "<!doctype html><html><head></head></html>",
-    "<html><head></head><body>x</body></html>"
+    "<html><head></head><body>x</body></html>",
+    "<!doctype html>OUTSIDE<html><head></head><body>x</body></html>",
+    "<!doctype html><html><head></head><body>x</body>OUTSIDE</html>",
+    '<!doctype html><html><head></head><body><p title="fake </body></html>',
+    "<!doctype html><html><head></head><body><style>fake </body></html>",
+    "<!doctype html><html><head></head><body>x<body>y</body></html>",
+    "<!doctype html><html><head></head><body>x</head></body></html>"
   ])("rejects input without a complete standalone document shell", (html) => {
     expect(() => sanitizeAuthoringDocument(html)).toThrow(/document|doctype|body/i);
   });

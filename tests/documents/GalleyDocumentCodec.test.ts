@@ -37,13 +37,84 @@ describe("GalleyDocumentCodec", () => {
     expect(once).not.toContain("markdown");
   });
 
+  it("allows fake shell strings in fragment attributes, comments, and encoded text", () => {
+    const document: GalleyDocument = {
+      doctype: "<!DOCTYPE html>",
+      lang: "en",
+      headHtml:
+        '<meta name="x" content="</head><body>"><!-- </head><body> --><title>&lt;/head&gt;</title>',
+      bodyHtml:
+        '<p title="</body></html>">&lt;/body&gt;</p><!-- </body></html> -->'
+    };
+
+    const serialized = GalleyDocumentCodec.serialize(document);
+    const roundTrip = GalleyDocumentCodec.parse(serialized);
+
+    expect(roundTrip).toEqual(document);
+  });
+
+  it("normalizes shell-looking RCDATA text without treating it as document markup", () => {
+    const document: GalleyDocument = {
+      doctype: "<!DOCTYPE html>",
+      lang: "en",
+      headHtml: "<title>safe </head><body></title>",
+      bodyHtml: "<article>body</article>"
+    };
+
+    const roundTrip = GalleyDocumentCodec.parse(
+      GalleyDocumentCodec.serialize(document)
+    );
+
+    expect(roundTrip.headHtml).toBe(
+      "<title>safe &lt;/head&gt;&lt;body&gt;</title>"
+    );
+    expect(roundTrip.bodyHtml).toBe("<article>body</article>");
+  });
+
+  it("rejects head content that migrates into the body on document reparse", () => {
+    const document: GalleyDocument = {
+      doctype: "<!DOCTYPE html>",
+      lang: "en",
+      headHtml: "<p>migrates</p><title>x</title>",
+      bodyHtml: "<article>body</article>"
+    };
+
+    expect(() => GalleyDocumentCodec.serialize(document)).toThrow(
+      /head|round.?trip|context/i
+    );
+  });
+
+  it.each([
+    ["head plaintext", "<plaintext>consume", "<article>body</article>"],
+    ["body plaintext", "<title>x</title>", "<plaintext>consume"],
+    ["unclosed head raw text", "<title>consume", "<article>body</article>"],
+    ["unclosed body raw text", "<title>x</title>", "<script>consume"]
+  ])("rejects %s during serialization", (_label, headHtml, bodyHtml) => {
+    const document: GalleyDocument = {
+      doctype: "<!DOCTYPE html>",
+      lang: "en",
+      headHtml,
+      bodyHtml
+    };
+
+    expect(() => GalleyDocumentCodec.serialize(document)).toThrow(
+      /fragment|raw|round.?trip|shell|unterminated/i
+    );
+  });
+
   it.each([
     "<article>fragment</article>",
     "<html><head></head><body>x</body></html>",
     "<!doctype html><head></head><body>x</body>",
     "<!doctype html><html><body>x</body></html>",
     "<!doctype html><html><head></head></html>",
-    "<!doctype html><html><head></head><body>x</body></html><html><head></head><body>y</body></html>"
+    "<!doctype html><html><head></head><body>x</body></html><html><head></head><body>y</body></html>",
+    "<!doctype html>OUTSIDE<html><head></head><body>x</body></html>",
+    "<!doctype html><html><head></head><body>x</body>OUTSIDE</html>",
+    '<!doctype html><html><head></head><body><p title="fake </body></html>',
+    "<!doctype html><html><head></head><body><script>fake </body></html>",
+    "<!doctype html><html><head></head><body>x<body>y</body></html>",
+    "<!doctype html><html><head></head><body>x</head></body></html>"
   ])("rejects a missing, malformed, or repeated shell: %s", (html) => {
     expect(() => GalleyDocumentCodec.parse(html)).toThrow(/document|doctype|shell/i);
   });

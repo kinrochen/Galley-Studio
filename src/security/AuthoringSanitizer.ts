@@ -4,6 +4,7 @@ import createDOMPurify, {
   type RemovedElement,
   type WindowLike
 } from "dompurify";
+import { locateHtmlDocument } from "../documents/HtmlShellScanner";
 import { sanitizeInlineStyle } from "./InlineStyleSanitizer";
 
 export interface SanitizedDocument {
@@ -155,6 +156,7 @@ const TAG_ATTRIBUTES: Readonly<Record<string, ReadonlySet<string>>> = {
 };
 
 const URL_ATTRIBUTES = new Set(["cite", "href", "poster", "src"]);
+const MAX_URL_DECODE_PASSES = 4;
 const DOMPURIFY_ATTRIBUTES = [
   ...GLOBAL_ATTRIBUTES,
   ...GALLEY_ATTRIBUTES,
@@ -177,8 +179,12 @@ const PURIFY_CONFIG: Config = {
 };
 
 export function sanitizeAuthoringDocument(html: string): SanitizedDocument {
-  assertStandaloneShell(html);
-  const parsed = new DOMParser().parseFromString(html.trim(), "text/html");
+  const source = html.trim();
+  locateHtmlDocument(source, {
+    requireHead: false,
+    allowSurroundingContent: false
+  });
+  const parsed = new DOMParser().parseFromString(source, "text/html");
   const removed: SanitizedDocument["removed"] = [];
 
   preprocessDocument(parsed, removed);
@@ -189,8 +195,13 @@ export function sanitizeAuthoringDocument(html: string): SanitizedDocument {
   recordPurifyRemovals(purifier.removed, removed);
 
   const cleanDocument = new DOMParser().parseFromString(clean, "text/html");
+  const sanitizedHtml = `<!DOCTYPE html>${cleanDocument.documentElement.outerHTML}`;
+  locateHtmlDocument(sanitizedHtml, {
+    requireHead: true,
+    allowSurroundingContent: false
+  });
   return {
-    html: `<!DOCTYPE html>${cleanDocument.documentElement.outerHTML}`,
+    html: sanitizedHtml,
     removed
   };
 }
@@ -234,7 +245,7 @@ function preprocessDocument(
     }
 
     if (tag === "a") {
-      secureLinkTarget(element);
+      secureLinkTarget(element, removed);
     }
   }
 }
@@ -248,7 +259,10 @@ function isAllowedAttribute(tag: string, name: string): boolean {
   );
 }
 
-function secureLinkTarget(element: Element): void {
+function secureLinkTarget(
+  element: Element,
+  removed: SanitizedDocument["removed"]
+): void {
   const target = element.getAttribute("target");
   if (!target) {
     return;
@@ -256,6 +270,7 @@ function secureLinkTarget(element: Element): void {
   const normalized = target.toLowerCase();
   if (normalized !== "_blank" && normalized !== "_self") {
     element.removeAttribute("target");
+    removed.push({ kind: "attribute", name: "target" });
     return;
   }
   if (normalized === "_blank") {
@@ -272,7 +287,46 @@ function secureLinkTarget(element: Element): void {
 }
 
 function isSafeUrl(value: string, attribute: string, tag: string): boolean {
-  if (!value || value !== value.trim() || /[\\\u0000-\u001f\u007f-\u009f]/.test(value)) {
+  const views = decodeUrlSecurityViews(value);
+  return Boolean(
+    views && views.every((view) => isSafeUrlView(view, attribute, tag))
+  );
+}
+
+function decodeUrlSecurityViews(value: string): string[] | undefined {
+  const views = [value];
+  let current = value;
+  for (let pass = 0; pass < MAX_URL_DECODE_PASSES; pass += 1) {
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(current);
+    } catch {
+      return undefined;
+    }
+    if (decoded === current) {
+      return views;
+    }
+    views.push(decoded);
+    current = decoded;
+  }
+
+  try {
+    return decodeURIComponent(current) === current ? views : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isSafeUrlView(
+  value: string,
+  attribute: string,
+  tag: string
+): boolean {
+  if (
+    !value ||
+    value !== value.trim() ||
+    /[\\\u0000-\u001f\u007f-\u009f]/.test(value)
+  ) {
     return false;
   }
 
@@ -330,78 +384,4 @@ function recordPurifyRemovals(
       });
     }
   }
-}
-
-function assertStandaloneShell(html: string): void {
-  const source = html.trim();
-  const doctypes = matches(source, /<!doctype\b[^>]*>/gi);
-  const htmlOpenings = matches(source, /<html\b[^>]*>/gi);
-  const htmlClosings = matches(source, /<\/html\s*>/gi);
-  const bodyOpenings = matches(source, /<body\b[^>]*>/gi);
-  const bodyClosings = matches(source, /<\/body\s*>/gi);
-  const headOpenings = matches(source, /<head\b[^>]*>/gi);
-  const headClosings = matches(source, /<\/head\s*>/gi);
-
-  if (
-    doctypes.length !== 1 ||
-    !/^<!doctype\s+html\s*>$/i.test(doctypes[0]?.[0] ?? "") ||
-    htmlOpenings.length !== 1 ||
-    htmlClosings.length !== 1 ||
-    bodyOpenings.length !== 1 ||
-    bodyClosings.length !== 1 ||
-    headOpenings.length !== headClosings.length ||
-    headOpenings.length > 1
-  ) {
-    throw new Error("Authoring HTML requires a complete standalone document shell");
-  }
-
-  const positions = [
-    doctypes[0]?.index,
-    htmlOpenings[0]?.index,
-    bodyOpenings[0]?.index,
-    bodyClosings[0]?.index,
-    htmlClosings[0]?.index
-  ];
-  if (
-    positions.some((position) => position === undefined) ||
-    positions.some(
-      (position, index) => index > 0 && position! <= positions[index - 1]!
-    )
-  ) {
-    throw new Error("Authoring HTML has a malformed document body");
-  }
-
-  const headOpening = headOpenings[0];
-  const headClosing = headClosings[0];
-  const htmlOpening = htmlOpenings[0];
-  const bodyOpening = bodyOpenings[0];
-  if (
-    headOpening &&
-    headClosing &&
-    htmlOpening &&
-    bodyOpening &&
-    (matchIndex(htmlOpening) >= matchIndex(headOpening) ||
-      matchIndex(headOpening) >= matchIndex(headClosing) ||
-      matchIndex(headClosing) >= matchIndex(bodyOpening))
-  ) {
-    throw new Error("Authoring HTML has a malformed document head");
-  }
-
-  const doctypeStart = doctypes[0]?.index ?? 0;
-  const rootEnd =
-    (htmlClosings[0]?.index ?? 0) + (htmlClosings[0]?.[0].length ?? 0);
-  if (source.slice(0, doctypeStart).trim() || source.slice(rootEnd).trim()) {
-    throw new Error("Authoring HTML cannot contain content outside its document");
-  }
-}
-
-function matches(value: string, pattern: RegExp): RegExpMatchArray[] {
-  return [...value.matchAll(pattern)];
-}
-
-function matchIndex(match: RegExpMatchArray): number {
-  if (match.index === undefined) {
-    throw new Error("Authoring document match is missing its source position");
-  }
-  return match.index;
 }

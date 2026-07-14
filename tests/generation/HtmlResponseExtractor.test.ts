@@ -18,6 +18,29 @@ describe("extractHtmlDocument", () => {
     expect(extractHtmlDocument(`Result follows:\n${html}\nEnd.`)).toBe(html);
   });
 
+  it("ignores fake shell markup in surrounding comments and quoted attributes", () => {
+    const html = "<!doctype html><html><body><p>x</p></body></html>";
+    const response =
+      '<!-- fake <html><body></body></html> --><span title="<html></html>">prose</span>' +
+      html;
+
+    expect(extractHtmlDocument(response)).toBe(html);
+  });
+
+  it("keeps a nonmatching raw-text end candidate before the real closing tag", () => {
+    const html =
+      '<!doctype html><html><body><script>const x = "</fake";</script><p>x</p></body></html>';
+
+    expect(extractHtmlDocument(html)).toBe(html);
+  });
+
+  it("does not tokenize shell-looking text inside a closed raw-text element", () => {
+    const html =
+      '<!doctype html><html><body><script>const shell = "</body></html>";</script><p>x</p></body></html>';
+
+    expect(extractHtmlDocument(html)).toBe(html);
+  });
+
   it.each([
     ["prose only", "Here is an article, but it is not HTML."],
     ["a fragment", "<article><p>fragment</p></article>"],
@@ -25,6 +48,18 @@ describe("extractHtmlDocument", () => {
     ["no html root", "<!doctype html><head></head><body>x</body>"],
     ["no body", "<!doctype html><html><head></head></html>"],
     ["unclosed root", "<!doctype html><html><head></head><body>x</body>"],
+    [
+      "text between the doctype and root",
+      "<!doctype html>OUTSIDE<html><body>x</body></html>"
+    ],
+    [
+      "text after the body but inside the root",
+      "<!doctype html><html><body>x</body>OUTSIDE</html>"
+    ],
+    [
+      "an unterminated quoted attribute containing fake shell closings",
+      '<!doctype html><html><body><p title="fake </body></html>'
+    ],
     [
       "two documents",
       "<!doctype html><html><body>one</body></html>\n<!doctype html><html><body>two</body></html>"
@@ -44,8 +79,29 @@ describe("extractHtmlDocument", () => {
     [
       "an unclosed fence",
       "```html\n<!doctype html><html><body>x</body></html>"
+    ],
+    [
+      "invalid shell text inside a fence",
+      "```html\n<!doctype html>OUTSIDE<html><body>x</body></html>\n```"
+    ],
+    [
+      "a duplicate body start tag",
+      "<!doctype html><html><body>one<body>two</body></html>"
+    ],
+    [
+      "a stray shell end tag",
+      "<!doctype html><html><body>x</head></body></html>"
     ]
   ])("rejects %s", (_label, value) => {
     expect(() => extractHtmlDocument(value)).toThrow(/complete|single|fence/i);
   });
+
+  it.each(["script", "style", "title", "textarea", "plaintext"])(
+    "rejects an unclosed %s element that consumes shell closings",
+    (tag) => {
+      const html = `<!doctype html><html><body><${tag}>fake </body></html>`;
+
+      expect(() => extractHtmlDocument(html)).toThrow(/complete|shell|unterminated/i);
+    }
+  );
 });
