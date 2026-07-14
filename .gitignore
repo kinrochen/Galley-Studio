@@ -1,8 +1,8 @@
 .DS_Store
 .superpowers/
+.worktrees/
 node_modules/
 dist/
 main.js
 *.log
 coverage/
-
