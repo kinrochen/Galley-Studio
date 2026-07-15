@@ -10,7 +10,8 @@ import {
 import { validateReferenceImage } from "../../src/theme-lab/ReferenceImage";
 import type {
   AtomicThemeStore,
-  StoredThemeFiles
+  StoredThemeFiles,
+  StoredThemeRecord
 } from "../../src/themes/CustomThemeRepository";
 import { CustomThemeRepository } from "../../src/themes/CustomThemeRepository";
 import { ScriptedChatClient } from "../support/ScriptedChatClient";
@@ -32,13 +33,20 @@ const completed = (content = ""): ChatTurnResult => ({
 });
 
 class Store implements AtomicThemeStore {
-  readonly records = new Map<string, StoredThemeFiles>();
+  readonly records = new Map<string, StoredThemeRecord>();
+  revision = 0;
   async listIds(): Promise<readonly string[]> { return [...this.records.keys()]; }
-  async read(id: string): Promise<StoredThemeFiles | null> {
+  async read(id: string): Promise<StoredThemeRecord | null> {
     return this.records.get(id) ?? null;
   }
-  async commit(id: string, value: StoredThemeFiles): Promise<"committed"> {
-    this.records.set(id, value);
+  async commit(
+    id: string,
+    value: StoredThemeFiles,
+    expectedRevision: string | null
+  ): Promise<"committed" | "collision"> {
+    if ((this.records.get(id)?.revision ?? null) !== expectedRevision) return "collision";
+    this.revision += 1;
+    this.records.set(id, { files: value, revision: String(this.revision) });
     return "committed";
   }
   async remove(id: string): Promise<boolean> { return this.records.delete(id); }
@@ -206,6 +214,31 @@ describe("AI Theme Lab generation", () => {
         })
       })
     ]));
+  });
+
+  it.each([
+    ["duplicate", (html: string) => html.replace('block="45"', 'block="44"')],
+    ["gap", (html: string) => html.replace('block="45"', 'block="46"')],
+    ["out of order", (html: string) => html
+      .replace('block="1"', 'block="swap"')
+      .replace('block="2"', 'block="1"')
+      .replace('block="swap"', 'block="2"')],
+    ["empty", (html: string) => html.replace('block="1"', 'block=""')],
+    ["non-numeric", (html: string) => html.replace('block="1"', 'block="one"')]
+  ])("rejects %s preview markers instead of accepting count alone", async (_label, mutate) => {
+    const { service } = harness([
+      completed(themeModelResponse({ previewHtml: mutate(validThemePreview()) }))
+    ]);
+
+    const draft = await service.generate(
+      { description: "Marker contract regression" },
+      signal()
+    );
+
+    expect(draft.validation.valid).toBe(false);
+    expect(draft.validation.issues.map(({ code }) => code)).toContain(
+      "preview_block_sequence"
+    );
   });
 });
 

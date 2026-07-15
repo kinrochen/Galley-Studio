@@ -14,11 +14,10 @@ export class MergedThemeRepository {
   async mount(): Promise<SkillPackage> {
     const custom = await this.custom.list();
     const builtInIds = new Set(this.builtIns.list().map(({ id }) => id));
-    for (const theme of custom) {
-      if (builtInIds.has(theme.manifest.id)) {
-        throw new Error(`Custom theme collides with a built-in theme: ${theme.manifest.id}`);
-      }
-    }
-    return this.virtualMount.mount(this.base, custom);
+    const compatible = custom.filter(({ manifest }) => {
+      const path = `references/theme-${manifest.id}.md`;
+      return !builtInIds.has(manifest.id) && !this.base.files.has(path);
+    });
+    return this.virtualMount.mount(this.base, compatible);
   }
 }

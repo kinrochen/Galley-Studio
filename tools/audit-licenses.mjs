@@ -1,5 +1,12 @@
 import { readFile } from "node:fs/promises";
 
+import {
+  GALLEY_SOURCE_URL,
+  loadBundleLicenseInventory,
+  renderThirdPartyNotices,
+  UPSTREAM_COMMIT
+} from "./bundle-license-support.mjs";
+
 const ACCEPTED = new Set([
   "(MPL-2.0 OR Apache-2.0)",
   "Apache-2.0",
@@ -9,31 +16,35 @@ const ACCEPTED = new Set([
   "MIT",
   "MIT-0"
 ]);
-const lock = JSON.parse(await readFile("package-lock.json", "utf8"));
 const failures = [];
-for (const [path, entry] of Object.entries(lock.packages ?? {})) {
-  if (!path) continue;
-  if (typeof entry.license !== "string" || !ACCEPTED.has(entry.license)) {
-    failures.push(`${path}: ${String(entry.license ?? "missing")}`);
-  }
-}
 const license = await readFile("LICENSE", "utf8");
 const notices = await readFile("THIRD_PARTY_NOTICES.md", "utf8");
+const packages = await loadBundleLicenseInventory();
 if (!license.includes("GNU AFFERO GENERAL PUBLIC LICENSE")) {
-  failures.push("LICENSE is not AGPL-3.0 text");
+  failures.push("LICENSE is not complete AGPL-3.0 text");
 }
-for (const required of [
-  "ba1f4175519b481cb3566616c9e5178705067904",
-  "dompurify",
-  "fflate",
-  "hugerte",
-  "zod"
-]) {
-  if (!notices.toLowerCase().includes(required.toLowerCase())) {
-    failures.push(`THIRD_PARTY_NOTICES.md is missing ${required}`);
+if (notices !== await renderThirdPartyNotices()) {
+  failures.push("THIRD_PARTY_NOTICES.md is stale or incomplete for the production bundle");
+}
+for (const packageInfo of packages) {
+  if (!ACCEPTED.has(packageInfo.license)) {
+    failures.push(`${packageInfo.name}@${packageInfo.version}: ${packageInfo.license}`);
+  }
+  for (const file of packageInfo.licenseFiles) {
+    if (!notices.includes(file.text)) {
+      failures.push(`${packageInfo.name}@${packageInfo.version}: missing full ${file.filename}`);
+    }
   }
 }
-if (failures.length > 0) {
-  throw new Error(`License audit failed:\n${failures.join("\n")}`);
+for (const required of [
+  GALLEY_SOURCE_URL,
+  UPSTREAM_COMMIT,
+  "Permission is hereby granted, free of charge",
+  "Apache License",
+  "Mozilla Public License Version 2.0",
+  "Copyright"
+]) {
+  if (!notices.includes(required)) failures.push(`THIRD_PARTY_NOTICES.md is missing ${required}`);
 }
-console.log(`License audit passed for ${Object.keys(lock.packages).length - 1} locked packages.`);
+if (failures.length > 0) throw new Error(`License audit failed:\n${failures.join("\n")}`);
+console.log(`License audit passed for ${packages.length} packages in the production bundle.`);

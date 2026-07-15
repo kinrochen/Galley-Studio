@@ -1,4 +1,4 @@
-import { strToU8, zipSync } from "fflate";
+import { strToU8, unzipSync, zipSync } from "fflate";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -88,8 +88,9 @@ describe("safe Skill ZIP import", () => {
     );
 
     const invalid = zipSync({
-      "SKILL.md": strToU8("skill"),
+      "SKILL.md": strToU8("---\nname: gzh-design\n---\nWorkflow."),
       "references/theme-index.md": strToU8(themeIndexMarkdown()),
+      "references/theme-generator.md": strToU8("# Theme generator"),
       "references/common-components.md": strToU8("common"),
       "references/theme-ocean-notes.md": strToU8(
         validComponentLibrary().replace("<section style=", "<div style=")
@@ -98,6 +99,22 @@ describe("safe Skill ZIP import", () => {
     await expect(new SkillArchiveImporter().import(invalid)).rejects.toThrow(
       "component"
     );
+  });
+
+  it("requires the complete non-empty Theme Lab Skill contract at import time", async () => {
+    const missing = { ...unzipSync(validSkillArchive()) };
+    delete missing["references/theme-generator.md"];
+    await expect(
+      new SkillArchiveImporter().import(zipSync(missing))
+    ).rejects.toThrow(/theme-generator|Theme Lab|missing required/iu);
+
+    const empty = {
+      ...unzipSync(validSkillArchive()),
+      "references/theme-generator.md": new Uint8Array()
+    };
+    await expect(
+      new SkillArchiveImporter().import(zipSync(empty))
+    ).rejects.toThrow(/theme-generator|empty|structure/iu);
   });
 });
 
@@ -132,5 +149,51 @@ describe("imported Skill repository activation", () => {
       throw new Error("settings write failed");
     })).rejects.toThrow("settings write failed");
     expect(current.activeVersion).toBe("bundled");
+  });
+
+  it("compensates when the durable active pointer is written before persistence throws", async () => {
+    const store = new Store();
+    const repository = new ImportedSkillRepository(store, new SkillArchiveImporter());
+    const imported = await repository.import(validSkillArchive());
+    const current = new SkillPackageSettings("bundled");
+    let durable = current;
+    let writes = 0;
+    const persist = Object.assign(
+      async (next: SkillPackageSettings) => {
+        durable = next;
+        writes += 1;
+        if (writes === 1) throw new Error("saveData threw after durable write");
+      },
+      { read: async () => durable }
+    );
+
+    await expect(
+      repository.activate(imported.version, current, persist)
+    ).rejects.toThrow("saveData threw after durable write");
+    expect(durable.activeVersion).toBe("bundled");
+    expect(writes).toBe(2);
+  });
+
+  it("never rolls back an unexpected concurrently changed durable pointer", async () => {
+    const store = new Store();
+    const repository = new ImportedSkillRepository(store, new SkillArchiveImporter());
+    const imported = await repository.import(validSkillArchive());
+    const current = new SkillPackageSettings("bundled");
+    let durable = current;
+    let writes = 0;
+    const concurrent = new SkillPackageSettings("import-abcdef123456");
+    const persist = Object.assign(
+      async (_next: SkillPackageSettings) => {
+        writes += 1;
+        durable = concurrent;
+      },
+      { read: async () => durable }
+    );
+
+    await expect(
+      repository.activate(imported.version, current, persist)
+    ).rejects.toThrow(/unexpected durable version|changed/iu);
+    expect(durable.activeVersion).toBe("import-abcdef123456");
+    expect(writes).toBe(1);
   });
 });

@@ -3,13 +3,13 @@ import { expect, it, vi } from "vitest";
 import type { ChatClient, ChatRequest } from "../../src/ai/AiProtocol";
 import { VisionCapabilityProbe } from "../../src/ai/VisionCapabilityProbe";
 
-it("uses only a built-in probe pixel and requires the exact vision token", async () => {
+it("requires an answer that is present only in the built-in image", async () => {
   const requests: ChatRequest[] = [];
   const client: ChatClient = {
     complete: vi.fn(async (request) => {
       requests.push(request);
       return {
-        content: "galley_vision_probe",
+        content: "RGBR",
         toolCalls: [],
         finishReason: "stop"
       };
@@ -30,6 +30,34 @@ it("uses only a built-in probe pixel and requires the exact vision token", async
       })
     })
   ]));
+  const prompt = Array.isArray(content)
+    ? content.find((part) => part.type === "text")?.text ?? ""
+    : "";
+  expect(prompt).not.toContain("RGBR");
+  expect(prompt).not.toContain("galley_vision_probe");
+});
+
+it("rejects a text-only model that ignores the image but follows the written token", async () => {
+  const client: ChatClient = {
+    complete: vi.fn(async (request) => {
+      const content = request.messages[0]?.content;
+      const prompt = Array.isArray(content)
+        ? content.find((part) => part.type === "text")?.text ?? ""
+        : String(content ?? "");
+      return {
+        content: prompt.includes("galley_vision_probe")
+          ? "galley_vision_probe"
+          : "I cannot inspect images.",
+        toolCalls: [],
+        finishReason: "stop"
+      };
+    })
+  };
+
+  await expect(new VisionCapabilityProbe(client).probe(
+    { baseUrl: "https://api.example/v1", model: "text-only" },
+    new AbortController().signal
+  )).resolves.toBe(false);
 });
 
 it("reports unsupported without exposing provider diagnostics", async () => {

@@ -17,6 +17,7 @@ import { ObsidianImportedSkillStore } from "../skill/ObsidianImportedSkillStore"
 import type { SkillPackage } from "../skill/SkillPackage";
 import { SkillArchiveImporter } from "../skill/SkillArchiveImporter";
 import { SkillSession } from "../skill/SkillSession";
+import { SkillPackageValidator } from "../skill/SkillPackageValidator";
 import { SkillVirtualFileSystem } from "../skill/SkillVirtualFileSystem";
 import { BuiltInThemeRepository } from "../themes/BuiltInThemeRepository";
 import { CustomThemeRepository } from "../themes/CustomThemeRepository";
@@ -59,12 +60,14 @@ export async function createProductionSkillContext(
     capabilities.vision = await new VisionCapabilityProbe(client).probe(target, signal);
   }
 
-  const active = await loadActiveSkill(app, settings);
+  const active = await loadActiveSkillPackage(app, settings);
+  new SkillPackageValidator().validate(active.skillPackage);
   const baseVfs = new SkillVirtualFileSystem(active.skillPackage.files);
   const builtIns = new BuiltInThemeRepository(baseVfs);
   const customThemes = new CustomThemeRepository(
     new ObsidianCustomThemeStore(app.vault.adapter),
-    builtIns.list().map(({ id }) => id)
+    builtIns.list().map(({ id }) => id),
+    [...active.skillPackage.files.keys()]
   );
   const merged = await new MergedThemeRepository(
     active.skillPackage,
@@ -122,7 +125,7 @@ export function importedSkillRepository(app: App): ImportedSkillRepository {
   );
 }
 
-async function loadActiveSkill(
+export async function loadActiveSkillPackage(
   app: App,
   settings: Readonly<GalleySettings>
 ): Promise<{ skillPackage: SkillPackage; packageHash: string }> {

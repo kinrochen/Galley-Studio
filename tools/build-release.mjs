@@ -37,8 +37,16 @@ for (const path of RELEASE_FILES) {
   }
 }
 const notices = new TextDecoder().decode(unpacked["THIRD_PARTY_NOTICES.md"]);
-if (!notices.includes("ba1f4175519b481cb3566616c9e5178705067904")) {
-  throw new Error("Release ZIP lost pinned gzh-design attribution.");
+for (const required of [
+  "https://github.com/isjiamu/Galley",
+  "ba1f4175519b481cb3566616c9e5178705067904",
+  "Permission is hereby granted, free of charge",
+  "Apache License",
+  "Mozilla Public License Version 2.0"
+]) {
+  if (!notices.includes(required)) {
+    throw new Error(`Release ZIP lost required source/license notice: ${required}`);
+  }
 }
 const license = new TextDecoder().decode(unpacked.LICENSE);
 if (!license.includes("GNU AFFERO GENERAL PUBLIC LICENSE")) {

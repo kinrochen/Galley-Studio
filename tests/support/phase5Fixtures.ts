@@ -95,6 +95,9 @@ export function validSkillArchive(): Uint8Array {
   return zipSync({
     "SKILL.md": strToU8("---\nname: gzh-design\n---\nWorkflow."),
     "references/theme-index.md": strToU8(themeIndexMarkdown()),
+    "references/theme-generator.md": strToU8(
+      "# Theme generator\n\nGenerate a complete component library and preview."
+    ),
     "references/common-components.md": strToU8("Common components."),
     [`references/theme-${CUSTOM_THEME_ID}.md`]: strToU8(
       validComponentLibrary()

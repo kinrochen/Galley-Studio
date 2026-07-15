@@ -15,6 +15,10 @@ import {
   type GenerateCurrentArticleContext
 } from "./commands/GenerateCurrentArticle";
 import {
+  MAX_SKILL_ARCHIVE_BYTES,
+  MAX_THEME_ARCHIVE_BYTES
+} from "./archive/ArchiveLimits";
+import {
   type ConnectionDiagnosticResult,
   runConnectionDiagnostic
 } from "./diagnostics/ConnectionDiagnostic";
@@ -273,10 +277,17 @@ export default class GalleyPlugin extends Plugin {
 
   async importCustomTheme(): Promise<void> {
     if (!this.capabilities.canImportSkill) return;
-    const bytes = await chooseZip();
-    if (!bytes) return;
     try {
-      const id = await (await this.#themeRuntime()).importThemeArchive(this.app, bytes);
+      const bytes = await chooseZip(
+        MAX_THEME_ARCHIVE_BYTES,
+        "A custom theme ZIP must be no larger than 12 MiB."
+      );
+      if (!bytes) return;
+      const id = await (await this.#themeRuntime()).importThemeArchive(
+        this.app,
+        bytes,
+        this.settings
+      );
       new Notice(`Imported custom theme: ${id}`);
     } catch (error) {
       new Notice(safeOperationMessage(error, "Theme import failed."));
@@ -290,7 +301,8 @@ export default class GalleyPlugin extends Plugin {
     try {
       const artifact = await (await this.#themeRuntime()).exportThemeArchive(
         this.app,
-        id
+        id,
+        this.settings
       );
       downloadBytes(artifact.filename, artifact.bytes);
       new Notice(`Exported custom theme: ${id}`);
@@ -303,7 +315,7 @@ export default class GalleyPlugin extends Plugin {
     if (!this.capabilities.canImportSkill) return;
     try {
       const runtime = await this.#themeRuntime();
-      const themes = await runtime.listCustomThemes(this.app);
+      const themes = await runtime.listCustomThemes(this.app, this.settings);
       const id = window.prompt(
         `Custom theme id to toggle:\n${themes
           .map(({ id: themeId, name, enabled }) => `${themeId} — ${name} (${enabled ? "enabled" : "disabled"})`)
@@ -312,7 +324,7 @@ export default class GalleyPlugin extends Plugin {
       if (!id) return;
       const theme = themes.find(({ id: themeId }) => themeId === id);
       if (!theme) throw new Error(`Custom theme not found: ${id}`);
-      await runtime.setCustomThemeEnabled(this.app, id, !theme.enabled);
+      await runtime.setCustomThemeEnabled(this.app, id, !theme.enabled, this.settings);
       new Notice(`${theme.enabled ? "Disabled" : "Enabled"} custom theme: ${id}`);
     } catch (error) {
       new Notice(safeOperationMessage(error, "Theme update failed."));
@@ -323,7 +335,7 @@ export default class GalleyPlugin extends Plugin {
     if (!this.capabilities.canImportSkill) return;
     try {
       const runtime = await this.#themeRuntime();
-      const themes = await runtime.listCustomThemes(this.app);
+      const themes = await runtime.listCustomThemes(this.app, this.settings);
       const id = window.prompt(
         `Custom theme id to delete:\n${themes.map(({ id: themeId, name }) => `${themeId} — ${name}`).join("\n")}`
       )?.trim();
@@ -332,7 +344,7 @@ export default class GalleyPlugin extends Plugin {
         throw new Error(`Custom theme not found: ${id}`);
       }
       if (!window.confirm(`Delete custom theme “${id}”?`)) return;
-      if (!(await runtime.deleteCustomTheme(this.app, id))) {
+      if (!(await runtime.deleteCustomTheme(this.app, id, this.settings))) {
         throw new Error(`Custom theme not found: ${id}`);
       }
       new Notice(`Deleted custom theme: ${id}`);
@@ -343,9 +355,12 @@ export default class GalleyPlugin extends Plugin {
 
   async importSkillPackage(): Promise<void> {
     if (!this.capabilities.canImportSkill) return;
-    const bytes = await chooseZip();
-    if (!bytes) return;
     try {
+      const bytes = await chooseZip(
+        MAX_SKILL_ARCHIVE_BYTES,
+        "A Skill ZIP must be no larger than 25 MiB."
+      );
+      if (!bytes) return;
       const version = await (await this.#themeRuntime()).importSkillArchive(
         this.app,
         bytes
@@ -367,19 +382,26 @@ export default class GalleyPlugin extends Plugin {
         `Imported Skill version to activate:\n${versions.join("\n")}`
       )?.trim();
       if (!version) return;
+      const persist = Object.assign(
+        async (activeSkillVersion: string) => {
+          const durable = normalizeSettings(await this.loadData());
+          await this.saveData(normalizeSettings({
+            ...durable,
+            activeSkillVersion
+          }));
+        },
+        {
+          read: async () =>
+            normalizeSettings(await this.loadData()).activeSkillVersion
+        }
+      );
       await runtime.activateImportedSkill(
         this.app,
         version,
         this.settings.activeSkillVersion,
-        async (activeSkillVersion) => {
-          const nextSettings = normalizeSettings({
-            ...this.settings,
-            activeSkillVersion
-          });
-          await this.saveData(nextSettings);
-          this.settings = nextSettings;
-        }
+        persist
       );
+      this.settings = normalizeSettings(await this.loadData());
       new Notice(`Activated Skill: ${version}`);
     } catch (error) {
       new Notice(
@@ -425,7 +447,7 @@ export default class GalleyPlugin extends Plugin {
           signal
         ),
       save: async (draft) =>
-        (await this.#themeRuntime()).saveThemeDraft(this.app, draft),
+        (await this.#themeRuntime()).saveThemeDraft(this.app, draft, this.settings),
       report: (message) => new Notice(message)
     });
   }
@@ -847,8 +869,11 @@ function diagnosticSummary(result: ConnectionDiagnosticResult): string {
   return `Galley diagnostic passed: Skill loaded via ${result.skillLoadMode}.`;
 }
 
-function chooseZip(): Promise<Uint8Array | null> {
-  return new Promise((resolve) => {
+function chooseZip(
+  maxBytes: number,
+  tooLargeMessage: string
+): Promise<Uint8Array | null> {
+  return new Promise((resolve, reject) => {
     const input = document.createElement("input");
     input.type = "file";
     input.accept = ".zip,application/zip";
@@ -860,9 +885,13 @@ function chooseZip(): Promise<Uint8Array | null> {
           resolve(null);
           return;
         }
+        if (file.size > maxBytes) {
+          reject(new Error(tooLargeMessage));
+          return;
+        }
         void file.arrayBuffer().then(
           (buffer) => resolve(new Uint8Array(buffer)),
-          () => resolve(null)
+          () => reject(new Error("The selected ZIP could not be read."))
         );
       },
       { once: true }

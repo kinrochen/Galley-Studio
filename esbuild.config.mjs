@@ -1,5 +1,5 @@
 import { builtinModules } from "node:module";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 
 import * as esbuild from "esbuild";
 
@@ -27,6 +27,7 @@ const context = await esbuild.context({
   plugins: [deferredEditorBoundary],
   sourcemap: production ? false : "inline",
   minify: production,
+  metafile: production,
   outfile: "main.js",
   logLevel: "info"
 });
@@ -34,6 +35,13 @@ const context = await esbuild.context({
 if (watch) {
   await context.watch();
 } else {
-  await context.rebuild();
+  const result = await context.rebuild();
+  if (production && result.metafile) {
+    await mkdir("release", { recursive: true });
+    await writeFile(
+      "release/.galley-esbuild-meta.json",
+      `${JSON.stringify(result.metafile, null, 2)}\n`
+    );
+  }
   await context.dispose();
 }

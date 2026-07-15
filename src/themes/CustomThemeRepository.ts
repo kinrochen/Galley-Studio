@@ -12,13 +12,18 @@ export interface StoredThemeFiles {
   readonly previewHtml: string;
 }
 
+export interface StoredThemeRecord {
+  readonly files: StoredThemeFiles;
+  readonly revision: string;
+}
+
 export interface AtomicThemeStore {
   listIds(): Promise<readonly string[]>;
-  read(id: string): Promise<StoredThemeFiles | null>;
+  read(id: string): Promise<StoredThemeRecord | null>;
   commit(
     id: string,
     files: StoredThemeFiles,
-    expected: "absent" | "present"
+    expectedRevision: string | null
   ): Promise<"committed" | "collision">;
   remove(id: string): Promise<boolean>;
 }
@@ -32,14 +37,17 @@ export class ThemeRepositoryError extends Error {
 
 export class CustomThemeRepository {
   readonly #builtInIds: ReadonlySet<string>;
+  readonly #reservedPaths: ReadonlySet<string>;
   readonly #validator = new ComponentLibraryValidator();
 
   constructor(
     private readonly store: AtomicThemeStore,
     builtInIds: readonly string[],
+    reservedPaths: readonly string[] = [],
     private readonly now: () => Date = () => new Date()
   ) {
     this.#builtInIds = new Set(builtInIds);
+    this.#reservedPaths = new Set(reservedPaths);
   }
 
   async list(): Promise<readonly StoredThemeFiles[]> {
@@ -52,27 +60,35 @@ export class CustomThemeRepository {
   }
 
   async get(id: string): Promise<StoredThemeFiles | null> {
-    const value = await this.store.read(id);
-    return value ? validateStored(value, this.#validator) : null;
+    const record = await this.store.read(id);
+    return record ? validateStored(record.files, this.#validator) : null;
   }
 
   async save(files: StoredThemeFiles): Promise<void> {
     const validated = validateStored(files, this.#validator);
     const id = validated.manifest.id;
-    if (this.#builtInIds.has(id)) this.#collision(id);
-    const result = await this.store.commit(id, validated, "absent");
+    if (
+      this.#builtInIds.has(id) ||
+      this.#reservedPaths.has(themePath(id))
+    ) this.#collision(id);
+    const result = await this.store.commit(id, validated, null);
     if (result === "collision") this.#collision(id);
   }
 
   async setEnabled(id: string, enabled: boolean): Promise<void> {
-    const current = await this.get(id);
-    if (!current) throw new ThemeRepositoryError("theme_not_found", `Theme not found: ${id}`);
+    const observed = await this.store.read(id);
+    if (!observed) throw new ThemeRepositoryError("theme_not_found", `Theme not found: ${id}`);
+    const current = validateStored(observed.files, this.#validator);
     const manifest = ThemeManifestV1Schema.parse({
       ...current.manifest,
       enabled,
       updatedAt: this.#nextUpdatedAt(current.manifest)
     });
-    const result = await this.store.commit(id, { ...current, manifest }, "present");
+    const result = await this.store.commit(
+      id,
+      { ...current, manifest },
+      observed.revision
+    );
     if (result === "collision") {
       throw new ThemeRepositoryError("theme_concurrent_change", `Theme changed concurrently: ${id}`);
     }
@@ -100,6 +116,10 @@ export class CustomThemeRepository {
     const now = this.now().getTime();
     return new Date(Math.max(now, Date.parse(manifest.updatedAt) + 1)).toISOString();
   }
+}
+
+function themePath(id: string): string {
+  return `references/theme-${id}.md`;
 }
 
 function validateStored(

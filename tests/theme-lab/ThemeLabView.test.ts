@@ -81,4 +81,36 @@ describe("ThemeLabView", () => {
     expect(saveButton?.disabled).toBe(true);
     expect(save).not.toHaveBeenCalled();
   });
+
+  it("rejects an oversized reference from File.size before allocating its bytes", async () => {
+    const arrayBuffer = vi.fn(async () => new ArrayBuffer(12));
+    const generate = vi.fn(async () => draft(true));
+    const view = new ThemeLabView(new WorkspaceLeaf(), {
+      supportsVision: async () => true,
+      generate,
+      save: vi.fn(),
+      report: vi.fn()
+    });
+    await view.onOpen();
+    const input = view.contentEl.querySelector<HTMLInputElement>('input[type="file"]')!;
+    Object.defineProperty(input, "files", {
+      configurable: true,
+      value: [{
+        name: "oversized.png",
+        type: "image/png",
+        size: 10 * 1024 * 1024 + 1,
+        arrayBuffer
+      }]
+    });
+    view.contentEl.querySelector<HTMLTextAreaElement>("textarea")!.value = "Reference";
+    [...view.contentEl.querySelectorAll("button")].find(
+      (button) => button.textContent === "Generate draft"
+    )!.click();
+
+    await vi.waitFor(() =>
+      expect(view.contentEl.textContent).toMatch(/10 MiB|too large/iu)
+    );
+    expect(arrayBuffer).not.toHaveBeenCalled();
+    expect(generate).not.toHaveBeenCalled();
+  });
 });

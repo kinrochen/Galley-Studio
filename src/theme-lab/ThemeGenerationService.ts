@@ -186,12 +186,24 @@ function validatePreview(html: string): ThemeValidationIssue[] {
     issues.push({ code: "preview_event_handler", severity: "error", message: "Theme preview contains an event handler." });
   }
   const document = new DOMParser().parseFromString(html, "text/html");
-  const blocks = document.querySelectorAll("[data-galley-theme-block]");
+  const blocks = [...document.querySelectorAll("[data-galley-theme-block]")];
   if (blocks.length < 45 || blocks.length > 75) {
     issues.push({
       code: "preview_block_count",
       severity: "error",
       message: "Theme preview must contain 45 to 75 marked blocks."
+    });
+  }
+  if (
+    blocks.some(
+      (block, index) =>
+        block.getAttribute("data-galley-theme-block") !== String(index + 1)
+    )
+  ) {
+    issues.push({
+      code: "preview_block_sequence",
+      severity: "error",
+      message: "Theme preview block markers must be unique consecutive integers in DOM order from 1 to N."
     });
   }
   return issues;

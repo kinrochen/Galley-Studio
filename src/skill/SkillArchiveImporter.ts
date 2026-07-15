@@ -3,16 +3,8 @@ import {
   extractSafeZip,
   type SafeZipLimits
 } from "../archive/SafeZipArchive";
-import { ComponentLibraryValidator } from "../theme-lab/ComponentLibraryValidator";
-import { BuiltInThemeRepository } from "../themes/BuiltInThemeRepository";
 import type { SkillPackage } from "./SkillPackage";
-import { SkillVirtualFileSystem } from "./SkillVirtualFileSystem";
-
-const REQUIRED_FILES = [
-  "SKILL.md",
-  "references/theme-index.md",
-  "references/common-components.md"
-] as const;
+import { SkillPackageValidator } from "./SkillPackageValidator";
 
 export interface ImportedSkillPackage {
   readonly version: string;
@@ -37,28 +29,12 @@ export class SkillArchiveImporter {
     } catch {
       throw new Error("Skill ZIP entries must be valid UTF-8 reference text.");
     }
-    for (const path of REQUIRED_FILES) {
-      if (!files.has(path)) throw new Error(`Skill ZIP is missing required file: ${path}`);
-    }
-
-    const vfs = new SkillVirtualFileSystem(files);
-    let themes: BuiltInThemeRepository;
-    try {
-      themes = new BuiltInThemeRepository(vfs);
-    } catch (error) {
-      throw new Error(`Skill theme index is invalid: ${safeMessage(error)}`);
-    }
-    const validator = new ComponentLibraryValidator();
-    for (const theme of themes.list()) {
-      const validation = validator.validateSource(vfs.read(theme.file));
-      if (!validation.valid) {
-        throw new Error(
-          `Skill component validation failed for ${theme.id}: ${validation.issues
-            .map(({ code }) => code)
-            .join(", ")}`
-        );
-      }
-    }
+    const skillPackage: SkillPackage = {
+      id: "gzh-design",
+      version: "pending-import-validation",
+      files
+    };
+    new SkillPackageValidator().validate(skillPackage);
 
     const copy = new Uint8Array(archive);
     const packageHash = await sha256(copy);
@@ -67,11 +43,7 @@ export class SkillArchiveImporter {
       version,
       packageHash,
       archive: copy,
-      skillPackage: {
-        id: "gzh-design",
-        version,
-        files
-      }
+      skillPackage: { ...skillPackage, version }
     });
   }
 }
@@ -85,8 +57,4 @@ async function sha256(bytes: Uint8Array): Promise<string> {
   return [...new Uint8Array(digest)]
     .map((value) => value.toString(16).padStart(2, "0"))
     .join("");
-}
-
-function safeMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "invalid package";
 }

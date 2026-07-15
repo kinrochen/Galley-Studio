@@ -29,4 +29,9 @@ it("contains exactly the five 0.1.0 release files when the release gate has run"
   expect(new TextDecoder().decode(entries["THIRD_PARTY_NOTICES.md"])).toContain(
     "ba1f4175519b481cb3566616c9e5178705067904"
   );
+  const notices = new TextDecoder().decode(entries["THIRD_PARTY_NOTICES.md"]);
+  expect(notices).toContain("https://github.com/isjiamu/Galley");
+  expect(notices).toContain("Permission is hereby granted, free of charge");
+  expect(notices).toContain("Mozilla Public License Version 2.0");
+  expect(notices).toContain("Apache License");
 });

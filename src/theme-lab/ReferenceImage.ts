@@ -17,7 +17,7 @@ export interface ValidatedReferenceImage {
   readonly dataUrl: string;
 }
 
-const MAX_REFERENCE_IMAGE_BYTES = 10 * 1024 * 1024;
+export const MAX_REFERENCE_IMAGE_BYTES = 10 * 1024 * 1024;
 
 export function validateReferenceImage(
   input: ReferenceImageInput

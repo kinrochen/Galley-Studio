@@ -1,0 +1,2 @@
+export const MAX_THEME_ARCHIVE_BYTES = 12 * 1024 * 1024;
+export const MAX_SKILL_ARCHIVE_BYTES = 25 * 1024 * 1024;

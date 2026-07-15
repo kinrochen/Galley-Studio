@@ -28,5 +28,6 @@ stores only the Secret ID, never the API key.
 ## Source and license
 
 Galley is licensed under AGPL-3.0. Corresponding source and release instructions
-are at <https://github.com/isjiamu/gzh-design-skill> for the pinned upstream Skill
-and in this Galley repository for the plugin. See `THIRD_PARTY_NOTICES.md`.
+for this plugin are at <https://github.com/isjiamu/Galley>. The pinned upstream
+Skill source is at <https://github.com/isjiamu/gzh-design-skill>. See
+`THIRD_PARTY_NOTICES.md` for bundled dependency source and license texts.

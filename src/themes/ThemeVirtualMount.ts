@@ -11,10 +11,11 @@ export class ThemeVirtualMount {
       .filter(({ manifest }) => manifest.enabled)
       .sort((left, right) => left.manifest.id.localeCompare(right.manifest.id));
     for (const theme of enabled) {
-      files.set(
-        `references/theme-${theme.manifest.id}.md`,
-        theme.componentLibrary
-      );
+      const path = `references/theme-${theme.manifest.id}.md`;
+      if (files.has(path)) {
+        throw new Error(`Custom theme path collides with the active Skill: ${path}`);
+      }
+      files.set(path, theme.componentLibrary);
     }
     const index = files.get("references/theme-index.md");
     if (index === undefined) throw new Error("Skill package is missing references/theme-index.md.");

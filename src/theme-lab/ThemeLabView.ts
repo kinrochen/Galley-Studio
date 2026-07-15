@@ -1,6 +1,9 @@
 import { ItemView, type WorkspaceLeaf } from "obsidian";
 
-import type { ReferenceImageInput } from "./ReferenceImage";
+import {
+  MAX_REFERENCE_IMAGE_BYTES,
+  type ReferenceImageInput
+} from "./ReferenceImage";
 import type {
   ThemeDraft,
   ThemeGenerationInput
@@ -158,6 +161,9 @@ async function selectedImage(
 ): Promise<ReferenceImageInput | undefined> {
   const file = input.files?.[0];
   if (!file) return undefined;
+  if (file.size > MAX_REFERENCE_IMAGE_BYTES) {
+    throw new Error("A theme reference image must be no larger than 10 MiB.");
+  }
   return {
     selected: true,
     name: file.name,

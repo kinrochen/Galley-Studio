@@ -1,5 +1,6 @@
 import { strToU8, zipSync } from "fflate";
 
+import { MAX_THEME_ARCHIVE_BYTES } from "../archive/ArchiveLimits";
 import { extractSafeZip, type SafeZipLimits } from "../archive/SafeZipArchive";
 import { parseThemeManifest } from "./ThemeManifest";
 import type { StoredThemeFiles } from "./CustomThemeRepository";
@@ -11,7 +12,7 @@ const THEME_ARCHIVE_FILES = [
 ] as const;
 const STABLE_MTIME = new Date("1980-01-01T00:00:00.000Z");
 const THEME_LIMITS: SafeZipLimits = {
-  maxArchiveBytes: 12 * 1024 * 1024,
+  maxArchiveBytes: MAX_THEME_ARCHIVE_BYTES,
   maxEntryBytes: 10 * 1024 * 1024,
   maxExtractedBytes: 12 * 1024 * 1024,
   maxEntries: 3

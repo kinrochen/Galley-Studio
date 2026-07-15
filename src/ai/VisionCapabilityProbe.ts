@@ -1,7 +1,8 @@
 import type { ChatClient, ChatRequest } from "./AiProtocol";
 
-const BUILT_IN_PROBE_PIXEL =
-  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+const BUILT_IN_PROBE_IMAGE =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAAAgCAYAAADaInAlAAAAe0lEQVR42u3SMQ0AIBAEwVfyNXKoEYscbICMC8kUa2AzdXrcZL1ntnWipf8XAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD8AeEakeg5F43cxAAAAAElFTkSuQmCC";
+const EXPECTED_COLOR_SEQUENCE = "RGBR";
 
 export class VisionCapabilityProbe {
   constructor(private readonly client: ChatClient) {}
@@ -21,11 +22,11 @@ export class VisionCapabilityProbe {
               content: [
                 {
                   type: "text",
-                  text: "If you can inspect the attached built-in one-pixel capability probe, reply with exactly galley_vision_probe."
+                  text: "Inspect the attached image, which contains four equal rectangular color cells. Reply with only the initial letter of each cell's dominant color from left to right, using R, G, or B. If you cannot inspect the image, reply unsupported."
                 },
                 {
                   type: "image_url",
-                  image_url: { url: BUILT_IN_PROBE_PIXEL, detail: "low" }
+                  image_url: { url: BUILT_IN_PROBE_IMAGE, detail: "low" }
                 }
               ]
             }
@@ -35,7 +36,7 @@ export class VisionCapabilityProbe {
       );
       return (
         result.toolCalls.length === 0 &&
-        result.content.trim() === "galley_vision_probe"
+        result.content.trim().toUpperCase() === EXPECTED_COLOR_SEQUENCE
       );
     } catch (error) {
       if (

@@ -5,7 +5,8 @@ import { SkillVirtualFileSystem } from "../../src/skill/SkillVirtualFileSystem";
 import {
   CustomThemeRepository,
   type AtomicThemeStore,
-  type StoredThemeFiles
+  type StoredThemeFiles,
+  type StoredThemeRecord
 } from "../../src/themes/CustomThemeRepository";
 import { MergedThemeRepository } from "../../src/themes/MergedThemeRepository";
 import { ThemeArchive } from "../../src/themes/ThemeArchive";
@@ -19,14 +20,15 @@ import {
 } from "../support/phase5Fixtures";
 
 class MemoryAtomicThemeStore implements AtomicThemeStore {
-  readonly records = new Map<string, StoredThemeFiles>();
+  readonly records = new Map<string, StoredThemeRecord>();
   failNextCommit = false;
+  revision = 0;
 
   async listIds(): Promise<readonly string[]> {
     return [...this.records.keys()].sort();
   }
 
-  async read(id: string): Promise<StoredThemeFiles | null> {
+  async read(id: string): Promise<StoredThemeRecord | null> {
     const value = this.records.get(id);
     return value ? structuredClone(value) : null;
   }
@@ -34,14 +36,18 @@ class MemoryAtomicThemeStore implements AtomicThemeStore {
   async commit(
     id: string,
     files: StoredThemeFiles,
-    expected: "absent" | "present"
+    expectedRevision: string | null
   ): Promise<"committed" | "collision"> {
     if (this.failNextCommit) {
       this.failNextCommit = false;
       throw new Error("injected atomic commit failure");
     }
-    if ((expected === "absent") === this.records.has(id)) return "collision";
-    this.records.set(id, structuredClone(files));
+    if ((this.records.get(id)?.revision ?? null) !== expectedRevision) return "collision";
+    this.revision += 1;
+    this.records.set(id, {
+      files: structuredClone(files),
+      revision: `revision-${this.revision}`
+    });
     return "committed";
   }
 
@@ -151,5 +157,64 @@ describe("custom theme persistence and merged Skill mount", () => {
     ).mount();
     const nextVfs = new SkillVirtualFileSystem(next.files);
     expect(nextVfs.has(`references/theme-${CUSTOM_THEME_ID}.md`)).toBe(false);
+  });
+
+  it.each(["index", "generator"])(
+    "never lets a custom %s id overwrite a base Skill path",
+    async (id) => {
+      const bundled = await new BundledSkillLoader().load();
+      const builtIns = new BuiltInThemeRepository(
+        new SkillVirtualFileSystem(bundled.files)
+      );
+      const store = new MemoryAtomicThemeStore();
+      store.records.set(id, {
+        revision: `reserved-${id}`,
+        files: {
+          ...files(),
+          manifest: customThemeManifest({ id, name: `Reserved ${id}` })
+        }
+      });
+      const repository = new CustomThemeRepository(store, []);
+      const path = `references/theme-${id}.md`;
+      const original = bundled.files.get(path);
+
+      const mounted = await new MergedThemeRepository(
+        bundled,
+        builtIns,
+        repository
+      ).mount();
+
+      expect(mounted.files.get(path)).toBe(original);
+      expect(mounted.files.get(path)).not.toBe(files().componentLibrary);
+    }
+  );
+
+  it("keeps production mount usable when a newly active Skill conflicts with stored custom themes", async () => {
+    const bundled = await new BundledSkillLoader().load();
+    const baseVfs = new SkillVirtualFileSystem(bundled.files);
+    const builtIns = new BuiltInThemeRepository(baseVfs);
+    const activeTheme = builtIns.list()[0]!;
+    const store = new MemoryAtomicThemeStore();
+    store.records.set(activeTheme.id, {
+      revision: "conflict",
+      files: {
+        ...files(),
+        manifest: customThemeManifest({
+          id: activeTheme.id,
+          name: `Conflicting ${activeTheme.id}`
+        })
+      }
+    });
+    const repository = new CustomThemeRepository(store, []);
+
+    const mounted = await new MergedThemeRepository(
+      bundled,
+      builtIns,
+      repository
+    ).mount();
+
+    expect(mounted.files.get(activeTheme.file)).toBe(
+      bundled.files.get(activeTheme.file)
+    );
   });
 });

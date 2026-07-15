@@ -21,6 +21,10 @@ describe("0.1.0 release configuration", () => {
     expect(packageJson.scripts?.release).toMatch(/node/u);
     expect(packageJson.scripts?.["audit:secrets"]).toMatch(/node/u);
     expect(packageJson.scripts?.["audit:mobile"]).toMatch(/node/u);
+    const release = packageJson.scripts?.release ?? "";
+    expect(release.indexOf("build-release")).toBeLessThan(
+      release.indexOf("audit:secrets")
+    );
   });
 
   it("ships AGPL and pinned upstream attribution inputs", () => {
@@ -31,6 +35,12 @@ describe("0.1.0 release configuration", () => {
     expect(readFileSync(resolve("THIRD_PARTY_NOTICES.md"), "utf8")).toContain(
       "ba1f4175519b481cb3566616c9e5178705067904"
     );
+    const notices = readFileSync(resolve("THIRD_PARTY_NOTICES.md"), "utf8");
+    expect(notices).toContain("https://github.com/isjiamu/Galley");
+    expect(notices).toContain("Permission is hereby granted, free of charge");
+    expect(notices).toContain("Apache License");
+    expect(notices).toContain("Mozilla Public License Version 2.0");
+    expect(notices).toContain("Copyright");
     expect(JSON.parse(readFileSync(resolve("manifest.json"), "utf8"))).toMatchObject({
       version: "0.1.0",
       isDesktopOnly: false
@@ -58,5 +68,8 @@ describe("0.1.0 release configuration", () => {
     expect(workflow).toContain("npm run benchmark:long");
     expect(workflow).toContain("npm run audit:licenses");
     expect(workflow).toContain("npm run release");
+    expect(workflow.lastIndexOf("npm run audit:secrets")).toBeGreaterThan(
+      workflow.indexOf("npm run release")
+    );
   });
 });
