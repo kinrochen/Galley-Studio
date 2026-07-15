@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   ImportedSkillRepository,
+  type ActiveSkillPointerStore,
   type AtomicSkillArchiveStore
 } from "../../src/skill/ImportedSkillRepository";
 import { SkillArchiveImporter } from "../../src/skill/SkillArchiveImporter";
@@ -131,12 +132,10 @@ describe("imported Skill repository activation", () => {
     expect(current.activeVersion).toBe("bundled");
     expect(await repository.list()).toEqual([imported.version]);
 
-    let persisted = current;
-    const next = await repository.activate(imported.version, current, async (value) => {
-      persisted = value;
-    });
+    const pointer = new MemoryActivePointer(current);
+    const next = await repository.activate(imported.version, current, pointer);
     expect(next.activeVersion).toBe(imported.version);
-    expect(persisted.activeVersion).toBe(imported.version);
+    expect(pointer.durable.activeVersion).toBe(imported.version);
   });
 
   it("preserves the prior active version when validation or persistence fails", async () => {
@@ -145,10 +144,13 @@ describe("imported Skill repository activation", () => {
     const imported = await repository.import(validSkillArchive());
     const current = new SkillPackageSettings("bundled");
 
-    await expect(repository.activate(imported.version, current, async () => {
-      throw new Error("settings write failed");
-    })).rejects.toThrow("settings write failed");
+    const pointer = new MemoryActivePointer(current);
+    pointer.beforeCommit = () => { throw new Error("settings write failed"); };
+    await expect(
+      repository.activate(imported.version, current, pointer)
+    ).rejects.toThrow("settings write failed");
     expect(current.activeVersion).toBe("bundled");
+    expect(pointer.durable.activeVersion).toBe("bundled");
   });
 
   it("compensates when the durable active pointer is written before persistence throws", async () => {
@@ -156,22 +158,18 @@ describe("imported Skill repository activation", () => {
     const repository = new ImportedSkillRepository(store, new SkillArchiveImporter());
     const imported = await repository.import(validSkillArchive());
     const current = new SkillPackageSettings("bundled");
-    let durable = current;
-    let writes = 0;
-    const persist = Object.assign(
-      async (next: SkillPackageSettings) => {
-        durable = next;
-        writes += 1;
-        if (writes === 1) throw new Error("saveData threw after durable write");
-      },
-      { read: async () => durable }
-    );
+    const pointer = new MemoryActivePointer(current);
+    pointer.afterCommit = () => {
+      if (pointer.writes === 1) {
+        throw new Error("saveData threw after durable write");
+      }
+    };
 
     await expect(
-      repository.activate(imported.version, current, persist)
+      repository.activate(imported.version, current, pointer)
     ).rejects.toThrow("saveData threw after durable write");
-    expect(durable.activeVersion).toBe("bundled");
-    expect(writes).toBe(2);
+    expect(pointer.durable.activeVersion).toBe("bundled");
+    expect(pointer.writes).toBe(2);
   });
 
   it("never rolls back an unexpected concurrently changed durable pointer", async () => {
@@ -179,21 +177,41 @@ describe("imported Skill repository activation", () => {
     const repository = new ImportedSkillRepository(store, new SkillArchiveImporter());
     const imported = await repository.import(validSkillArchive());
     const current = new SkillPackageSettings("bundled");
-    let durable = current;
-    let writes = 0;
+    const pointer = new MemoryActivePointer(current);
     const concurrent = new SkillPackageSettings("import-abcdef123456");
-    const persist = Object.assign(
-      async (_next: SkillPackageSettings) => {
-        writes += 1;
-        durable = concurrent;
-      },
-      { read: async () => durable }
-    );
+    pointer.afterCommit = () => {
+      pointer.durable = concurrent;
+      throw new Error("concurrent durable update");
+    };
 
     await expect(
-      repository.activate(imported.version, current, persist)
+      repository.activate(imported.version, current, pointer)
     ).rejects.toThrow(/unexpected durable version|changed/iu);
-    expect(durable.activeVersion).toBe("import-abcdef123456");
-    expect(writes).toBe(1);
+    expect(pointer.durable.activeVersion).toBe("import-abcdef123456");
+    expect(pointer.writes).toBe(1);
   });
 });
+
+class MemoryActivePointer implements ActiveSkillPointerStore {
+  writes = 0;
+  beforeCommit: (() => void) | null = null;
+  afterCommit: (() => void) | null = null;
+
+  constructor(public durable: SkillPackageSettings) {}
+
+  async read(): Promise<SkillPackageSettings> {
+    return this.durable;
+  }
+
+  async compareAndSet(
+    expected: SkillPackageSettings,
+    next: SkillPackageSettings
+  ): Promise<"committed" | "collision"> {
+    if (this.durable.activeVersion !== expected.activeVersion) return "collision";
+    this.beforeCommit?.();
+    this.durable = next;
+    this.writes += 1;
+    this.afterCommit?.();
+    return "committed";
+  }
+}

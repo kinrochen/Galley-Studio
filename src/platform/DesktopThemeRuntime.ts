@@ -2,6 +2,10 @@ import type { App } from "obsidian";
 
 import type { GalleySettings } from "../settings/GalleySettings";
 import { ImportedSkillRepository } from "../skill/ImportedSkillRepository";
+import {
+  ObsidianActiveSkillPointerStore,
+  type ActiveSkillSettingsPersistence
+} from "../skill/ObsidianActiveSkillPointerStore";
 import { SkillPackageSettings } from "../skill/SkillPackageSettings";
 import { SkillVirtualFileSystem } from "../skill/SkillVirtualFileSystem";
 import { ThemeGenerationService, type ThemeDraft, type ThemeGenerationInput } from "../theme-lab/ThemeGenerationService";
@@ -125,23 +129,13 @@ export async function activateImportedSkill(
   app: App,
   version: string,
   currentVersion: string,
-  persist: ((version: string) => Promise<void>) & {
-    readonly read?: () => Promise<string>;
-  }
+  persistence: ActiveSkillSettingsPersistence
 ): Promise<void> {
   const repository: ImportedSkillRepository = importedSkillRepository(app);
-  const transaction = Object.assign(
-    async (next: SkillPackageSettings) => persist(next.activeVersion),
-    persist.read
-      ? {
-          read: async () => new SkillPackageSettings(await persist.read!())
-        }
-      : {}
-  );
   await repository.activate(
     version,
     new SkillPackageSettings(currentVersion),
-    transaction
+    new ObsidianActiveSkillPointerStore(app, persistence)
   );
 }
 

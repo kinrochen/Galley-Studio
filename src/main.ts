@@ -382,24 +382,14 @@ export default class GalleyPlugin extends Plugin {
         `Imported Skill version to activate:\n${versions.join("\n")}`
       )?.trim();
       if (!version) return;
-      const persist = Object.assign(
-        async (activeSkillVersion: string) => {
-          const durable = normalizeSettings(await this.loadData());
-          await this.saveData(normalizeSettings({
-            ...durable,
-            activeSkillVersion
-          }));
-        },
-        {
-          read: async () =>
-            normalizeSettings(await this.loadData()).activeSkillVersion
-        }
-      );
       await runtime.activateImportedSkill(
         this.app,
         version,
         this.settings.activeSkillVersion,
-        persist
+        {
+          load: () => this.loadData(),
+          save: (settings) => this.saveData(settings)
+        }
       );
       this.settings = normalizeSettings(await this.loadData());
       new Notice(`Activated Skill: ${version}`);

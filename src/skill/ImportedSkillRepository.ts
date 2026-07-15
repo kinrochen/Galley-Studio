@@ -11,9 +11,12 @@ export interface AtomicSkillArchiveStore {
   ): Promise<"committed" | "exists">;
 }
 
-export interface ActiveSkillPersist {
-  (next: SkillPackageSettings): Promise<void>;
-  read?: () => Promise<SkillPackageSettings>;
+export interface ActiveSkillPointerStore {
+  read(): Promise<SkillPackageSettings>;
+  compareAndSet(
+    expected: SkillPackageSettings,
+    next: SkillPackageSettings
+  ): Promise<"committed" | "collision">;
 }
 
 export class ImportedSkillRepository {
@@ -51,53 +54,54 @@ export class ImportedSkillRepository {
   async activate(
     version: string,
     current: SkillPackageSettings,
-    persist: ActiveSkillPersist
+    pointer: ActiveSkillPointerStore
   ): Promise<SkillPackageSettings> {
     await this.load(version);
     const next = current.activate(version);
-    if (persist.read) {
-      const observed = await persist.read();
-      if (observed.activeVersion !== current.activeVersion) {
-        throw new Error("Active Skill changed before activation could commit.");
-      }
+    const observed = await pointer.read();
+    if (observed.activeVersion !== current.activeVersion) {
+      throw new Error("Active Skill changed before activation could commit.");
     }
+    let result: "committed" | "collision";
     try {
-      await persist(next);
+      result = await pointer.compareAndSet(current, next);
     } catch (error) {
-      await compensateDurablePointer(persist, current, next);
+      await compensateDurablePointer(pointer, current, next);
       throw error;
     }
-    if (persist.read) {
-      const observed = await persist.read();
-      if (observed.activeVersion !== next.activeVersion) {
-        await compensateDurablePointer(persist, current, next);
-        throw new Error("Active Skill persistence could not be verified.");
-      }
+    if (result === "collision") {
+      throw new Error("Active Skill changed before activation could commit.");
     }
     return next;
   }
 }
 
 async function compensateDurablePointer(
-  persist: ActiveSkillPersist,
+  pointer: ActiveSkillPointerStore,
   current: SkillPackageSettings,
-  observedOrAttempted: SkillPackageSettings
+  attempted: SkillPackageSettings
 ): Promise<void> {
-  if (!persist.read) return;
-  const observed = await persist.read();
+  const observed = await pointer.read();
   if (observed.activeVersion === current.activeVersion) return;
-  if (observed.activeVersion !== observedOrAttempted.activeVersion) {
+  if (observed.activeVersion !== attempted.activeVersion) {
     throw new Error("Active Skill rollback refused an unexpected durable version.");
   }
+  let rollback: "committed" | "collision";
   try {
-    await persist(current);
+    rollback = await pointer.compareAndSet(attempted, current);
   } catch {
-    const afterFailure = await persist.read();
+    const afterFailure = await pointer.read();
     if (afterFailure.activeVersion !== current.activeVersion) {
       throw new Error("Active Skill durable rollback failed.");
     }
+    return;
   }
-  const restored = await persist.read();
+  if (rollback === "collision") {
+    const collided = await pointer.read();
+    if (collided.activeVersion === current.activeVersion) return;
+    throw new Error("Active Skill rollback refused an unexpected durable version.");
+  }
+  const restored = await pointer.read();
   if (restored.activeVersion !== current.activeVersion) {
     throw new Error("Active Skill durable rollback could not be verified.");
   }
