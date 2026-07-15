@@ -68,6 +68,8 @@ export class Plugin {
   savedData: unknown;
   readonly commands: unknown[] = [];
   readonly settingTabs: unknown[] = [];
+  readonly views = new Map<string, (leaf: WorkspaceLeaf) => ItemView>();
+  readonly eventRefs: unknown[] = [];
 
   constructor(app: unknown, manifest: unknown) {
     this.app = app;
@@ -82,12 +84,89 @@ export class Plugin {
     this.settingTabs.push(settingTab);
   }
 
+  registerView(type: string, creator: (leaf: WorkspaceLeaf) => ItemView): void {
+    this.views.set(type, creator);
+  }
+
+  unregisterView(type: string): void {
+    this.views.delete(type);
+  }
+
+  registerEvent(ref: unknown): void {
+    this.eventRefs.push(ref);
+  }
+
   async loadData(): Promise<unknown> {
     return this.testData;
   }
 
   async saveData(data: unknown): Promise<void> {
     this.savedData = structuredClone(data);
+  }
+}
+
+export class WorkspaceLeaf {
+  readonly containerEl = document.createElement("div");
+  view: ItemView | null = null;
+  state: unknown = null;
+
+  async setViewState(state: unknown): Promise<void> {
+    this.state = state;
+  }
+}
+
+export class ItemView {
+  readonly containerEl: HTMLElement;
+  readonly contentEl: HTMLElement;
+
+  constructor(readonly leaf: WorkspaceLeaf) {
+    this.containerEl = leaf.containerEl;
+    this.contentEl = document.createElement("div");
+    this.containerEl.append(this.contentEl);
+  }
+
+  getViewType(): string {
+    return "test-item-view";
+  }
+
+  getDisplayText(): string {
+    return "Test item view";
+  }
+
+  async onOpen(): Promise<void> {}
+
+  async onClose(): Promise<void> {}
+}
+
+export class MenuItem {
+  title = "";
+  icon: string | null = null;
+  callback: (() => unknown) | null = null;
+
+  setTitle(title: string | DocumentFragment): this {
+    this.title = typeof title === "string" ? title : title.textContent ?? "";
+    return this;
+  }
+
+  setIcon(icon: string | null): this {
+    this.icon = icon;
+    return this;
+  }
+
+  onClick(callback: () => unknown): this {
+    this.callback = callback;
+    return this;
+  }
+}
+
+export class Menu {
+  readonly items: MenuItem[] = [];
+
+  addItem(callback: (item: MenuItem) => unknown): this {
+    const item = new MenuItem();
+    callback(item);
+    this.items.push(item);
+    return this;
   }
 }
 

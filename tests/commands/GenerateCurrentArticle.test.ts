@@ -138,6 +138,35 @@ describe("generateCurrentArticle", () => {
     );
   });
 
+  it("opens the generated Galley HTML after the independent pair is committed", async () => {
+    const openArtifact = vi.fn(async () => undefined);
+    const context = makeContext({ openArtifact });
+
+    const paths = await generateCurrentArticle(
+      context,
+      new AbortController().signal
+    );
+
+    expect(openArtifact).toHaveBeenCalledWith(paths.html);
+  });
+
+  it("keeps a committed pair successful when only automatic workbench opening fails", async () => {
+    const noticesSeen: string[] = [];
+    const context = makeContext({
+      openArtifact: async () => {
+        throw new Error("UI failed");
+      },
+      notice: (message) => noticesSeen.push(message)
+    });
+
+    await expect(
+      generateCurrentArticle(context, new AbortController().signal)
+    ).resolves.toMatchObject({ html: "notes/note.galley.html" });
+    expect(noticesSeen.at(-1)).toBe(
+      "Galley: The article was generated, but the workbench could not open it."
+    );
+  });
+
   it.each([
     [null, "Galley: Open one Markdown file before generating."],
     [
@@ -341,12 +370,18 @@ describe("plugin command registration", () => {
     const desktop = new GalleyPlugin(makePluginApp(), {} as PluginManifest);
     await desktop.onload();
     expect(commandIds(desktop)).toContain("generate-current-article");
+    expect(commandIds(desktop)).toContain("open-current-galley-in-workbench");
     expect(commandNames(desktop)).toContain("Galley: AI layout current article");
+    expect((desktop as unknown as { views: Map<string, unknown> }).views.has("galley-workbench"))
+      .toBe(true);
 
     Platform.isMobileApp = true;
     const mobile = new GalleyPlugin(makePluginApp(), {} as PluginManifest);
     await mobile.onload();
     expect(commandIds(mobile)).not.toContain("generate-current-article");
+    expect(commandIds(mobile)).not.toContain("open-current-galley-in-workbench");
+    expect((mobile as unknown as { views: Map<string, unknown> }).views.has("galley-workbench"))
+      .toBe(false);
   });
 
   it("aborts every retained command controller when the plugin unloads", async () => {

@@ -49,6 +49,7 @@ export interface GenerateCurrentArticleContext {
   createRepository(
     settings: Readonly<GalleySettings>
   ): GenerationCommandArtifactWriter;
+  openArtifact?(htmlPath: string): Promise<void>;
   notice(message: string): void;
 }
 
@@ -116,6 +117,15 @@ export async function generateCurrentArticle(
         ? `Galley: Saved UNVERIFIED DRAFT ${paths.html} and ${paths.sidecar}.`
         : `Galley: Generated ${paths.html} and ${paths.sidecar}.`
     );
+    if (context.openArtifact) {
+      try {
+        await context.openArtifact(paths.html);
+      } catch {
+        context.notice(
+          "Galley: The article was generated, but the workbench could not open it."
+        );
+      }
+    }
     return paths;
   } catch (error) {
     context.notice(safeFailureNotice(error, signal));

@@ -27,8 +27,20 @@ const SELECTION_EVENTS = "NodeChange SelectionChange";
 const ALLOWED_DATA_ATTRIBUTES = new Set([
   "data-galley-source",
   "data-galley-role",
-  "data-galley-slot"
+  "data-galley-slot",
+  // EditorResourceResolver owns these reversible display-only markers. The
+  // workbench removes them before every DocumentSession update/save.
+  "data-galley-original-src",
+  "data-galley-original-href"
 ]);
+const TEMPORARY_EDITOR_ATTRIBUTES = [
+  "data-galley-original-src",
+  "data-galley-original-href"
+] as const;
+export const HUGERTE_EDITOR_VALID_ELEMENTS = HUGERTE_VALID_ELEMENTS.replace(
+  "@[",
+  `@[${TEMPORARY_EDITOR_ATTRIBUTES.join("|")}|`
+);
 const HUGERTE_BODY_ELEMENT_NAMES = HUGERTE_VALID_ELEMENTS
   .split(",")
   .slice(1)
@@ -46,7 +58,10 @@ const TOOLBAR = [
 
 export interface HugeRteEditor {
   readonly targetElm: HTMLElement;
-  readonly selection: { getNode(): Node | null };
+  readonly selection: {
+    getNode(): Node | null;
+    select?(node: Node): void;
+  };
   readonly parser?: HugeRteParser;
   readonly serializer?: HugeRteParser;
   getContent(): string;
@@ -233,6 +248,19 @@ export class HugeRteAdapter implements HtmlEditorAdapter {
     } finally {
       this.suppressChanges = false;
     }
+  }
+
+  selectSource(sourceId: string): boolean {
+    const editor = this.phase === "mounted" ? this.editor : undefined;
+    if (!editor || !sourceId || sourceId !== sourceId.trim()) return false;
+    const element = [...editor.getDoc().querySelectorAll<HTMLElement>(
+      "[data-galley-source]"
+    )].find((candidate) => candidate.getAttribute("data-galley-source") === sourceId);
+    if (!element) return false;
+    editor.selection.select?.(element);
+    element.scrollIntoView?.({ block: "center", inline: "nearest" });
+    editor.focus();
+    return true;
   }
 
   focus(): void {
@@ -441,7 +469,7 @@ function createInitOptions(
     relative_urls: false,
     remove_script_host: false,
     document_base_url: options.documentBaseUrl,
-    valid_elements: HUGERTE_VALID_ELEMENTS,
+    valid_elements: HUGERTE_EDITOR_VALID_ELEMENTS,
     plugins: "advlist autolink link lists image table charmap",
     icons: "default",
     model: "dom",

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   BUNDLED_HUGERTE_FEATURES,
+  HUGERTE_EDITOR_VALID_ELEMENTS,
   HugeRteAdapter,
   type HugeRteEditor,
   type HugeRteInitOptions,
@@ -17,7 +18,12 @@ type Listener = () => void;
 class FakeEditor implements HugeRteEditor {
   readonly contentDocument = document.implementation.createHTMLDocument("editor");
   readonly listeners = new Map<string, Set<Listener>>();
-  readonly selection = { getNode: () => this.selectedNode };
+  readonly selection = {
+    getNode: () => this.selectedNode,
+    select: vi.fn((node: Node) => {
+      this.selectedNode = node;
+    })
+  };
   selectedNode: Node | null = this.contentDocument.body;
   html: string;
   focusCount = 0;
@@ -238,7 +244,7 @@ describe("HugeRteAdapter configuration", () => {
       promotion: false,
       branding: false,
       convert_urls: false,
-      valid_elements: HUGERTE_VALID_ELEMENTS,
+      valid_elements: HUGERTE_EDITOR_VALID_ELEMENTS,
       document_base_url: "app://vault/articles/",
       plugins: "advlist autolink link lists image table charmap"
     });
@@ -256,6 +262,13 @@ describe("HugeRteAdapter configuration", () => {
     expect(document.head.querySelector("style[data-galley-hugerte-skin]")?.textContent)
       .toBe(HUGERTE_INLINE_SKIN_CSS);
     adapter.destroy();
+  });
+
+  it("keeps reversible resource markers inside the editor boundary only", () => {
+    expect(HUGERTE_EDITOR_VALID_ELEMENTS).toContain("data-galley-original-src");
+    expect(HUGERTE_EDITOR_VALID_ELEMENTS).toContain("data-galley-original-href");
+    expect(HUGERTE_VALID_ELEMENTS).not.toContain("data-galley-original-src");
+    expect(HUGERTE_VALID_ELEMENTS).not.toContain("data-galley-original-href");
   });
 
   it("loads the bundled runtime without retaining HugeRTE window globals", async () => {
@@ -328,6 +341,26 @@ describe("HugeRteAdapter event bridge", () => {
     editor.emit("NodeChange");
 
     expect(onSelectionChange.mock.calls).toEqual([[paragraph], [null], [null]]);
+    adapter.destroy();
+  });
+
+  it("locates and selects an exact source block for outline navigation", async () => {
+    const runtime = new FakeRuntime();
+    const adapter = makeAdapter(runtime);
+    await adapter.mount(
+      document.createElement("div"),
+      '<h2 data-galley-source="heading-001">One</h2><h2 data-galley-source="heading-002">Two</h2>',
+      mountOptions()
+    );
+    const editor = runtime.editors[0]!;
+    const target = editor.contentDocument.querySelector(
+      '[data-galley-source="heading-002"]'
+    );
+
+    expect(adapter.selectSource("heading-002")).toBe(true);
+    expect(editor.selection.select).toHaveBeenCalledWith(target);
+    expect(editor.focusCount).toBe(1);
+    expect(adapter.selectSource('heading-002"] *')).toBe(false);
     adapter.destroy();
   });
 });

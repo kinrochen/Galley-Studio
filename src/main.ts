@@ -4,9 +4,11 @@ import {
   Platform,
   Plugin,
   type EventRef,
+  type Menu,
   type TAbstractFile,
   type TFile,
-  type Vault
+  type Vault,
+  type WorkspaceLeaf
 } from "obsidian";
 import { AiError } from "./ai/AiError";
 import { validateBaseUrl } from "./ai/BaseUrlPolicy";
@@ -26,6 +28,10 @@ import {
   type ArtifactVault
 } from "./documents/ArtifactRepository";
 import { isNormalizedVaultRelativePath } from "./documents/GalleySidecar";
+import type { OpenedGalleyDocumentSession } from "./documents/DocumentSessionOpener";
+import { ObsidianDocumentSessionOpener } from "./documents/ObsidianDocumentSessionOpener";
+import { EditorFactory } from "./editor/EditorFactory";
+import { EditorResourceResolver } from "./editor/EditorResourceResolver";
 import { BUNDLED_SKILL } from "./generated/bundledSkill";
 import { GenerationPipeline } from "./generation/GenerationPipeline";
 import {
@@ -42,10 +48,19 @@ import { BundledSkillLoader } from "./skill/BundledSkillLoader";
 import { SkillSession } from "./skill/SkillSession";
 import { SkillVirtualFileSystem } from "./skill/SkillVirtualFileSystem";
 import { BuiltInThemeRepository } from "./themes/BuiltInThemeRepository";
+import {
+  GALLEY_WORKBENCH_VIEW_TYPE,
+  GalleyWorkbenchView,
+  isGalleyHtmlPath,
+  type GalleyWorkbenchViewServices,
+  type WorkbenchDocument
+} from "./workbench/GalleyWorkbenchView";
 
 export default class GalleyPlugin extends Plugin {
   settings: GalleySettings = normalizeSettings(undefined);
   readonly #generationControllers = new Set<AbortController>();
+  readonly #editorFactory = new EditorFactory();
+  #documentOpener: ObsidianDocumentSessionOpener | null = null;
   readonly capabilities: PlatformCapabilities = derivePlatformCapabilities(
     Platform.isMobileApp
   );
@@ -63,6 +78,21 @@ export default class GalleyPlugin extends Plugin {
       callback: () => console.info("Galley capabilities", this.capabilities)
     });
     if (this.canGenerate) {
+      this.registerView(
+        GALLEY_WORKBENCH_VIEW_TYPE,
+        (leaf) => this.#createWorkbenchView(leaf)
+      );
+      this.addCommand({
+        id: "open-current-galley-in-workbench",
+        name: "Galley: Open current Galley document in workbench",
+        checkCallback: (checking) => {
+          const path = this.#activeGalleyPath();
+          if (!path) return false;
+          if (!checking) void this.openGalleyDocument(path);
+          return true;
+        }
+      });
+      this.#registerGalleyFileMenu();
       this.addCommand({
         id: "check-model-connection-and-skill-loading",
         name: "Galley: Check model connection and Skill loading",
@@ -130,7 +160,8 @@ export default class GalleyPlugin extends Plugin {
         }),
       notice: (message) => {
         new Notice(message);
-      }
+      },
+      openArtifact: (path) => this.openGalleyDocument(path)
     };
 
     try {
@@ -140,6 +171,80 @@ export default class GalleyPlugin extends Plugin {
     } finally {
       this.#generationControllers.delete(controller);
     }
+  }
+
+  async openGalleyDocument(path: string): Promise<void> {
+    if (!this.capabilities.canEdit || !isGalleyHtmlPath(path)) return;
+    const workspace = (this.app as GalleyPlugin["app"] | undefined)?.workspace;
+    if (!workspace || typeof workspace.getLeaf !== "function") return;
+    const leaf = workspace.getLeaf("tab");
+    await leaf.setViewState({
+      type: GALLEY_WORKBENCH_VIEW_TYPE,
+      state: { path },
+      active: true
+    });
+    if (typeof workspace.revealLeaf === "function") {
+      workspace.revealLeaf(leaf);
+    }
+  }
+
+  #createWorkbenchView(leaf: WorkspaceLeaf): GalleyWorkbenchView {
+    const resourceResolver = new EditorResourceResolver((path) => {
+      const file = this.app.vault.getFileByPath(path);
+      return file ? this.app.vault.getResourcePath(file) : path;
+    });
+    const services: GalleyWorkbenchViewServices = {
+      capabilities: this.capabilities,
+      openDocument: async (path) =>
+        this.#asWorkbenchDocument(await this.#opener().open(path)),
+      createVisualEditor: () => this.#editorFactory.createVisual(this.capabilities),
+      createSourceEditor: () => this.#editorFactory.createSource(this.capabilities),
+      openCopy: (path) => this.openGalleyDocument(path),
+      confirm: async (message) => window.confirm(message),
+      resourceResolver,
+      documentBaseUrl: () => "app://vault/"
+    };
+    return new GalleyWorkbenchView(leaf, services);
+  }
+
+  #asWorkbenchDocument(session: OpenedGalleyDocumentSession): WorkbenchDocument {
+    const recovery = session.recoveryState();
+    return {
+      session,
+      recovery: {
+        status: recovery.status,
+        quarantinedTransactionId:
+          recovery.status === "ready" ? null : recovery.transactionId
+      },
+      listHistory: async () => [...await session.history()]
+    };
+  }
+
+  #opener(): ObsidianDocumentSessionOpener {
+    this.#documentOpener ??= new ObsidianDocumentSessionOpener(this.app.vault);
+    return this.#documentOpener;
+  }
+
+  #activeGalleyPath(): string | null {
+    const workspace = (this.app as GalleyPlugin["app"] | undefined)?.workspace;
+    const active = workspace?.getActiveFile?.();
+    return active && isGalleyHtmlPath(active.path) ? active.path : null;
+  }
+
+  #registerGalleyFileMenu(): void {
+    const workspace = (this.app as GalleyPlugin["app"] | undefined)?.workspace;
+    if (!workspace || typeof workspace.on !== "function") return;
+    this.registerEvent(
+      workspace.on("file-menu", (menu: Menu, file: TAbstractFile) => {
+        if (isFolder(file) || !isGalleyHtmlPath(file.path)) return;
+        menu.addItem((item) =>
+          item
+            .setTitle("Open in Galley workbench")
+            .setIcon("layout-dashboard")
+            .onClick(() => this.openGalleyDocument(file.path))
+        );
+      })
+    );
   }
 }
 

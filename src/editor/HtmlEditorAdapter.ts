@@ -12,6 +12,8 @@ export interface HtmlEditorAdapter {
   ): Promise<void>;
   getHtml(): string;
   setHtml(html: string): void;
+  /** Selects one exact Galley source block when the adapter can address DOM nodes. */
+  selectSource?(sourceId: string): boolean;
   focus(): void;
   destroy(): void;
 }
