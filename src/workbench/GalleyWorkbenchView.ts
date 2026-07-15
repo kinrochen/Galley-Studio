@@ -51,6 +51,7 @@ export interface WorkbenchSession {
   state(): DocumentSessionState;
   html(): string;
   bodyHtml(): string;
+  exportPaths?(): readonly string[];
   updateBody(bodyHtml: string): void;
   save(reason: SaveReason): Promise<void>;
   reload(): Promise<void>;
@@ -101,6 +102,7 @@ export interface GalleyWorkbenchViewServices {
   readonly saveExportConfiguration?: (
     configuration: ExportConfiguration
   ) => Promise<readonly ExportConfiguration[]>;
+  readonly reportExportOutcome?: (message: string) => void;
 }
 
 export class GalleyPathInvalidError extends Error {
@@ -136,6 +138,7 @@ export class GalleyWorkbenchView extends ItemView {
   #transition: Promise<void> = Promise.resolve();
   #saveQueue: Promise<void> = Promise.resolve();
   #exportController: AbortController | null = null;
+  #exportTasks = new Set<Promise<void>>();
   #exportConfigurations: readonly ExportConfiguration[];
   #exportState: ExportPanelState;
   #toolbar!: HTMLElement;
@@ -192,18 +195,19 @@ export class GalleyWorkbenchView extends ItemView {
 
   async onClose(): Promise<void> {
     if (this.#closed) return;
+    this.#closed = true;
+    this.#exportController?.abort();
+    this.#exportController = null;
+    this.#mountGeneration += 1;
     this.#captureAdapterBody();
     try {
+      await this.#settleExports();
       await this.#autosave?.flush();
       if (this.#document?.session.state().dirty) await this.#save("explicit");
     } catch (error) {
       this.#render();
       throw error;
     }
-    this.#closed = true;
-    this.#exportController?.abort();
-    this.#exportController = null;
-    this.#mountGeneration += 1;
     this.#autosave?.dispose();
     this.#autosave = null;
     this.#destroyActiveAdapter();
@@ -219,6 +223,8 @@ export class GalleyWorkbenchView extends ItemView {
     assertGalleyHtmlPath(path);
     this.#exportController?.abort();
     this.#exportController = null;
+    this.#mountGeneration += 1;
+    await this.#settleExports();
     this.#closed = false;
     if (this.#document) {
       this.#captureAdapterBody();
@@ -311,7 +317,15 @@ export class GalleyWorkbenchView extends ItemView {
     await this.#save("explicit");
   }
 
-  async exportCurrent(configurationId: string, copy: boolean): Promise<void> {
+  exportCurrent(configurationId: string, copy: boolean): Promise<void> {
+    const task = this.#performExport(configurationId, copy);
+    this.#exportTasks.add(task);
+    void task.finally(() => this.#exportTasks.delete(task)).catch(() => undefined);
+    return task;
+  }
+
+  async #performExport(configurationId: string, copy: boolean): Promise<void> {
+    if (this.#closed) throw new Error("Galley export is unavailable.");
     const exportDocument = this.#services.exportDocument;
     const document = this.#document;
     const configuration = this.#exportConfigurations.find(
@@ -330,6 +344,7 @@ export class GalleyWorkbenchView extends ItemView {
       this.#exportController === controller &&
       this.#document === document &&
       this.#mountGeneration === operationGeneration;
+    let durablePath: string | null = null;
     try {
       this.#captureAdapterBody();
       if (document.session.state().dirty) await this.#save("explicit");
@@ -348,7 +363,13 @@ export class GalleyWorkbenchView extends ItemView {
         },
         controller.signal
       );
-      if (!isCurrent()) return;
+      durablePath = result.path;
+      if (!isCurrent()) {
+        this.#services.reportExportOutcome?.(
+          `Exported ${result.path} for the previous document`
+        );
+        return;
+      }
       if (copy) {
         const copyHtml = this.#services.copyExportHtml;
         if (!copyHtml) throw new Error("Galley rich-text copy is unavailable.");
@@ -362,15 +383,20 @@ export class GalleyWorkbenchView extends ItemView {
       };
       this.#render();
     } catch (error) {
-      if (!isCurrent()) return;
+      const artifactPath = durablePath ?? errorArtifactPath(error);
+      const message = exportFailureMessage(
+        error,
+        artifactPath,
+        copy && durablePath !== null
+      );
+      if (!isCurrent()) {
+        if (artifactPath) this.#services.reportExportOutcome?.(message);
+        return;
+      }
       this.#exportState = {
         selectedId: configuration.id,
         status: "error",
-        message: errorCode(error) === "export_record_failed"
-          ? "Export file was written, but its sidecar record failed"
-          : copy
-            ? "Copy failed"
-            : "Export failed"
+        message
       };
       this.#render();
       throw error;
@@ -459,6 +485,7 @@ export class GalleyWorkbenchView extends ItemView {
   }
 
   #render(): void {
+    if (this.#closed) return;
     this.#ensureShell();
     renderWorkbenchToolbar(this.#toolbar, this.#state, {
       onMode: (mode) => this.selectMode(mode),
@@ -501,7 +528,15 @@ export class GalleyWorkbenchView extends ItemView {
           },
           onExport: (selectedId) => this.exportCurrent(selectedId, false),
           onCopy: (selectedId) => this.exportCurrent(selectedId, true),
-          onSave: (configuration) => this.#saveExportConfiguration(configuration)
+          onSave: (configuration) => this.#saveExportConfiguration(configuration),
+          onValidationError: (message) => {
+            this.#exportState = {
+              ...this.#exportState,
+              status: "error",
+              message
+            };
+            this.#render();
+          }
         }
       );
     } else {
@@ -529,6 +564,12 @@ export class GalleyWorkbenchView extends ItemView {
       };
     }
     this.#render();
+  }
+
+  async #settleExports(): Promise<void> {
+    while (this.#exportTasks.size > 0) {
+      await Promise.allSettled([...this.#exportTasks]);
+    }
   }
 
   async #mountMode(mode: WorkbenchMode, generation: number): Promise<void> {
@@ -771,4 +812,47 @@ function errorCode(error: unknown): string | null {
     typeof error.code === "string"
     ? error.code
     : null;
+}
+
+function errorArtifactPath(error: unknown): string | null {
+  if (typeof error !== "object" || error === null) return null;
+  const fields = error as Record<string, unknown>;
+  for (const key of ["artifactPath", "path"] as const) {
+    const value = fields[key];
+    if (typeof value === "string" && value) return value;
+  }
+  return null;
+}
+
+function recordOutcome(error: unknown): string | null {
+  return typeof error === "object" &&
+    error !== null &&
+    "outcome" in error &&
+    typeof error.outcome === "string"
+    ? error.outcome
+    : null;
+}
+
+function exportFailureMessage(
+  error: unknown,
+  artifactPath: string | null,
+  copyFailedAfterExport: boolean
+): string {
+  if (errorCode(error) === "export_record_failed" && artifactPath) {
+    const outcome = recordOutcome(error);
+    if (outcome === "recorded") {
+      return `Exported ${artifactPath}; record committed before cancellation`;
+    }
+    if (outcome === "not-recorded") {
+      return `Exported ${artifactPath}; sidecar record not recorded`;
+    }
+    return `Exported ${artifactPath}; sidecar record outcome ambiguous`;
+  }
+  if (errorCode(error) === "export_artifact_write_ambiguous" && artifactPath) {
+    return `Export outcome ambiguous at ${artifactPath}`;
+  }
+  if (copyFailedAfterExport && artifactPath) {
+    return `Exported ${artifactPath}; copy failed`;
+  }
+  return copyFailedAfterExport ? "Copy failed" : "Export failed";
 }

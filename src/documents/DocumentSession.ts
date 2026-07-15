@@ -93,6 +93,7 @@ export class DocumentSaveInProgressError extends Error {
 
 export class DocumentExportDirtyError extends Error {
   readonly code = "document_export_dirty" as const;
+  readonly recordOutcome = "not-recorded" as const;
 
   constructor() {
     super("Save the current Galley edit before recording an export.");
@@ -102,6 +103,7 @@ export class DocumentExportDirtyError extends Error {
 
 export class DocumentExportSourceMismatchError extends Error {
   readonly code = "document_export_source_mismatch" as const;
+  readonly recordOutcome = "not-recorded" as const;
 
   constructor() {
     super("The export was not produced from the current saved Galley bytes.");
@@ -209,6 +211,10 @@ export class DocumentSession<
 
   bodyHtml(): string {
     return this.#currentDocument.bodyHtml;
+  }
+
+  exportPaths(): readonly string[] {
+    return Object.freeze(this.#sidecar.exports.map(({ path }) => path));
   }
 
   updateBody(bodyHtml: string): void {
@@ -379,29 +385,54 @@ export class DocumentSession<
     recordInput: GalleyExportRecordV1,
     signal?: AbortSignal
   ): Promise<void> {
-    if (this.#saving) throw new DocumentSaveInProgressError();
+    if (this.#saving) {
+      throw tagRecordOutcome(
+        new DocumentSaveInProgressError(),
+        "not-recorded"
+      );
+    }
     if (this.#dirty) throw new DocumentExportDirtyError();
-    throwIfAborted(signal);
-    const record = GalleyExportRecordV1Schema.parse(recordInput);
+    try {
+      throwIfAborted(signal);
+    } catch (error) {
+      throw tagRecordOutcome(error, "not-recorded");
+    }
+    let record: GalleyExportRecordV1;
+    try {
+      record = GalleyExportRecordV1Schema.parse(recordInput);
+    } catch (error) {
+      throw tagRecordOutcome(error, "not-recorded");
+    }
     if (record.sourceHtmlHash !== this.#htmlHash) {
       throw new DocumentExportSourceMismatchError();
     }
     this.#saving = true;
     try {
-      const current = await this.#repository.readPair(this.#paths, signal);
+      let current: DocumentPairSnapshot<Observation> | null;
+      try {
+        current = await this.#repository.readPair(this.#paths, signal);
+      } catch (error) {
+        throw tagRecordOutcome(error, "not-recorded");
+      }
       if (
         !current ||
         !this.#repository.sameObservation(this.#observation, current.observation)
       ) {
         this.#conflict = true;
-        throw new DocumentConflictError();
+        throw tagRecordOutcome(new DocumentConflictError(), "not-recorded");
       }
-      const nextSidecar = GalleySidecarV1Schema.parse({
-        ...this.#sidecar,
-        exports: [...this.#sidecar.exports, record]
-      });
+      let nextSidecar: GalleySidecarV1;
+      try {
+        nextSidecar = GalleySidecarV1Schema.parse({
+          ...this.#sidecar,
+          exports: [...this.#sidecar.exports, record]
+        });
+      } catch (error) {
+        throw tagRecordOutcome(error, "not-recorded");
+      }
       const sidecarJson = serializeSidecar(nextSidecar);
       try {
+        throwIfAborted(signal);
         const result = await this.#repository.replacePair(
           this.#paths,
           current.observation,
@@ -410,18 +441,30 @@ export class DocumentSession<
         );
         if (result.status === "conflict") {
           this.#conflict = true;
-          throw new DocumentConflictError();
+          throw tagRecordOutcome(new DocumentConflictError(), "not-recorded");
         }
         verifyCommittedSnapshot(result.snapshot, nextSidecar);
         this.#applyExportCommit(result.snapshot, nextSidecar);
-      } catch (error) {
-        if (error instanceof DocumentPostCommitError && error.snapshot) {
-          verifyCommittedSnapshot(error.snapshot, nextSidecar);
-          this.#applyExportCommit(error.snapshot, nextSidecar);
-          return;
+        if (signal?.aborted) {
+          throw tagRecordOutcome(
+            new DOMException("Aborted", "AbortError"),
+            "recorded"
+          );
         }
-        if (!isAbortError(error)) this.#conflict = true;
-        throw error;
+      } catch (error) {
+        if (hasRecordOutcome(error)) throw error;
+        if (error instanceof DocumentPostCommitError && error.snapshot) {
+          try {
+            verifyCommittedSnapshot(error.snapshot, nextSidecar);
+            this.#applyExportCommit(error.snapshot, nextSidecar);
+          } catch (verificationError) {
+            this.#conflict = true;
+            throw tagRecordOutcome(verificationError, "ambiguous");
+          }
+          throw tagRecordOutcome(postCommitCause(error), "recorded");
+        }
+        this.#conflict = true;
+        throw tagRecordOutcome(error, "ambiguous");
       }
     } finally {
       this.#saving = false;
@@ -449,7 +492,8 @@ export class DocumentSession<
       const sidecar = GalleySidecarV1Schema.parse({
         ...this.#sidecar,
         documentId: copyDocumentId,
-        htmlHash
+        htmlHash,
+        exports: []
       });
       const created = await this.#repository.createNumberedCopy(
         this.#paths,
@@ -667,5 +711,47 @@ function isAbortError(error: unknown): boolean {
     error !== null &&
     "name" in error &&
     error.name === "AbortError"
+  );
+}
+
+type RecordOutcome = "recorded" | "not-recorded" | "ambiguous";
+
+function hasRecordOutcome(
+  error: unknown
+): error is Error & { readonly recordOutcome: RecordOutcome } {
+  return (
+    isErrorLike(error) &&
+    "recordOutcome" in error &&
+    (error.recordOutcome === "recorded" ||
+      error.recordOutcome === "not-recorded" ||
+      error.recordOutcome === "ambiguous")
+  );
+}
+
+function tagRecordOutcome(
+  error: unknown,
+  outcome: RecordOutcome
+): Error & { readonly recordOutcome: RecordOutcome } {
+  if (hasRecordOutcome(error)) return error;
+  const tagged = isErrorLike(error)
+    ? error
+    : new Error("Galley export record operation failed.", { cause: error });
+  Object.defineProperty(tagged, "recordOutcome", {
+    configurable: false,
+    enumerable: true,
+    value: outcome,
+    writable: false
+  });
+  return tagged as Error & { readonly recordOutcome: RecordOutcome };
+}
+
+function isErrorLike(error: unknown): error is Error {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "name" in error &&
+    typeof error.name === "string" &&
+    "message" in error &&
+    typeof error.message === "string"
   );
 }

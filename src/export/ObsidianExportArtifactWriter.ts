@@ -7,6 +7,15 @@ import type {
   ExportArtifactWriter
 } from "./ExportService";
 
+export class ExportArtifactWriteAmbiguousError extends Error {
+  readonly code = "export_artifact_write_ambiguous" as const;
+
+  constructor(readonly path: string, readonly cause: unknown) {
+    super(`Galley could not prove the exclusive export write at ${path}.`);
+    this.name = "ExportArtifactWriteAmbiguousError";
+  }
+}
+
 export class ObsidianExportArtifactWriter implements ExportArtifactWriter {
   constructor(private readonly vault: Vault) {}
 
@@ -34,6 +43,7 @@ export class ObsidianExportArtifactWriter implements ExportArtifactWriter {
       : "";
     const folder = configuration.outputFolder || sourceFolder;
     if (folder) await ensureFolders(this.vault, folder);
+    const reservedPaths = normalizeReservedPaths(input.reservedPaths ?? []);
 
     for (let number = 1; number < 10_000; number += 1) {
       throwIfAborted(signal);
@@ -44,18 +54,58 @@ export class ObsidianExportArtifactWriter implements ExportArtifactWriter {
       if (!isNormalizedVaultRelativePath(path)) {
         throw new Error("Export path is unsafe.");
       }
-      if (this.vault.getAbstractFileByPath(path)) continue;
+      if (reservedPaths.has(path) || this.vault.getAbstractFileByPath(path)) {
+        continue;
+      }
+      let file: TFile;
       try {
-        const file: TFile = await this.vault.create(path, input.html);
-        if (file.path !== path) throw new Error("Export identity mismatch.");
-        return Object.freeze({ path });
+        file = await this.vault.create(path, input.html);
       } catch (error) {
-        if (this.vault.getAbstractFileByPath(path)) continue;
+        if (this.vault.getAbstractFileByPath(path)) {
+          throw new ExportArtifactWriteAmbiguousError(path, error);
+        }
         throw error;
       }
+      await verifyCreatedArtifact(this.vault, file, path, input.html);
+      return Object.freeze({ path });
     }
     throw new Error("Export path collision limit reached.");
   }
+}
+
+async function verifyCreatedArtifact(
+  vault: Vault,
+  file: TFile,
+  path: string,
+  expectedHtml: string
+): Promise<void> {
+  try {
+    if (file.path !== path || vault.getAbstractFileByPath(path) !== file) {
+      throw new Error("Export identity mismatch.");
+    }
+    const actualHtml = await vault.read(file);
+    if (
+      actualHtml !== expectedHtml ||
+      file.path !== path ||
+      vault.getAbstractFileByPath(path) !== file
+    ) {
+      throw new Error("Export content or identity changed after create.");
+    }
+  } catch (error) {
+    if (error instanceof ExportArtifactWriteAmbiguousError) throw error;
+    throw new ExportArtifactWriteAmbiguousError(path, error);
+  }
+}
+
+function normalizeReservedPaths(paths: readonly string[]): ReadonlySet<string> {
+  const reserved = new Set<string>();
+  for (const path of paths) {
+    if (!isNormalizedVaultRelativePath(path)) {
+      throw new Error("Reserved export path must be vault-relative.");
+    }
+    reserved.add(path);
+  }
+  return reserved;
 }
 
 async function ensureFolders(vault: Vault, path: string): Promise<void> {

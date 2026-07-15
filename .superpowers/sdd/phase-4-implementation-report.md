@@ -50,11 +50,27 @@ Phase 4 completes the independent-output path for Galley documents:
 
 ## Persistence and concurrency
 
-- Export paths are normalized vault-relative paths and are created exclusively. Existing output is never overwritten; collisions advance to `-2`, `-3`, and so on.
+- Export paths are normalized vault-relative paths and are created exclusively. Existing output and sidecar-reserved historical paths are never reused; proved collisions advance to `-2`, `-3`, and so on.
+- A create that may have mutated storage but cannot prove the returned path identity and exact bytes stops with a typed ambiguous-write result. It never continues numbering and therefore cannot silently create a duplicate artifact.
 - Export records are strict Zod-validated records. IDs and paths are unique and the sidecar retains at most 256 records.
 - A record can be committed only when the session is saved, the source hash matches the current saved bytes, no save is active, and the observed HTML/sidecar pair has not changed externally.
 - The sidecar update uses the existing recovery-aware pair replacement while writing the exact same HTML bytes back, so an export record cannot silently rewrite the Authoring document.
-- Workbench exports capture document identity and mount generation, use cancellation, and ignore stale completions after close or document replacement.
+- Record failures preserve a proof-oriented `recorded | not-recorded | ambiguous` outcome and the durable artifact path. A verified post-commit cancellation rejects as cancelled while truthfully reporting that the record is durable.
+- Workbench exports capture document identity and mount generation, use cancellation, and are settled before close/open save transitions. Stale completions never copy or update the closing/replaced view and are reported with their artifact path.
+- `saveCopy()` assigns a new document identity and hash while deliberately starting with an empty export history.
+
+## Consolidated review remediation
+
+The eight Important findings in `.superpowers/sdd/review-phase-4-consolidated.md` were remediated as one integrated batch from commit `99d53f00d2e6d2beaf3e7185e2a739e045c698fc`:
+
+1. Exclusive export create now verifies returned identity and exact stored bytes, and fails closed on mutate-then-throw, identity replacement, or unproved racing outcomes.
+2. The production export path passes all sidecar historical paths into the writer, so deleting an old artifact does not release its name for reuse.
+3. Numbered document copies no longer inherit export records from the original document.
+4. Close and document replacement invalidate and abort at entry, settle every tracked export, then perform the coordinated capture/save path.
+5. Export recording, cancellation, stale completion, and clipboard failure retain truthful record outcome and artifact-path presentation. Same-session and cross-session concurrency/recovery cases are covered.
+6. Portable output places authored inline declarations after matching stylesheet declarations, and WeChat output migrates sanitized authoring-root theme styles onto its single root section.
+7. Export-panel actions defer callback invocation into the Promise boundary; invalid synchronous form values render an accessible owner error without invoking persistence.
+8. The Phase 4 integration gate now starts with the recorded model generation pipeline, opens the generated artifact through the production session opener, edits/saves, exports all three profiles, exercises historical reservation, and opens preview through the mobile-registered command and view factory.
 
 ## Main implementation files
 
@@ -84,25 +100,27 @@ Phase 4 completes the independent-output path for Galley documents:
 
 - all three export output shapes, sanitization, provenance, and source-byte immutability
 - collision-safe artifact naming and safe output configuration normalization
+- ambiguous exclusive-create handling, returned identity/content verification, racing writers, and historical path reservation after artifact deletion
 - export-record schema/path/hash limits, sidecar uniqueness, dirty/mismatched/external-change rejection, and exact HTML preservation
+- save-copy export-history reset plus recorded/not-recorded/ambiguous transaction, abort, same-session, and cross-session outcomes
 - native rich clipboard payloads and fallback cleanup on both success and failure
 - pinned WeChat validator parity fixtures, executable markup rejection, two-round repair, scoped Skill loading, malformed response handling, and candidate sanitization
-- export-panel configuration persistence, status/error states, stale async completion suppression, and copy behavior
+- export-panel configuration persistence, accessible synchronous validation errors, status/error states, stale async completion reporting, and partial-success copy behavior
 - dedicated Galley preview path filtering, local-resource display rewriting, and safe iframe rendering
 - desktop/mobile command, view, and file-menu registration boundaries
-- an end-to-end production-session workflow that edits and saves once, exports all profiles, proves unchanged Authoring bytes, verifies three sidecar records, and opens safe preview
+- an end-to-end recorded-generation workflow that uses the production session, edits and saves, exports all profiles, proves unchanged Authoring bytes, verifies unique sidecar history after deletion/re-export, and opens safe preview through mobile plugin registration
 
 ## Stage gate evidence
 
 ```text
-npm test -- tests/export tests/preview tests/workbench tests/integration
-24 files, 111 tests passed
+npm test -- tests/export tests/preview tests/workbench tests/integration tests/platform
+26 files, 135 tests passed
 
 npm run test:typecheck
 passed
 
 npm test
-71 files, 1219 tests passed
+71 files, 1240 tests passed
 
 npm run build
 passed
@@ -125,5 +143,5 @@ Static checks also confirmed:
 - Mobile is deliberately preview-only; generation, visual/source editing, export, clipboard operations, diagnostics, and Theme Lab remain desktop features.
 - Portable CSS inlining supports deterministic ordinary selector blocks. It does not attempt a full browser cascade engine or preserve unsupported at-rules.
 - Export files are intentionally independent snapshots. Later Authoring edits do not update an existing export.
-- A written export whose subsequent sidecar record fails is retained and reported explicitly; Galley does not delete a user-visible artifact with an uncertain ownership/history outcome.
+- A written export whose subsequent sidecar record fails is retained and reported with its artifact path and proof-oriented record outcome; Galley does not delete a user-visible artifact with an uncertain ownership/history outcome.
 - Theme Lab, text-described custom theme generation, local custom theme package management, and broader Phase 5 release hardening are not included in Phase 4.

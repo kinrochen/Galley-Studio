@@ -43,6 +43,20 @@ describe("export profiles", () => {
     expect(output.html).not.toMatch(/data-galley-/i);
   });
 
+  it("keeps an existing inline declaration after matching stylesheet declarations", async () => {
+    const output = await new PortableInlineProfile().transform({
+      ...INPUT,
+      html: '<!DOCTYPE html><html><head><title>x</title><style>.x { color: red; padding: 4px }</style></head><body><article><p class="x" style="color:blue">Text</p></article></body></html>'
+    });
+    const parsed = new DOMParser().parseFromString(output.html, "text/html");
+    const style = parsed.querySelector("p")?.getAttribute("style") ?? "";
+
+    expect(style).toBe("color: red; padding: 4px; color: blue");
+    expect(style.lastIndexOf("color: blue")).toBeGreaterThan(
+      style.lastIndexOf("color: red")
+    );
+  });
+
   it("creates one WeChat section with inline styles and leaf spans", async () => {
     const output = await new WechatProfile().transform(INPUT);
     const template = document.createElement("template");
@@ -54,6 +68,21 @@ describe("export profiles", () => {
     expect(output.html).not.toMatch(/<!DOCTYPE|<html|<head|<body|<style|<script|<div/i);
     expect(output.html).not.toMatch(/\s(?:class|id)=/i);
     expect(output.html).toContain('<span leaf="">中文正文 </span>');
+    expect(validateWechatHtml(output.html).valid).toBe(true);
+  });
+
+  it("migrates sanitized article-root theme styles onto the WeChat root", async () => {
+    const output = await new WechatProfile().transform({
+      ...INPUT,
+      html: '<!DOCTYPE html><html><head><title>x</title></head><body><article style="background-color:#123456;padding:24px;font-family:serif;position:fixed"><p>正文</p></article></body></html>'
+    });
+    const template = document.createElement("template");
+    template.innerHTML = output.html;
+
+    expect(template.content.firstElementChild?.getAttribute("style")).toBe(
+      "background-color: #123456; padding: 24px; font-family: serif; display: block"
+    );
+    expect(output.html).not.toContain("position");
     expect(validateWechatHtml(output.html).valid).toBe(true);
   });
 });

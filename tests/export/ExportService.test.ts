@@ -95,7 +95,8 @@ describe("ExportService", () => {
 
     expect(error).toBeInstanceOf(ExportRecordError);
     expect((error as ExportRecordError).artifactPath).toBe("exports/kept.html");
-    expect((error as ExportRecordError).recorded).toBe(false);
+    expect((error as ExportRecordError).outcome).toBe("ambiguous");
+    expect((error as ExportRecordError).recorded).toBeNull();
   });
 
   it("does not record a failed or cancelled write", async () => {
@@ -113,6 +114,80 @@ describe("ExportService", () => {
       controller.signal
     )).rejects.toMatchObject({ name: "AbortError" });
     expect(recorder.record).not.toHaveBeenCalled();
+  });
+
+  it("keeps the artifact path and reports not-recorded when cancellation happens after write but before record", async () => {
+    const controller = new AbortController();
+    const recorder: ExportRecordStore = { record: vi.fn(async () => undefined) };
+    const service = new ExportService({
+      profiles: [profile("standard-web")],
+      writer: {
+        writeNew: vi.fn(async () => {
+          controller.abort();
+          return { path: "exports/written-before-abort.html" };
+        })
+      },
+      recorder,
+      now: () => new Date("2026-07-15T01:02:03.000Z"),
+      randomUUID: () => "223e4567-e89b-42d3-a456-426614174000"
+    });
+
+    await expect(service.export(
+      { source: SOURCE, configuration: configuration("standard-web") },
+      controller.signal
+    )).rejects.toMatchObject({
+      code: "export_record_failed",
+      artifactPath: "exports/written-before-abort.html",
+      outcome: "not-recorded",
+      recorded: false
+    });
+    expect(recorder.record).not.toHaveBeenCalled();
+  });
+
+  it("does not misreport a proved post-commit cancellation as unrecorded", async () => {
+    const committedAbort = Object.assign(
+      new DOMException("Aborted", "AbortError"),
+      { recordOutcome: "recorded" as const }
+    );
+    const service = new ExportService({
+      profiles: [profile("standard-web")],
+      writer: { writeNew: vi.fn(async () => ({ path: "exports/recorded.html" })) },
+      recorder: { record: vi.fn(async () => { throw committedAbort; }) },
+      now: () => new Date("2026-07-15T01:02:03.000Z"),
+      randomUUID: () => "223e4567-e89b-42d3-a456-426614174000"
+    });
+
+    await expect(service.export(
+      { source: SOURCE, configuration: configuration("standard-web") },
+      new AbortController().signal
+    )).rejects.toMatchObject({
+      artifactPath: "exports/recorded.html",
+      outcome: "recorded",
+      recorded: true,
+      cause: committedAbort
+    });
+  });
+
+  it("keeps unknown recorder transaction failures explicitly ambiguous", async () => {
+    const ambiguous = Object.assign(new Error("transaction unknown"), {
+      recordOutcome: "ambiguous" as const
+    });
+    const service = new ExportService({
+      profiles: [profile("standard-web")],
+      writer: { writeNew: vi.fn(async () => ({ path: "exports/unknown.html" })) },
+      recorder: { record: vi.fn(async () => { throw ambiguous; }) },
+      now: () => new Date("2026-07-15T01:02:03.000Z"),
+      randomUUID: () => "223e4567-e89b-42d3-a456-426614174000"
+    });
+
+    await expect(service.export(
+      { source: SOURCE, configuration: configuration("standard-web") },
+      new AbortController().signal
+    )).rejects.toMatchObject({
+      artifactPath: "exports/unknown.html",
+      outcome: "ambiguous",
+      recorded: null
+    });
   });
 });
 

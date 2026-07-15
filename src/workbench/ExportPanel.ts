@@ -23,6 +23,7 @@ export interface ExportPanelActions {
   readonly onExport: (configurationId: string) => void | Promise<void>;
   readonly onCopy: (configurationId: string) => void | Promise<void>;
   readonly onSave: (configuration: ExportConfiguration) => void | Promise<void>;
+  readonly onValidationError?: (message: string) => void;
 }
 
 const PROFILE_LABELS: readonly [ExportProfileId, string][] = [
@@ -90,13 +91,17 @@ export function renderExportPanel(
     actionButton(document, "export", "Export file", busy, () => actions.onExport(selected.id)),
     actionButton(document, "copy", "Copy rich text", busy, () => actions.onCopy(selected.id)),
     actionButton(document, "save-config", "Save configuration", busy, () => {
-      actions.onSave(normalizeExportConfiguration({
-        id: selected.id,
-        name: name.value,
-        profileId: profile.value,
-        outputFolder: folder.value,
-        fileNameTemplate: template.value
-      }));
+      try {
+        return actions.onSave(normalizeExportConfiguration({
+          id: selected.id,
+          name: name.value,
+          profileId: profile.value,
+          outputFolder: folder.value,
+          fileNameTemplate: template.value
+        }));
+      } catch {
+        actions.onValidationError?.("Export configuration is invalid");
+      }
     })
   );
   section.append(actionsHost);
@@ -139,7 +144,7 @@ function actionButton(
   button.textContent = text;
   button.disabled = disabled;
   button.addEventListener("click", () => {
-    void Promise.resolve(callback()).catch(() => undefined);
+    void Promise.resolve().then(callback).catch(() => undefined);
   });
   return button;
 }

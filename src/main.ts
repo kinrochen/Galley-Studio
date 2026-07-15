@@ -284,7 +284,8 @@ export default class GalleyPlugin extends Plugin {
           source: {
             htmlPath: documentPath,
             documentId,
-            html: session.html()
+            html: session.html(),
+            reservedPaths: session.exportPaths?.() ?? []
           },
           configuration
         }, signal);
@@ -292,7 +293,8 @@ export default class GalleyPlugin extends Plugin {
       },
       copyExportHtml: (html) => new RichTextClipboard().copy(html),
       saveExportConfiguration: (configuration) =>
-        this.#saveExportConfiguration(configuration)
+        this.#saveExportConfiguration(configuration),
+      reportExportOutcome: (message) => new Notice(message)
     };
     return new GalleyWorkbenchView(leaf, services);
   }

@@ -12,6 +12,7 @@ export interface ExportSource {
   readonly htmlPath: string;
   readonly documentId: string;
   readonly html: string;
+  readonly reservedPaths?: readonly string[];
 }
 
 export interface ExportArtifactWriteInput {
@@ -19,6 +20,7 @@ export interface ExportArtifactWriteInput {
   readonly configuration: Readonly<ExportConfiguration>;
   readonly profileId: ExportProfileId;
   readonly html: string;
+  readonly reservedPaths?: readonly string[];
 }
 
 export interface ExportArtifactWriter {
@@ -33,7 +35,10 @@ export interface ExportResult {
   readonly path: string;
   readonly html: string;
   readonly record: GalleyExportRecordV1;
+  readonly recordOutcome: "recorded";
 }
+
+export type ExportRecordOutcome = "recorded" | "not-recorded" | "ambiguous";
 
 export interface ExportServiceOptions {
   readonly profiles: readonly ExportProfile[];
@@ -46,11 +51,20 @@ export interface ExportServiceOptions {
 
 export class ExportRecordError extends Error {
   readonly code = "export_record_failed" as const;
-  readonly recorded = false;
+  readonly recorded: boolean | null;
 
-  constructor(readonly artifactPath: string, readonly cause: unknown) {
+  constructor(
+    readonly artifactPath: string,
+    readonly cause: unknown,
+    readonly outcome: ExportRecordOutcome
+  ) {
     super("The export file was written, but its sidecar record could not be committed.");
     this.name = "ExportRecordError";
+    this.recorded = outcome === "recorded"
+      ? true
+      : outcome === "not-recorded"
+        ? false
+        : null;
   }
 }
 
@@ -124,7 +138,10 @@ export class ExportService {
       sourcePath: input.source.htmlPath,
       configuration: Object.freeze({ ...input.configuration }),
       profileId: profile.id,
-      html
+      html,
+      ...(input.source.reservedPaths
+        ? { reservedPaths: input.source.reservedPaths }
+        : {})
     }, signal);
 
     const record = GalleyExportRecordV1Schema.parse({
@@ -140,14 +157,39 @@ export class ExportService {
     });
     Object.freeze(record.skillFiles);
     Object.freeze(record);
+    let recordStarted = false;
     try {
       throwIfAborted(signal);
+      recordStarted = true;
       await this.#recorder.record(record, signal);
     } catch (error) {
-      throw new ExportRecordError(written.path, error);
+      throw new ExportRecordError(
+        written.path,
+        error,
+        recordStarted ? recordOutcome(error) : "not-recorded"
+      );
     }
-    return Object.freeze({ path: written.path, html, record });
+    return Object.freeze({
+      path: written.path,
+      html,
+      record,
+      recordOutcome: "recorded" as const
+    });
   }
+}
+
+function recordOutcome(error: unknown): ExportRecordOutcome {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "recordOutcome" in error &&
+    (error.recordOutcome === "recorded" ||
+      error.recordOutcome === "not-recorded" ||
+      error.recordOutcome === "ambiguous")
+  ) {
+    return error.recordOutcome;
+  }
+  return "ambiguous";
 }
 
 function stampProvenance(

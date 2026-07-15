@@ -201,6 +201,10 @@ class ObsidianOpenedDocumentSession implements OpenedGalleyDocumentSession {
     return this.#session.bodyHtml();
   }
 
+  exportPaths(): readonly string[] {
+    return this.#session.exportPaths();
+  }
+
   updateBody(bodyHtml: string): void {
     this.#session.updateBody(bodyHtml);
   }

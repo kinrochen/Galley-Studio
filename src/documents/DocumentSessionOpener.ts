@@ -34,6 +34,7 @@ export interface OpenedGalleyDocumentSession {
   documentId(): string;
   html(): string;
   bodyHtml(): string;
+  exportPaths(): readonly string[];
   updateBody(bodyHtml: string): void;
   save(reason: SaveReason, signal?: AbortSignal): Promise<void>;
   reload(signal?: AbortSignal): Promise<void>;

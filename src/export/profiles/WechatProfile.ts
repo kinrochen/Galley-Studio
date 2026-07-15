@@ -15,7 +15,15 @@ export class WechatProfile implements ExportProfile {
     const article = source.body.querySelector(":scope > article") ?? source.body.firstElementChild;
     const target = document.implementation.createHTMLDocument("wechat");
     const root = target.createElement("section");
-    root.setAttribute("style", "display: block");
+    const articleStyle = sanitizeInlineStyle(
+      article?.getAttribute("style") ?? ""
+    ).style;
+    root.setAttribute(
+      "style",
+      hasDisplayDeclaration(articleStyle)
+        ? articleStyle
+        : [articleStyle, "display: block"].filter(Boolean).join("; ")
+    );
     if (article) {
       for (const child of [...article.childNodes]) {
         root.append(target.importNode(child, true));
@@ -31,6 +39,10 @@ export class WechatProfile implements ExportProfile {
       mediaType: "text/html" as const
     });
   }
+}
+
+function hasDisplayDeclaration(style: string): boolean {
+  return /(?:^|;)\s*display\s*:/iu.test(style);
 }
 
 function normalizeElements(root: HTMLElement): void {

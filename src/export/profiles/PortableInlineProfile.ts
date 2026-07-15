@@ -39,6 +39,9 @@ export class PortableInlineProfile implements ExportProfile {
 }
 
 function inlineStyleRules(document: Document): void {
+  const authoredInline = new WeakMap<Element, string>();
+  const stylesheetDeclarations = new WeakMap<Element, string[]>();
+  const matchedElements = new Set<Element>();
   for (const style of document.querySelectorAll("style")) {
     const css = style.textContent ?? "";
     for (const match of css.matchAll(/([^{}]+)\{([^{}]*)\}/gu)) {
@@ -52,12 +55,23 @@ function inlineStyleRules(document: Document): void {
         continue;
       }
       for (const element of matches) {
-        const combined = [element.getAttribute("style") ?? "", declarations]
-          .filter(Boolean)
-          .join(";");
-        const sanitized = sanitizeInlineStyle(combined).style;
-        if (sanitized) element.setAttribute("style", sanitized);
+        if (!authoredInline.has(element)) {
+          authoredInline.set(element, element.getAttribute("style") ?? "");
+        }
+        const accumulated = stylesheetDeclarations.get(element) ?? [];
+        accumulated.push(declarations);
+        stylesheetDeclarations.set(element, accumulated);
+        matchedElements.add(element);
       }
     }
+  }
+  for (const element of matchedElements) {
+    const combined = [
+      ...(stylesheetDeclarations.get(element) ?? []),
+      authoredInline.get(element) ?? ""
+    ].filter(Boolean).join(";");
+    const sanitized = sanitizeInlineStyle(combined).style;
+    if (sanitized) element.setAttribute("style", sanitized);
+    else element.removeAttribute("style");
   }
 }
