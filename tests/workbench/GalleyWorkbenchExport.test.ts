@@ -12,6 +12,7 @@ import {
   type WorkbenchSession
 } from "../../src/workbench/GalleyWorkbenchView";
 import { makeSessionDeps } from "../support/workbenchFixtures";
+import { LocaleStore } from "../../src/i18n/LocaleStore";
 
 describe("GalleyWorkbenchView export flow", () => {
   it("saves the latest visual edit before exporting and reports the standalone path", async () => {
@@ -68,6 +69,23 @@ describe("GalleyWorkbenchView export flow", () => {
     expect(status.textContent).toBe(
       "Exported exports/standard.html; copy failed"
     );
+  });
+
+  it("retranslates a stable export failure after a live locale change and keeps its durable path", async () => {
+    const locale = new LocaleStore({ language: "en", obsidianLocale: () => "en" });
+    const fixture = makeFixture(locale);
+    fixture.copyHtml.mockRejectedValueOnce(new Error("clipboard denied"));
+    await fixture.view.openPath("notes/a.galley.html");
+    await expect(fixture.view.exportCurrent("wechat", true)).rejects.toThrow(
+      "clipboard denied"
+    );
+    expect(fixture.view.contentEl.querySelector("[data-export-status]")?.textContent)
+      .toBe("Exported exports/standard.html; copy failed");
+
+    locale.configure("zh-CN");
+
+    expect(fixture.view.contentEl.querySelector("[data-export-status]")?.textContent)
+      .toBe("已导出 exports/standard.html；复制失败");
   });
 
   it("does not misreport an ambiguous artifact write as a clipboard failure", async () => {
@@ -314,7 +332,7 @@ class Session implements WorkbenchSession {
   async saveCopy() { return { html: "copy.galley.html", sidecar: "copy.galley.json" }; }
 }
 
-function makeFixture() {
+function makeFixture(locale?: LocaleStore) {
   const session = new Session();
   const document: WorkbenchDocument = {
     session,
@@ -346,7 +364,8 @@ function makeFixture() {
     exportDocument,
     copyExportHtml: copyHtml,
     saveExportConfiguration,
-    reportExportOutcome
+    reportExportOutcome,
+    ...(locale ? { locale } : {})
   });
   return {
     view,

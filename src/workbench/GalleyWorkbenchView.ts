@@ -17,6 +17,8 @@ import { transformSelectedBlock } from "../editor/ComponentTransformer";
 import type { PlatformCapabilities } from "../platform/PlatformCapabilities";
 import {
   ENGLISH_LOCALIZED_TEXT,
+  translateMessage,
+  type LocalizedMessage,
   type LocalizedText
 } from "../i18n/LocalizedText";
 import { createSafePreviewFrame } from "../preview/SafeHtmlPreview";
@@ -167,7 +169,7 @@ export class GalleyWorkbenchView extends ItemView {
     this.#exportState = {
       selectedId: this.#exportConfigurations[0]?.id ?? "",
       status: "idle",
-      message: this.#text.t("common.status.idle")
+      message: { key: "common.status.idle" }
     };
     this.navigation = true;
   }
@@ -358,19 +360,19 @@ export class GalleyWorkbenchView extends ItemView {
       this.#mountGeneration === operationGeneration;
     let durablePath: string | null = null;
     try {
-      this.#captureAdapterBody();
-      if (document.session.state().dirty) await this.#save("explicit");
-      if (!isCurrent()) return;
       this.#exportState = {
         selectedId: configuration.id,
         status: copy ? "copying" : "exporting",
-        message: this.#text.t(
-          copy
+        message: {
+          key: copy
             ? "workbench.export.status.copying"
             : "workbench.export.status.exporting"
-        )
+        }
       };
       this.#render();
+      this.#captureAdapterBody();
+      if (document.session.state().dirty) await this.#save("explicit");
+      if (!isCurrent()) return;
       const result = await exportDocument(
         {
           session: document.session,
@@ -395,12 +397,12 @@ export class GalleyWorkbenchView extends ItemView {
       this.#exportState = {
         selectedId: configuration.id,
         status: copy ? "copied" : "success",
-        message: this.#text.t(
-          copy
+        message: {
+          key: copy
             ? "workbench.export.status.copied"
             : "workbench.export.status.exported",
-          { path: result.path }
-        )
+          parameters: { path: result.path }
+        }
       };
       this.#render();
     } catch (error) {
@@ -411,7 +413,11 @@ export class GalleyWorkbenchView extends ItemView {
         copy && durablePath !== null
       );
       if (!isCurrent()) {
-        if (artifactPath) this.#services.reportExportOutcome?.(message);
+        if (artifactPath) {
+          this.#services.reportExportOutcome?.(
+            translateMessage(this.#text, message)
+          );
+        }
         return;
       }
       this.#exportState = {
@@ -563,11 +569,11 @@ export class GalleyWorkbenchView extends ItemView {
           onExport: (selectedId) => this.exportCurrent(selectedId, false),
           onCopy: (selectedId) => this.exportCurrent(selectedId, true),
           onSave: (configuration) => this.#saveExportConfiguration(configuration),
-          onValidationError: (message) => {
+          onValidationError: () => {
             this.#exportState = {
               ...this.#exportState,
               status: "error",
-              message
+              message: { key: "workbench.export.invalid" }
             };
             this.#render();
           }
@@ -589,13 +595,13 @@ export class GalleyWorkbenchView extends ItemView {
       this.#exportState = {
         selectedId: configuration.id,
         status: "idle",
-      message: this.#text.t("workbench.export.saved")
+        message: { key: "workbench.export.saved" }
       };
     } catch {
       this.#exportState = {
         selectedId: configuration.id,
         status: "error",
-        message: this.#text.t("workbench.export.status.saveFailed")
+        message: { key: "workbench.export.status.saveFailed" }
       };
     }
     this.#render();
@@ -905,22 +911,41 @@ function exportFailureMessage(
   error: unknown,
   artifactPath: string | null,
   copyFailedAfterExport: boolean
-): string {
+): LocalizedMessage {
   if (errorCode(error) === "export_record_failed" && artifactPath) {
     const outcome = recordOutcome(error);
     if (outcome === "recorded") {
-      return `Exported ${artifactPath}; record committed before cancellation`;
+      return {
+        key: "workbench.export.status.recordedAfterCancellation",
+        parameters: { path: artifactPath }
+      };
     }
     if (outcome === "not-recorded") {
-      return `Exported ${artifactPath}; sidecar record not recorded`;
+      return {
+        key: "workbench.export.status.recordNotRecorded",
+        parameters: { path: artifactPath }
+      };
     }
-    return `Exported ${artifactPath}; sidecar record outcome ambiguous`;
+    return {
+      key: "workbench.export.status.recordAmbiguous",
+      parameters: { path: artifactPath }
+    };
   }
   if (errorCode(error) === "export_artifact_write_ambiguous" && artifactPath) {
-    return `Export outcome ambiguous at ${artifactPath}`;
+    return {
+      key: "workbench.export.status.artifactAmbiguous",
+      parameters: { path: artifactPath }
+    };
   }
   if (copyFailedAfterExport && artifactPath) {
-    return `Exported ${artifactPath}; copy failed`;
+    return {
+      key: "workbench.export.status.copyFailedAfterExport",
+      parameters: { path: artifactPath }
+    };
   }
-  return copyFailedAfterExport ? "Copy failed" : "Export failed";
+  return {
+    key: copyFailedAfterExport
+      ? "workbench.export.status.copyFailed"
+      : "workbench.export.status.exportFailed"
+  };
 }

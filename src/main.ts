@@ -401,8 +401,11 @@ export default class GalleyPlugin extends Plugin {
         if (!result) throw new Error("Settings were not saved.");
         return result;
       },
-      runDiagnostic: async (signal) =>
-        (await actions()).runDiagnostic?.(signal)
+      runDiagnostic: async (signal) => {
+        const result = await (await actions()).runDiagnostic?.(signal);
+        if (!result) throw new Error("Diagnostic is unavailable.");
+        return result;
+      }
     };
   }
 

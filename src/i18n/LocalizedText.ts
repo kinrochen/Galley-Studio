@@ -13,6 +13,18 @@ export interface LocalizedText {
   subscribe(listener: () => void): () => void;
 }
 
+export interface LocalizedMessage {
+  readonly key: MessageKey;
+  readonly parameters?: TranslationParameters;
+}
+
+export function translateMessage(
+  text: Pick<LocalizedText, "t">,
+  message: LocalizedMessage
+): string {
+  return text.t(message.key, message.parameters);
+}
+
 export const ENGLISH_LOCALIZED_TEXT: LocalizedText = Object.freeze({
   configuredLanguage: () => "en" as const,
   locale: () => "en" as const,

@@ -132,9 +132,6 @@ export class SkillSession {
         }
         this.#capabilities.tools = false;
         this.#injectFiles(required, true);
-        const retry = await this.#request(false, signal);
-        this.#appendAssistant(retry);
-        this.#acceptFinalContent(retry);
         return;
       }
 

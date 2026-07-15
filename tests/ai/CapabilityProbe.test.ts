@@ -4,6 +4,7 @@ import type {
   ChatRequest,
   ChatTurnResult
 } from "../../src/ai/AiProtocol";
+import { AiError } from "../../src/ai/AiError";
 import { CapabilityProbe } from "../../src/ai/CapabilityProbe";
 
 const completed = (overrides: Partial<ChatTurnResult> = {}): ChatTurnResult => ({
@@ -137,7 +138,7 @@ it("keeps one unsupported capability from suppressing other probes", async () =>
   const client: ChatClient = {
     complete: vi.fn(async (chatRequest) => {
       if (chatRequest.tools) {
-        throw new Error("tools unsupported");
+        throw new AiError("tools_unsupported");
       }
       return completed({ content: "supported", streamed: true });
     })
@@ -150,6 +151,19 @@ it("keeps one unsupported capability from suppressing other probes", async () =>
     })
   ).resolves.toMatchObject({ tools: false, streaming: true, vision: false });
   expect(client.complete).toHaveBeenCalledTimes(2);
+});
+
+it("propagates provider and network failures instead of misreporting no tool support", async () => {
+  const client: ChatClient = {
+    complete: vi.fn(async () => {
+      throw new AiError("network_error", { retryable: true });
+    })
+  };
+
+  await expect(
+    new CapabilityProbe(client).probe(request, signal())
+  ).rejects.toMatchObject({ code: "network_error" });
+  expect(client.complete).toHaveBeenCalledTimes(1);
 });
 
 it("propagates caller cancellation instead of reporting it as unsupported", async () => {

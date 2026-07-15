@@ -3,7 +3,12 @@ import {
   type ExportConfiguration
 } from "../export/ExportConfiguration";
 import type { ExportProfileId } from "../export/ExportProfile";
-import { ENGLISH_LOCALIZED_TEXT, type LocalizedText } from "../i18n/LocalizedText";
+import {
+  ENGLISH_LOCALIZED_TEXT,
+  translateMessage,
+  type LocalizedMessage,
+  type LocalizedText
+} from "../i18n/LocalizedText";
 import type { MessageKey } from "../i18n/Resources";
 
 export type ExportPanelStatus =
@@ -17,7 +22,7 @@ export type ExportPanelStatus =
 export interface ExportPanelState {
   readonly selectedId: string;
   readonly status: ExportPanelStatus;
-  readonly message: string;
+  readonly message: LocalizedMessage | string;
 }
 
 export interface ExportPanelActions {
@@ -113,7 +118,9 @@ export function renderExportPanel(
   status.dataset.exportStatus = state.status;
   status.className = `galley-export-status is-${state.status}`;
   status.setAttribute("role", state.status === "error" ? "alert" : "status");
-  status.textContent = state.message;
+  status.textContent = typeof state.message === "string"
+    ? state.message
+    : translateMessage(text, state.message);
   section.append(status);
   host.replaceChildren(section);
 }
@@ -147,7 +154,11 @@ function actionButton(
   button.textContent = text;
   button.disabled = disabled;
   button.addEventListener("click", () => {
-    void Promise.resolve().then(callback).catch(() => undefined);
+    try {
+      void Promise.resolve(callback()).catch(() => undefined);
+    } catch {
+      // The owning workbench renders the allowlisted failure state.
+    }
   });
   return button;
 }

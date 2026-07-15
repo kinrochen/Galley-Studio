@@ -1,4 +1,5 @@
 import type { GalleyLanguage } from "../i18n/LocalizedText";
+import type { GenerationStage } from "../generation/GenerationProgress";
 
 export type ConsoleRoute =
   | "home"
@@ -12,7 +13,11 @@ export type MobileConsoleRoute = "home" | "articles";
 
 export type OperationState =
   | { readonly status: "idle" }
-  | { readonly status: "loading"; readonly operation: string }
+  | {
+      readonly status: "loading";
+      readonly operation: string;
+      readonly message?: string;
+    }
   | { readonly status: "success"; readonly message: string }
   | {
       readonly status: "partial-success";
@@ -69,6 +74,8 @@ export interface ArticleCatalogSnapshot {
 
 export interface GenerateArticleFormInput {
   readonly themeId?: string;
+  readonly sourcePath?: string;
+  readonly onProgress?: (stage: GenerationStage) => void;
 }
 
 export interface GeneratedArticleResult {

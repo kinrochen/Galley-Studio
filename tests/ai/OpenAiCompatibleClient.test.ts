@@ -140,6 +140,26 @@ it("posts Chat Completions messages and normalizes assistant tool calls", async 
   );
 });
 
+it("disables default thinking for DashScope Qwen3 hybrid models", async () => {
+  const post = vi.fn().mockResolvedValue(success("<section>ok</section>"));
+  const client = new OpenAiCompatibleClient({ post }, () => "secret");
+
+  await client.complete(
+    {
+      baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      model: "qwen3.7-plus",
+      messages: [{ role: "user", content: "Return direct HTML." }]
+    },
+    signal()
+  );
+
+  expect(post.mock.calls[0]?.[2]).toMatchObject({
+    model: "qwen3.7-plus",
+    enable_thinking: false,
+    stream: false
+  });
+});
+
 it("maps a 401 to a non-retryable secret-safe AiError", async () => {
   const secret = "configured-provider-secret";
   const post = vi.fn().mockResolvedValue({
@@ -374,7 +394,7 @@ it("rejects an unsafe Base URL before resolving a secret or sending", async () =
   expect(post).not.toHaveBeenCalled();
 });
 
-it("aborts every timed-out attempt using the configured timeout", async () => {
+it("aborts a timed-out request without repeating the full timeout", async () => {
   vi.useFakeTimers();
   const attemptSignals: AbortSignal[] = [];
   const post: HttpTransport["post"] = vi.fn(
@@ -400,13 +420,13 @@ it("aborts every timed-out attempt using the configured timeout", async () => {
   );
   const rejection = expect(completion).rejects.toMatchObject({
     code: "timeout",
-    retryable: true
+    retryable: false
   });
-  await vi.advanceTimersByTimeAsync(75);
+  await vi.advanceTimersByTimeAsync(25);
 
   await rejection;
-  expect(post).toHaveBeenCalledTimes(3);
-  expect(attemptSignals).toHaveLength(3);
+  expect(post).toHaveBeenCalledTimes(1);
+  expect(attemptSignals).toHaveLength(1);
   expect(attemptSignals.every((requestSignal) => requestSignal.aborted)).toBe(true);
 });
 

@@ -11,6 +11,8 @@ import type {
 import { ThemePreview } from "./ThemePreview";
 import {
   ENGLISH_LOCALIZED_TEXT,
+  translateMessage,
+  type LocalizedMessage,
   type LocalizedText
 } from "../i18n/LocalizedText";
 import type { MessageKey } from "../i18n/Resources";
@@ -93,7 +95,7 @@ export class ThemeLabView extends ItemView {
     if (imageInput) this.contentEl.append(imageInput);
     this.contentEl.append(actions, status, issues, previewHost);
 
-    let statusKey: MessageKey | null = null;
+    let statusMessage: LocalizedMessage | null = null;
     const renderIssues = (draft: ThemeDraft | null): void => {
       issues.replaceChildren();
       for (const issue of draft?.validation.issues ?? []) {
@@ -104,8 +106,8 @@ export class ThemeLabView extends ItemView {
       }
     };
     const setStatus = (key: MessageKey): void => {
-      statusKey = key;
-      status.textContent = this.#text.t(key);
+      statusMessage = { key };
+      status.textContent = translateMessage(this.#text, statusMessage);
     };
     const updateChrome = (): void => {
       title.textContent = this.#text.t("themeLab.title");
@@ -114,7 +116,9 @@ export class ThemeLabView extends ItemView {
       imageInput?.setAttribute("aria-label", this.#text.t("themeLab.image.aria"));
       generateButton.textContent = this.#text.t("themeLab.generate");
       saveButton.textContent = this.#text.t("themeLab.save");
-      if (statusKey) status.textContent = this.#text.t(statusKey);
+      if (statusMessage) {
+        status.textContent = translateMessage(this.#text, statusMessage);
+      }
       renderIssues(this.#draft);
       const frame = previewHost.querySelector("iframe");
       if (frame) frame.title = this.#text.t("themeLab.preview.title");
@@ -157,8 +161,8 @@ export class ThemeLabView extends ItemView {
           );
         } catch (error) {
           if (!controller.signal.aborted && !this.#closed) {
-            statusKey = null;
-            status.textContent = safeMessage(error, this.#text);
+            statusMessage = safeMessage(error);
+            status.textContent = translateMessage(this.#text, statusMessage);
           }
         } finally {
           if (!this.#closed && this.#controller === controller) {
@@ -182,8 +186,8 @@ export class ThemeLabView extends ItemView {
         },
         (error: unknown) => {
           if (this.#closed) return;
-          statusKey = null;
-          status.textContent = safeMessage(error, this.#text);
+          statusMessage = safeMessage(error);
+          status.textContent = translateMessage(this.#text, statusMessage);
           saveButton.disabled = false;
         }
       );
@@ -217,15 +221,15 @@ async function selectedImage(
   };
 }
 
-function safeMessage(error: unknown, text: LocalizedText): string {
+function safeMessage(error: unknown): LocalizedMessage {
   if (
     error instanceof DOMException &&
     error.name === "AbortError"
-  ) return text.t("themeLab.status.cancelled");
+  ) return { key: "themeLab.status.cancelled" };
   if (error instanceof Error && error.message === "reference_image_too_large") {
-    return text.t("themeLab.image.tooLarge");
+    return { key: "themeLab.image.tooLarge" };
   }
-  return text.t("themeLab.status.operationFailed");
+  return { key: "themeLab.status.operationFailed" };
 }
 
 function localizedThemeIssue(code: string, text: LocalizedText): string {

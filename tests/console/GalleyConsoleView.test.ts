@@ -1,10 +1,12 @@
 import { WorkspaceLeaf } from "obsidian";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { AiError } from "../../src/ai/AiError";
 import {
   GALLEY_CONSOLE_VIEW_TYPE,
   GalleyConsoleView
 } from "../../src/console/GalleyConsoleView";
 import type { GalleyActions } from "../../src/console/GalleyActions";
+import type { GenerateArticleFormInput } from "../../src/console/ConsoleTypes";
 import { LocaleStore } from "../../src/i18n/LocaleStore";
 import type { LocalizedText } from "../../src/i18n/LocalizedText";
 
@@ -40,7 +42,7 @@ describe("GalleyConsoleView", () => {
       "Export configurations",
       "Settings"
     ]);
-    expect(view.contentEl.querySelector("main")?.firstElementChild?.textContent).toContain(
+    expect(view.contentEl.querySelector(".galley-console__task")?.textContent).toContain(
       "current.md"
     );
     expect(
@@ -49,8 +51,83 @@ describe("GalleyConsoleView", () => {
       )?.textContent
     ).toBe("Generate HTML");
     expect(view.contentEl.textContent).toContain("article.galley.html");
-    expect(view.contentEl.textContent).toContain("1 available · 0 unavailable");
+    expect(view.contentEl.querySelectorAll(".galley-console__article-row")).toHaveLength(1);
     expect(view.contentEl.querySelector('[role="status"]')).not.toBeNull();
+  });
+
+  it("renders one focused generation workspace without running a connection diagnostic", async () => {
+    const runDiagnostic = vi.fn(async () => ({
+      ok: true,
+      model: "model-home",
+      capabilities: { tools: true, streaming: true, vision: false },
+      skillVersion: "bundled",
+      skillLoadMode: "tool-calls" as const,
+      skillFiles: ["SKILL.md"]
+    }));
+    const openWorkbench = vi.fn(async () => undefined);
+    const openThemeLab = vi.fn(async () => undefined);
+    const { view } = fixture({
+      inspectActiveContext: async () => ({
+        kind: "markdown",
+        path: "notes/current.md",
+        name: "current.md"
+      }),
+      desktop: {
+        openWorkbench,
+        openThemeLab,
+        listThemes: async () => [
+          { id: "paper", name: "Paper", builtIn: true, enabled: true },
+          { id: "custom", name: "Custom", builtIn: false, enabled: true }
+        ],
+        listSkills: async () => [
+          { version: "bundled", source: "bundled", active: false, valid: true },
+          { version: "2026.7", source: "imported", active: true, valid: true }
+        ],
+        readSettings: async () => ({
+          baseUrl: "https://api.example.com/v1",
+          model: "model-home",
+          secretId: "provider-key",
+          temperature: 0.4,
+          timeoutMs: 120000,
+          contextWindow: 128000,
+          outputFolder: "Galley",
+          language: "en",
+          activeSkillVersion: "2026.7"
+        }),
+        runDiagnostic
+      }
+    });
+
+    await view.onOpen();
+
+    expect(view.contentEl.querySelector(".galley-console__task")).not.toBeNull();
+    expect(view.contentEl.querySelector(".galley-console__recent")).not.toBeNull();
+    expect(view.contentEl.querySelector(".galley-console__quick-actions")).not.toBeNull();
+    expect(view.contentEl.textContent).toContain("model-home");
+    expect(view.contentEl.textContent).toContain("2026.7");
+    expect(view.contentEl.querySelector(".galley-console__readiness")?.textContent)
+      .toContain("Themes2");
+    expect(runDiagnostic).not.toHaveBeenCalled();
+    expect(
+      [...view.contentEl.querySelectorAll<HTMLInputElement>('[name="themeId"]')]
+        .map((option) => [option.value, option.nextElementSibling?.textContent])
+    ).toEqual([
+      ["paper", "Paperpaper"],
+      ["custom", "Customcustom"]
+    ]);
+    expect(view.contentEl.querySelector('[data-action="continue-edit"]')?.textContent)
+      .toContain("Continue");
+    for (const action of [
+      "theme-lab",
+      "open-themes",
+      "open-skills",
+      "open-exports",
+      "open-settings"
+    ]) {
+      expect(view.contentEl.querySelector(`[data-action="${action}"]`)).not.toBeNull();
+    }
+    view.contentEl.querySelector<HTMLButtonElement>('[data-action="continue-edit"]')?.click();
+    await vi.waitFor(() => expect(openWorkbench).toHaveBeenCalledWith("article.galley.html"));
   });
 
   it("mobile renders only Console, Articles, Language and safe preview", async () => {
@@ -128,7 +205,7 @@ describe("GalleyConsoleView", () => {
         name: "current.md"
       }),
       generateActiveMarkdown: async () => {
-        throw new Error("provider-secret-must-not-render");
+        throw new AiError("missing_secret");
       }
     });
     await view.onOpen();
@@ -136,19 +213,19 @@ describe("GalleyConsoleView", () => {
       '[name="themeId"]'
     );
     if (!theme) throw new Error("missing theme input");
-    theme.value = "custom-paper";
+    theme.click();
     view.contentEl.querySelector<HTMLButtonElement>('[data-action="generate"]')?.click();
     await vi.waitFor(() =>
       expect(view.contentEl.querySelector('[role="alert"]')).not.toBeNull()
     );
 
     expect(
-      view.contentEl.querySelector<HTMLInputElement>('[name="themeId"]')?.value
-    ).toBe("custom-paper");
+      view.contentEl.querySelector<HTMLInputElement>('[name="themeId"]')?.checked
+    ).toBe(true);
     expect(view.contentEl.querySelector('[role="alert"]')?.textContent).toBe(
-      "The operation failed. Check settings and try again."
+      "Galley: Configure an API key before generating."
     );
-    expect(view.contentEl.textContent).not.toContain("provider-secret");
+    expect(view.contentEl.textContent).not.toContain("missing_secret");
   });
 
   it("disables only the running action and restores it after completion", async () => {
@@ -156,7 +233,8 @@ describe("GalleyConsoleView", () => {
     const pending = new Promise<void>((resolve) => {
       finish = resolve;
     });
-    const generateActiveMarkdown = vi.fn(async () => {
+    const generateActiveMarkdown = vi.fn(async (input: GenerateArticleFormInput) => {
+      input.onProgress?.("generating");
       await pending;
       return {
         status: "committed" as const,
@@ -176,10 +254,17 @@ describe("GalleyConsoleView", () => {
 
     view.contentEl.querySelector<HTMLButtonElement>('[data-action="generate"]')?.click();
     await vi.waitFor(() => expect(generateActiveMarkdown).toHaveBeenCalledTimes(1));
+    expect(generateActiveMarkdown).toHaveBeenCalledWith(
+      expect.objectContaining({ themeId: "paper", sourcePath: "current.md" }),
+      expect.any(AbortSignal)
+    );
 
     expect(
       view.contentEl.querySelector<HTMLButtonElement>('[data-action="generate"]')?.disabled
     ).toBe(true);
+    await vi.waitFor(() =>
+      expect(view.contentEl.textContent).toContain("3/5 The model is generating HTML")
+    );
     expect(
       [...view.contentEl.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(
         (button) => button.textContent === "Articles"
@@ -267,6 +352,7 @@ function fixture(
     generateActiveMarkdown?: GalleyActions["generateActiveMarkdown"];
     setLanguage?: GalleyActions["setLanguage"];
     subscribeContext?: (listener: () => void) => () => void;
+    desktop?: Partial<NonNullable<GalleyActions["desktop"]>>;
   } = {}
 ) {
   const locale =
@@ -305,7 +391,30 @@ function fixture(
         if (locale instanceof LocaleStore) locale.configure(language);
       }),
     ...(!options.mobile
-      ? { desktop: { openWorkbench: async () => undefined } }
+      ? {
+          desktop: {
+            openWorkbench: async () => undefined,
+            listThemes: async () => [
+              { id: "paper", name: "Paper", builtIn: true, enabled: true }
+            ],
+            listSkills: async () => [
+              { version: "bundled", source: "bundled", active: true, valid: true }
+            ],
+            listSecrets: async () => ["fixture-key", "provider-key"],
+            readSettings: async () => ({
+              baseUrl: "https://api.example.com/v1",
+              model: "fixture-model",
+              secretId: "fixture-key",
+              temperature: 0.4,
+              timeoutMs: 120000,
+              contextWindow: 128000,
+              outputFolder: "",
+              language: "en",
+              activeSkillVersion: "bundled"
+            }),
+            ...options.desktop
+          }
+        }
       : {})
   };
   const view = new GalleyConsoleView(new WorkspaceLeaf(), {

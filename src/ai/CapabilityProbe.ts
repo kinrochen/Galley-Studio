@@ -101,7 +101,10 @@ export class CapabilityProbe {
       if (signal.aborted || isAbortError(error)) {
         throw error;
       }
-      return false;
+      if (error instanceof AiError && error.code === "tools_unsupported") {
+        return false;
+      }
+      throw error;
     }
   }
 }

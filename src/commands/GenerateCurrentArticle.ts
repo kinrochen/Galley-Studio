@@ -12,6 +12,11 @@ import {
   normalizeSettings,
   type GalleySettings
 } from "../settings/GalleySettings";
+import {
+  ENGLISH_LOCALIZED_TEXT,
+  type LocalizedText
+} from "../i18n/LocalizedText";
+import type { GenerationStage } from "../generation/GenerationProgress";
 
 export interface ActiveMarkdownFile {
   path: string;
@@ -52,6 +57,8 @@ export interface GenerateCurrentArticleContext {
   ): GenerationCommandArtifactWriter;
   openArtifact?(htmlPath: string): Promise<void>;
   notice(message: string): void;
+  progress?(stage: GenerationStage): void;
+  readonly text?: Pick<LocalizedText, "t">;
 }
 
 export type GenerateCommandErrorCode =
@@ -69,6 +76,7 @@ export async function generateCurrentArticle(
   context: GenerateCurrentArticleContext,
   signal: AbortSignal
 ): Promise<ArtifactPaths> {
+  const text = context.text ?? ENGLISH_LOCALIZED_TEXT;
   try {
     throwIfAborted(signal);
     const activeFile = context.getActiveFile();
@@ -84,13 +92,16 @@ export async function generateCurrentArticle(
     await repository.prepare?.(signal);
     throwIfAborted(signal);
 
-    context.notice("Galley: Reading current Markdown.");
+    context.progress?.("reading");
+    context.notice(text.t("generation.notice.reading"));
     const markdown = await context.read(activeFile);
     throwIfAborted(signal);
-    context.notice("Galley: Loading generation dependencies.");
+    context.progress?.("loading-skill");
+    context.notice(text.t("generation.notice.loading"));
     const generation = await context.createPipeline(settings, signal);
     throwIfAborted(signal);
-    context.notice("Galley: Generating article.");
+    context.progress?.("generating");
+    context.notice(text.t("generation.notice.generating"));
     const document = await generation.pipeline.generate(
       {
         sourcePath: activeFile.path,
@@ -103,8 +114,10 @@ export async function generateCurrentArticle(
       signal
     );
     throwIfAborted(signal);
-    context.notice("Galley: Validating generated article.");
-    context.notice("Galley: Saving independent artifacts.");
+    context.progress?.("validating");
+    context.notice(text.t("generation.notice.validating"));
+    context.progress?.("saving");
+    context.notice(text.t("generation.notice.saving"));
     const paths = await repository.writeNew(
       {
         sourcePath: activeFile.path,
@@ -117,22 +130,23 @@ export async function generateCurrentArticle(
     throwIfAborted(signal);
 
     context.notice(
-      document.status === "unverified"
-        ? `Galley: Saved UNVERIFIED DRAFT ${paths.html} and ${paths.sidecar}.`
-        : `Galley: Generated ${paths.html} and ${paths.sidecar}.`
+      text.t(
+        document.status === "unverified"
+          ? "generation.notice.unverified"
+          : "generation.notice.generated",
+        { html: paths.html, sidecar: paths.sidecar }
+      )
     );
     if (context.openArtifact) {
       try {
         await context.openArtifact(paths.html);
       } catch {
-        context.notice(
-          "Galley: The article was generated, but the workbench could not open it."
-        );
+        context.notice(text.t("generation.notice.openFailed"));
       }
     }
     return paths;
   } catch (error) {
-    context.notice(safeFailureNotice(error, signal));
+    context.notice(generationFailureMessage(error, signal, text));
     throw error;
   }
 }
@@ -147,38 +161,65 @@ function isMarkdownFile(
   );
 }
 
-function safeFailureNotice(error: unknown, signal: AbortSignal): string {
+export function generationFailureMessage(
+  error: unknown,
+  signal: AbortSignal,
+  text: Pick<LocalizedText, "t">
+): string {
   if (signal.aborted || errorCode(error) === "aborted") {
-    return "Galley: Generation cancelled.";
+    return text.t("generation.error.cancelled");
   }
   if (error instanceof GenerateCommandError) {
     return error.code === "missing_markdown"
-      ? "Galley: Open one Markdown file before generating."
-      : "Galley: Configure a model before generating.";
+      ? text.t("generation.error.missingMarkdown")
+      : text.t("generation.error.missingModel");
   }
   if (error instanceof ArtifactConfigurationError) {
-    return "Galley: Configure a valid vault-relative output folder.";
+    return text.t("generation.error.outputFolder");
   }
   if (error instanceof AiError) {
     if (error.code === "missing_secret") {
-      return "Galley: Configure an API key before generating.";
+      return text.t("generation.error.missingSecret");
     }
     if (error.code === "invalid_base_url") {
-      return "Galley: Check the configured provider Base URL.";
+      return text.t("generation.error.baseUrl");
     }
     if (error.code === "timeout") {
-      return "Galley: The AI request timed out.";
+      return text.t("generation.error.timeout");
     }
     if (error.code === "http_error") {
       if (error.status === 401 || error.status === 403) {
-        return "Galley: The provider rejected the API key or permissions.";
+        return text.t("generation.error.authorization");
       }
       if (error.status === 429 || (error.status !== null && error.status >= 500)) {
-        return "Galley: The provider is temporarily unavailable; try again.";
+        return text.t("generation.error.providerUnavailable");
+      }
+      if (error.status === 400 || error.status === 404 || error.status === 422) {
+        return text.t("generation.error.compatibility");
+      }
+      if (error.status === 413) {
+        return text.t("generation.error.requestTooLarge");
       }
     }
+    if (error.code === "network_error") {
+      return text.t("generation.error.network");
+    }
+    if (error.code === "invalid_response") {
+      return text.t("generation.error.invalidResponse");
+    }
+    if (error.code === "tool_round_limit") {
+      return text.t("generation.error.skillLoading");
+    }
   }
-  return "Galley: Generation failed. Check settings and try again.";
+  switch (errorCode(error)) {
+    case "theme_invalid":
+      return text.t("generation.error.themeDecision");
+    case "input_invalid":
+      return text.t("generation.error.inputInvalid");
+    case "long_block_oversized":
+      return text.t("generation.error.longBlock");
+  }
+  return text.t("generation.error.failed");
 }
 
 function errorCode(error: unknown): string | null {

@@ -98,7 +98,7 @@ it("does not report a connection success when every real probe is rejected", asy
     skillFiles: [],
     errorCode: "http_error"
   });
-  expect(post).toHaveBeenCalledTimes(2);
+  expect(post).toHaveBeenCalledTimes(1);
   expect(JSON.stringify(result)).not.toContain(secret);
   expect(JSON.stringify(result)).not.toContain("Authorization");
   expect(JSON.stringify(result)).not.toContain("rawRequest");

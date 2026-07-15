@@ -43,7 +43,8 @@ describe("console management pages", () => {
       run: directRun
     });
 
-    expect(container.textContent).toContain("Paper (paper)");
+    expect(container.querySelector('[data-theme-id="paper"]')?.textContent)
+      .toContain("PaperpaperBuilt in");
     expect(container.querySelector('[data-action="theme-import"]')).not.toBeNull();
     container.querySelector<HTMLButtonElement>('[data-action="theme-lab"]')?.click();
     container.querySelector<HTMLButtonElement>('[data-action="theme-toggle"]')?.click();
@@ -116,7 +117,8 @@ describe("console management pages", () => {
       actions: baseActions({
         listSkills: async () => [
           { version: "bundled", source: "bundled", active: true, valid: true },
-          { version: "2026.7", source: "imported", active: false, valid: true }
+          { version: "2026.7", source: "imported", active: false, valid: true },
+          { version: "broken", source: "imported", active: false, valid: false }
         ],
         activateSkill
       }),
@@ -128,6 +130,8 @@ describe("console management pages", () => {
     container.querySelector<HTMLButtonElement>('[data-action="skill-activate"]')?.click();
     await vi.waitFor(() => expect(activateSkill).toHaveBeenCalledWith("2026.7"));
     expect(confirm).toHaveBeenCalledWith("Activate “2026.7”?");
+    expect(container.textContent).toContain("Bundled · Valid");
+    expect(container.textContent).toContain("Imported · Invalid");
   });
 
   it("retains export configuration input after validation errors and exposes three profiles", async () => {
@@ -184,8 +188,68 @@ describe("console management pages", () => {
     );
   });
 
+  it("edits a complete export configuration and localizes profile labels and duplicate names", async () => {
+    const locale = new LocaleStore({ language: "zh-CN", obsidianLocale: () => "zh-CN" });
+    const state: ExportConfigurationFormState = {
+      id: "draft",
+      name: "草稿",
+      profileId: "standard-web",
+      outputFolder: "drafts",
+      fileNameTemplate: "{stem}.html"
+    };
+    const container = document.createElement("div");
+    await renderExportConfigurationPage(container, {
+      actions: baseActions({
+        listExportConfigurations: async () => [{
+          id: "source",
+          name: "Source",
+          profileId: "portable-inline",
+          outputFolder: "published",
+          fileNameTemplate: "{stem}.portable.html"
+        }]
+      }),
+      text: locale,
+      state,
+      confirm: () => true,
+      run: directRun
+    });
+
+    const profile = container.querySelector<HTMLSelectElement>('[name="profileId"]')!;
+    expect([...profile.options].map((option) => option.textContent)).toEqual([
+      "标准网页",
+      "便携内联",
+      "微信编辑器"
+    ]);
+    expect(profile.closest("label")?.textContent).toContain("导出类型");
+    expect(profile.getAttribute("aria-label")).toBe("导出类型");
+
+    container.querySelector<HTMLButtonElement>('[data-action="export-config-edit"]')?.click();
+    expect(state).toEqual({
+      id: "source",
+      name: "Source",
+      profileId: "portable-inline",
+      outputFolder: "published",
+      fileNameTemplate: "{stem}.portable.html"
+    });
+    expect(container.querySelector<HTMLInputElement>('[name="outputFolder"]')?.value)
+      .toBe("published");
+
+    container
+      .querySelector<HTMLButtonElement>('[data-action="export-config-duplicate"]')
+      ?.click();
+    expect(container.querySelector<HTMLInputElement>('[name="name"]')?.value)
+      .toBe("Source 副本");
+  });
+
   it("renders every desktop setting, SecretStorage choices, and explicit diagnostics", async () => {
-    const runDiagnostic = vi.fn(async () => ({ ok: true }));
+    const runDiagnostic = vi.fn(async () => ({
+      ok: true,
+      model: "model-x",
+      capabilities: { tools: true, streaming: true, vision: false },
+      skillVersion: "bundled",
+      skillLoadMode: "tool-calls" as const,
+      skillFiles: ["SKILL.md"]
+    }));
     const container = document.createElement("div");
     await renderSettingsPage(container, {
       actions: baseActions({
@@ -215,6 +279,96 @@ describe("console management pages", () => {
     ).toEqual(["provider-key", "backup-key"]);
     container.querySelector<HTMLButtonElement>('[data-action="diagnostic"]')?.click();
     await vi.waitFor(() => expect(runDiagnostic).toHaveBeenCalledTimes(1));
+  });
+
+  it("never saves a stale cached language and displays the latest durable language", async () => {
+    const locale = new LocaleStore({ language: "en", obsidianLocale: () => "en" });
+    let durableLanguage: "en" | "zh-CN" = "en";
+    const saveSettings = vi.fn(async (value) => ({
+      baseUrl: "https://api.example.com/v1",
+      model: String(value.model ?? "model-x"),
+      secretId: "provider-key",
+      temperature: 0.4,
+      timeoutMs: 120000,
+      contextWindow: 128000,
+      outputFolder: "Galley",
+      language: durableLanguage
+    }));
+    const state = {};
+    const container = document.createElement("div");
+    const actions = baseActions({
+      readSettings: async () => ({
+        baseUrl: "https://api.example.com/v1",
+        model: "model-x",
+        secretId: "provider-key",
+        temperature: 0.4,
+        timeoutMs: 120000,
+        contextWindow: 128000,
+        outputFolder: "Galley",
+        language: durableLanguage
+      }),
+      listSecrets: async () => ["provider-key"],
+      saveSettings
+    });
+
+    await renderSettingsPage(container, { actions, text: locale, state, run: directRun });
+    durableLanguage = "zh-CN";
+    locale.configure("zh-CN");
+    container.replaceChildren();
+    await renderSettingsPage(container, { actions, text: locale, state, run: directRun });
+    const model = container.querySelector<HTMLInputElement>('[name="model"]')!;
+    model.value = "model-y";
+    model.dispatchEvent(new Event("input"));
+    container.querySelector<HTMLFormElement>("form")?.dispatchEvent(new Event("submit"));
+
+    await vi.waitFor(() => expect(saveSettings).toHaveBeenCalledTimes(1));
+    expect(saveSettings.mock.calls[0]?.[0]).not.toHaveProperty("language");
+    expect(saveSettings.mock.calls[0]?.[0]).toMatchObject({ model: "model-y" });
+    expect(container.querySelector('[data-setting-language]')?.textContent).toContain("中文");
+  });
+
+  it("keeps a redacted diagnostic snapshot and retranslates it after locale changes", async () => {
+    const locale = new LocaleStore({ language: "en", obsidianLocale: () => "en" });
+    const state = {};
+    const container = document.createElement("div");
+    const actions = baseActions({
+      readSettings: async () => ({
+        baseUrl: "https://api.example.com/v1",
+        model: "diagnostic-model",
+        secretId: "provider-key",
+        temperature: 0.4,
+        timeoutMs: 120000,
+        contextWindow: 128000,
+        outputFolder: "Galley",
+        language: "en"
+      }),
+      listSecrets: async () => ["provider-key"],
+      runDiagnostic: async () => ({
+        ok: false,
+        model: "diagnostic-model",
+        capabilities: { tools: true, streaming: false, vision: true },
+        skillVersion: "2026.7",
+        skillLoadMode: "tool-calls",
+        skillFiles: ["SKILL.md", "references/theme-index.md"],
+        errorCode: "invalid_response\nAuthorization: secret"
+      })
+    });
+
+    await renderSettingsPage(container, { actions, text: locale, state, run: directRun });
+    container.querySelector<HTMLButtonElement>('[data-action="diagnostic"]')?.click();
+    await vi.waitFor(() =>
+      expect(container.querySelector('[data-diagnostic-result]')?.textContent)
+        .toContain("diagnostic-model")
+    );
+    expect(container.querySelector('[data-diagnostic-result]')?.textContent).toContain("SKILL.md");
+    expect(container.querySelector('[data-diagnostic-result]')?.textContent).toContain("diagnostic_failed");
+    expect(container.querySelector('[data-diagnostic-result]')?.textContent).not.toContain("Authorization");
+
+    locale.configure("zh-CN");
+    container.replaceChildren();
+    await renderSettingsPage(container, { actions, text: locale, state, run: directRun });
+    expect(container.querySelector('[data-diagnostic-result]')?.textContent).toContain("失败");
+    expect(container.querySelector('[data-diagnostic-result]')?.textContent).toContain("技能文件");
   });
 });
 

@@ -123,11 +123,23 @@ export function createDesktopActions(host: DesktopConsoleHost): DesktopGalleyAct
     importSkill: (bytes) => themeRuntime.importSkillArchive(host.app, bytes),
     activateSkill: async (version) => {
       const current = host.getSettings().activeSkillVersion;
-      await themeRuntime.activateImportedSkill(host.app, version, current, {
-        load: () => host.loadData(),
-        save: (value) => host.saveData(value)
-      });
-      host.replaceSettings(normalizeSettings(await host.loadData()));
+      let activationError: unknown;
+      try {
+        await themeRuntime.activateImportedSkill(host.app, version, current, {
+          load: () => host.loadData(),
+          save: (value) => host.saveData(value)
+        });
+      } catch (error) {
+        activationError = error;
+      }
+      let refreshError: unknown;
+      try {
+        host.replaceSettings(normalizeSettings(await host.loadData()));
+      } catch (error) {
+        refreshError = error;
+      }
+      if (activationError !== undefined) throw activationError;
+      if (refreshError !== undefined) throw refreshError;
     },
     listExportConfigurations: async () => host.getSettings().exportConfigurations,
     saveExportConfiguration: async (value) => {
@@ -162,7 +174,9 @@ export async function generateActiveMarkdown(
   input: GenerateArticleFormInput,
   signal: AbortSignal
 ): Promise<GeneratedArticleResult> {
-  const activeFile = host.app.workspace.getActiveFile();
+  const activeFile = input.sourcePath
+    ? host.app.vault.getFileByPath(input.sourcePath)
+    : host.app.workspace.getActiveFile();
   const paths = await generateCurrentArticle(
     {
       getActiveFile: () => activeFile,
@@ -174,12 +188,14 @@ export async function generateActiveMarkdown(
       },
       getSettings: () => host.getSettings(),
       ...(input.themeId ? { manualThemeId: input.themeId } : {}),
+      ...(input.onProgress ? { progress: input.onProgress } : {}),
       createPipeline: (settings, generationSignal) =>
         createProductionGeneration(host.app, settings, generationSignal),
       createRepository: (settings) =>
         new ArtifactRepository(new ObsidianArtifactVault(host.app.vault), {
           outputFolder: settings.outputFolder
         }),
+      text: host.locale,
       notice: (message) => new Notice(message),
       openArtifact: (path) => openWorkbench(host.app, path)
     },
@@ -365,7 +381,8 @@ async function runDiagnostic(
     {
       settings: host.getSettings(),
       secretStore: new ObsidianSecretStore(host.app),
-      transport: createObsidianTransport()
+      transport: createObsidianTransport(),
+      loadSkill: () => loadActiveSkillPackage(host.app, host.getSettings())
     },
     signal
   );
@@ -380,7 +397,8 @@ function settingsSnapshot(settings: GalleySettings): SettingsSnapshot {
     timeoutMs: settings.timeoutMs,
     contextWindow: settings.contextWindow,
     outputFolder: settings.outputFolder,
-    language: settings.language
+    language: settings.language,
+    activeSkillVersion: settings.activeSkillVersion
   };
 }
 

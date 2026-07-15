@@ -19,6 +19,7 @@ import {
 import type { SkillLoadMode } from "../skill/SkillAudit";
 import { SkillSession } from "../skill/SkillSession";
 import { SkillVirtualFileSystem } from "../skill/SkillVirtualFileSystem";
+import type { SkillPackage } from "../skill/SkillPackage";
 
 export interface ConnectionDiagnosticResult {
   ok: boolean;
@@ -34,6 +35,10 @@ export interface ConnectionDiagnosticDeps {
   settings: Readonly<GalleySettings>;
   secretStore: SecretStore;
   transport: HttpTransport;
+  loadSkill?: () => Promise<{
+    skillPackage: SkillPackage;
+    packageHash: string;
+  }>;
 }
 
 const EMPTY_CAPABILITIES = {
@@ -104,14 +109,20 @@ export async function runConnectionDiagnostic(
       return failureResult(model, connectionErrorCode, capabilities);
     }
 
-    const skillPackage = await new BundledSkillLoader().load();
+    const activeSkill = deps.loadSkill
+      ? await deps.loadSkill()
+      : {
+          skillPackage: await new BundledSkillLoader().load(),
+          packageHash: BUNDLED_SKILL.archiveSha256
+        };
+    const skillPackage = activeSkill.skillPackage;
     const session = new SkillSession({
       client,
       target: { baseUrl: settings.baseUrl, model },
       capabilities: observed,
       skillPackage,
       vfs: new SkillVirtualFileSystem(skillPackage.files),
-      packageHash: BUNDLED_SKILL.archiveSha256
+      packageHash: activeSkill.packageHash
     });
     await session.bootstrap(signal);
     const audit = session.audit();

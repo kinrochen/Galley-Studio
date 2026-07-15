@@ -142,12 +142,9 @@ it("injects immediately without a request when the endpoint has no tool capabili
   expect(client.requestsWithTools()).toHaveLength(0);
 });
 
-it("downgrades only its capability and retries once through full injection", async () => {
+it("downgrades only its capability and injects without an empty retry request", async () => {
   const callerCapabilities = makeProviderCapabilities();
-  const client = new ScriptedChatClient([
-    new AiError("tools_unsupported"),
-    completed({ content: "accepted injected Skill" })
-  ]);
+  const client = new ScriptedChatClient([new AiError("tools_unsupported")]);
   const skillPackage = makeSkillPackage();
   const session = new SkillSession({
     client,
@@ -162,17 +159,12 @@ it("downgrades only its capability and retries once through full injection", asy
 
   expect(callerCapabilities.tools).toBe(true);
   expect(session.audit().loadMode).toBe("injected");
-  expect(client.requests).toHaveLength(2);
+  expect(client.requests).toHaveLength(1);
   expect(client.requests[0]?.tools).toEqual([READ_SKILL_FILE_TOOL]);
-  expect(client.requests[1]?.tools).toBeUndefined();
-  expect(client.requests[1]?.messages.map((message) => message.content)).toEqual(
-    expect.arrayContaining([
-      expect.stringContaining('<skill-file path="SKILL.md">'),
-      expect.stringContaining(
-        '<skill-file path="references/theme-index.md">'
-      )
-    ])
-  );
+  expect(session.audit().files).toEqual([
+    "SKILL.md",
+    "references/theme-index.md"
+  ]);
 });
 
 it("records mixed mode when only some required files are read before fallback", async () => {

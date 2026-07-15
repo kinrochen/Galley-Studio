@@ -11,8 +11,15 @@ import { ArtifactRepository } from "../../src/documents/ArtifactRepository";
 import { ArtifactConfigurationError } from "../../src/documents/ArtifactRepository";
 import { GalleySidecarV1Schema } from "../../src/documents/GalleySidecar";
 import type { GeneratedDocument } from "../../src/generation/GenerationPipeline";
+import { GenerationPipelineError } from "../../src/generation/GenerationPipeline";
 import GalleyPlugin, { ObsidianArtifactVault } from "../../src/main";
 import { normalizeSettings } from "../../src/settings/GalleySettings";
+import { LocaleStore } from "../../src/i18n/LocaleStore";
+import {
+  generateActiveMarkdown,
+  type DesktopConsoleHost
+} from "../../src/platform/DesktopConsoleRuntime";
+import { derivePlatformCapabilities } from "../../src/platform/PlatformCapabilities";
 import { annotateMarkdown } from "../../src/source/SourceAnnotator";
 import {
   GRAPHITE_THEME,
@@ -167,6 +174,97 @@ describe("generateCurrentArticle", () => {
     );
   });
 
+  it("localizes every Galley-owned generation Notice without changing default English", async () => {
+    const noticesSeen: string[] = [];
+    await generateCurrentArticle(
+      makeContext({
+        text: new LocaleStore({ language: "zh-CN", obsidianLocale: () => "zh-CN" }),
+        notice: (message) => noticesSeen.push(message),
+        openArtifact: async () => {
+          throw new Error("UI failed");
+        }
+      }),
+      new AbortController().signal
+    );
+
+    expect(noticesSeen).toEqual([
+      "Galley：正在读取当前 Markdown。",
+      "Galley：正在加载生成依赖。",
+      "Galley：正在生成文章。",
+      "Galley：正在验证生成的文章。",
+      "Galley：正在保存独立产物。",
+      "Galley：已生成 notes/note.galley.html 和 notes/note.galley.json。",
+      "Galley：文章已生成，但无法打开工作台。"
+    ]);
+    expect(noticesSeen.join("\n")).not.toMatch(
+      /Reading|Loading|Generating|Validating|Saving|Generated|workbench could not/iu
+    );
+  });
+
+  it("wires the Chinese console generation adapter to localized Notices", async () => {
+    const locale = new LocaleStore({ language: "zh-CN", obsidianLocale: () => "zh-CN" });
+    const settings = normalizeSettings({ language: "zh-CN", model: "" });
+    const app = {
+      workspace: {
+        getActiveFile: () => ({ path: "notes/note.md", name: "note.md", extension: "md" })
+      },
+      vault: { read: async () => "# Source\n" },
+      secretStorage: { getSecret: () => null, listSecrets: () => [], setSecret: () => undefined }
+    } as unknown as App;
+    const host: DesktopConsoleHost = {
+      app,
+      capabilities: derivePlatformCapabilities(false),
+      locale,
+      getSettings: () => settings,
+      replaceSettings: () => undefined,
+      loadData: async () => settings,
+      saveData: async () => undefined,
+      saveSettings: async () => undefined
+    };
+
+    await expect(
+      generateActiveMarkdown(host, {}, new AbortController().signal)
+    ).rejects.toMatchObject({ code: "missing_model" });
+
+    expect(notices).toEqual([locale.t("generation.error.missingModel")]);
+    expect(notices.join("\n")).not.toContain("Configure a model");
+  });
+
+  it("locks console generation to the Markdown path shown before the console gains focus", async () => {
+    const locale = new LocaleStore({ language: "en", obsidianLocale: () => "en" });
+    const sourceFile = { path: "notes/shown.md", name: "shown.md", extension: "md" };
+    const getFileByPath = vi.fn((path: string) =>
+      path === sourceFile.path ? sourceFile : null
+    );
+    const settings = normalizeSettings({ model: "" });
+    const app = {
+      workspace: { getActiveFile: () => null },
+      vault: { getFileByPath, read: vi.fn() },
+      secretStorage: { getSecret: () => null, listSecrets: () => [], setSecret: () => undefined }
+    } as unknown as App;
+    const host: DesktopConsoleHost = {
+      app,
+      capabilities: derivePlatformCapabilities(false),
+      locale,
+      getSettings: () => settings,
+      replaceSettings: () => undefined,
+      loadData: async () => settings,
+      saveData: async () => undefined,
+      saveSettings: async () => undefined
+    };
+
+    await expect(
+      generateActiveMarkdown(
+        host,
+        { sourcePath: sourceFile.path, themeId: "graphite-minimal" },
+        new AbortController().signal
+      )
+    ).rejects.toMatchObject({ code: "missing_model" });
+
+    expect(getFileByPath).toHaveBeenCalledWith(sourceFile.path);
+    expect(app.workspace.getActiveFile()).toBeNull();
+  });
+
   it.each([
     [null, "Galley: Open one Markdown file before generating."],
     [
@@ -264,9 +362,17 @@ describe("generateCurrentArticle", () => {
   it.each([
     [new AiError("missing_secret"), "Galley: Configure an API key before generating."],
     [new AiError("invalid_base_url"), "Galley: Check the configured provider Base URL."],
-    [new AiError("timeout"), "Galley: The AI request timed out."],
+    [
+      new AiError("timeout"),
+      "Galley: The model did not finish within the configured timeout. Increase it in Settings or use a faster model."
+    ],
     [new AiError("http_error", { status: 401 }), "Galley: The provider rejected the API key or permissions."],
     [new AiError("http_error", { status: 429 }), "Galley: The provider is temporarily unavailable; try again."],
+    [new AiError("http_error", { status: 400 }), "Galley: The provider rejected this OpenAI-compatible request."],
+    [new AiError("network_error"), "Galley: Could not reach the model provider."],
+    [new AiError("invalid_response"), "Galley: The model returned an unreadable response."],
+    [new AiError("tool_round_limit"), "Galley: The model did not finish loading the Skill files."],
+    [new GenerationPipelineError("theme_invalid", "unsafe provider detail"), "Galley: The model could not choose a valid theme."],
     [new Error("Authorization: Bearer top-secret; markdown and <html>raw</html>"), "Galley: Generation failed. Check settings and try again."]
   ])("shows only an allowlisted error for %s", async (failure, safeMessage) => {
     const notice = vi.fn();
@@ -409,7 +515,7 @@ describe("plugin command registration", () => {
     const source = annotateMarkdown(markdown);
     const harness = makeProductionPluginApp(markdown);
     const providerResponses = [
-      openAiContent("tool calls not available"),
+      toolsUnsupportedResponse(),
       openAiContent(
         JSON.stringify({
           themeId: "graphite-minimal",
@@ -490,7 +596,7 @@ describe("plugin command registration", () => {
       raceFirstHtmlFinal: true
     });
     const providerResponses = [
-      openAiContent("tool calls not available"),
+      toolsUnsupportedResponse(),
       openAiContent(
         JSON.stringify({
           themeId: "graphite-minimal",
@@ -1059,6 +1165,17 @@ function openAiContent(content: string): { status: number; json: unknown } {
           finish_reason: "stop"
         }
       ]
+    }
+  };
+}
+
+function toolsUnsupportedResponse(): { status: number; json: unknown } {
+  return {
+    status: 400,
+    json: {
+      error: {
+        message: "Function tools are not supported by this test provider."
+      }
     }
   };
 }

@@ -145,4 +145,32 @@ describe("ThemeLabView", () => {
     expect(arrayBuffer).not.toHaveBeenCalled();
     expect(generate).not.toHaveBeenCalled();
   });
+
+  it("stores a stable failure key so a live locale change retranslates the status", async () => {
+    const locale = new LocaleStore({ language: "en", obsidianLocale: () => "en" });
+    const view = new ThemeLabView(new WorkspaceLeaf(), {
+      supportsVision: async () => false,
+      generate: async () => {
+        throw new Error("provider secret must not render");
+      },
+      save: vi.fn(),
+      report: vi.fn(),
+      locale
+    });
+    await view.onOpen();
+    view.contentEl.querySelector<HTMLTextAreaElement>("textarea")!.value = "Failure";
+    [...view.contentEl.querySelectorAll("button")].find(
+      (button) => button.textContent === "Generate draft"
+    )!.click();
+    await vi.waitFor(() =>
+      expect(view.contentEl.querySelector(".galley-theme-lab__status")?.textContent)
+        .toBe("Theme operation failed.")
+    );
+
+    locale.configure("zh-CN");
+
+    expect(view.contentEl.querySelector(".galley-theme-lab__status")?.textContent)
+      .toBe("主题操作失败。");
+    expect(view.contentEl.textContent).not.toContain("provider secret");
+  });
 });

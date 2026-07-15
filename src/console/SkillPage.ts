@@ -37,9 +37,18 @@ export async function renderSkillPage(
   for (const skill of skills) {
     const row = document.createElement("div");
     row.className = "galley-console__management-row";
-    appendText(row, `${skill.version} — ${skill.source}`);
+    appendText(
+      row,
+      `${skill.version} — ${options.text.t(
+        skill.source === "bundled"
+          ? "console.skills.source.bundled"
+          : "console.skills.source.imported"
+      )} · ${options.text.t(
+        skill.valid ? "console.skills.valid" : "console.skills.invalid"
+      )}`
+    );
     if (skill.active) appendText(row, options.text.t("console.skills.active"));
-    else if (skill.source === "imported") {
+    else if (skill.source === "imported" && skill.valid) {
       const activate = button(options.text.t("console.skills.activate"), "skill-activate");
       activate.addEventListener("click", () => {
         if (!options.confirm(options.text.t("common.confirm.activate", { target: skill.version }))) return;

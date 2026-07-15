@@ -1,6 +1,8 @@
 import { ItemView, type WorkspaceLeaf } from "obsidian";
+import { generationFailureMessage } from "../commands/GenerateCurrentArticle";
 import type { LocalizedText } from "../i18n/LocalizedText";
 import type { MessageKey } from "../i18n/Resources";
+import type { GenerationStage } from "../generation/GenerationProgress";
 import { ArticlePage, type ArticlePageState } from "./ArticlePage";
 import {
   renderConsoleHome,
@@ -166,6 +168,8 @@ export class GalleyConsoleView extends ItemView {
 
     const main = document.createElement("main");
     main.className = "galley-console__main";
+    const operationRegion = this.#statusRegion();
+    main.append(operationRegion);
     try {
       await this.#renderPage(main);
     } catch {
@@ -175,7 +179,6 @@ export class GalleyConsoleView extends ItemView {
       error.textContent = this.#services.locale.t("common.error.safe");
       main.append(error);
     }
-    main.append(this.#statusRegion());
     this.#applyOperationState(main);
     fragment.append(main);
     if (version !== this.#renderVersion || this.#closed) return;
@@ -190,6 +193,7 @@ export class GalleyConsoleView extends ItemView {
       run: (operation: string, action: (signal: AbortSignal) => Promise<unknown>) =>
         this.#run(operation, action),
       navigate: (route: ConsoleRoute) => this.navigate(route),
+      reportProgress: (stage: GenerationStage) => this.#reportProgress(stage),
       confirm: this.#services.confirm ?? ((message: string) => window.confirm(message))
     };
     switch (this.#route) {
@@ -287,9 +291,13 @@ export class GalleyConsoleView extends ItemView {
     );
     region.setAttribute("aria-live", "polite");
     if (this.#operation.status === "idle") {
-      region.textContent = this.#services.locale.t("common.status.idle");
+      region.hidden = true;
     } else if (this.#operation.status === "loading") {
-      region.textContent = this.#services.locale.t("common.status.loading");
+      region.textContent = this.#operation.message ?? this.#services.locale.t(
+        this.#operation.operation === "generate"
+          ? "generation.status.inProgress"
+          : "common.status.loading"
+      );
       const cancel = document.createElement("button");
       cancel.type = "button";
       cancel.dataset.action = "cancel";
@@ -325,18 +333,31 @@ export class GalleyConsoleView extends ItemView {
             path: result.htmlPath
           })
         };
+      } else if (isGeneratedArticle(result)) {
+        this.#operation = {
+          status: "success",
+          message: this.#services.locale.t("generation.status.complete", {
+            path: result.htmlPath
+          })
+        };
       } else {
         this.#operation = {
           status: "success",
-          message: this.#services.locale.t("common.status.idle")
+          message: this.#services.locale.t("common.status.complete")
         };
       }
-    } catch {
+    } catch (error) {
       this.#operation = controller.signal.aborted
         ? { status: "idle" }
         : {
             status: "error",
-            message: this.#services.locale.t("common.error.safe")
+            message: operation === "generate"
+              ? generationFailureMessage(
+                  error,
+                  controller.signal,
+                  this.#services.locale
+                )
+              : this.#services.locale.t("common.error.safe")
           };
     } finally {
       if (this.#controllers.get(operation) === controller) {
@@ -360,6 +381,26 @@ export class GalleyConsoleView extends ItemView {
     }
   }
 
+  #reportProgress(stage: GenerationStage): void {
+    if (
+      this.#operation.status !== "loading" ||
+      this.#operation.operation !== "generate"
+    ) return;
+    const keys: Readonly<Record<GenerationStage, MessageKey>> = {
+      reading: "generation.status.reading",
+      "loading-skill": "generation.status.loadingSkill",
+      generating: "generation.status.generating",
+      validating: "generation.status.validating",
+      saving: "generation.status.saving"
+    };
+    this.#operation = {
+      status: "loading",
+      operation: "generate",
+      message: this.#services.locale.t(keys[stage])
+    };
+    void this.#render();
+  }
+
   #allowedRoutes(): readonly ConsoleRoute[] {
     return this.#services.mobile
       ? (MOBILE_CONSOLE_ROUTES as readonly ConsoleRoute[])
@@ -375,6 +416,19 @@ function isPartialSuccess(
     value !== null &&
     "status" in value &&
     value.status === "partial-success" &&
+    "htmlPath" in value &&
+    typeof value.htmlPath === "string"
+  );
+}
+
+function isGeneratedArticle(
+  value: unknown
+): value is { readonly status: "committed"; readonly htmlPath: string } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "status" in value &&
+    value.status === "committed" &&
     "htmlPath" in value &&
     typeof value.htmlPath === "string"
   );

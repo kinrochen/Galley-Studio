@@ -53,8 +53,8 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("console-driven primary workflow", () => {
-  it("drives generation, production editing, management, exports, Theme Lab, Skill activation, and locale safety", async () => {
+describe("production services behind typed console actions", () => {
+  it("drives the lower production chain for generation, editing, management, exports, Theme Lab, Skill activation, and locale safety", async () => {
     vi.stubGlobal("matchMedia", vi.fn((media: string) => ({
       matches: false,
       media,
@@ -116,7 +116,32 @@ describe("console-driven primary workflow", () => {
       },
       saveLanguage: async () => undefined,
       publishLanguage: () => undefined,
-      desktop: { openWorkbench: async () => undefined }
+      desktop: {
+        openWorkbench: async () => undefined,
+        listThemes: async () => [
+          {
+            id: "graphite-minimal",
+            name: "Graphite Minimal",
+            builtIn: true,
+            enabled: true
+          }
+        ],
+        listSkills: async () => [
+          { version: "bundled", source: "bundled", active: true, valid: true }
+        ],
+        listSecrets: async () => ["recorded-key"],
+        readSettings: async () => ({
+          baseUrl: "https://api.example/v1",
+          model: "recorded-model",
+          secretId: "recorded-key",
+          temperature: 0.4,
+          timeoutMs: 120000,
+          contextWindow: 128000,
+          outputFolder: "Galley",
+          language: "en",
+          activeSkillVersion: "bundled"
+        })
+      }
     });
     const generationConsole = new GalleyConsoleView(new WorkspaceLeaf(), {
       actions: generationActions,
@@ -129,7 +154,7 @@ describe("console-driven primary workflow", () => {
       '[name="themeId"]'
     );
     if (!theme) throw new Error("missing theme field");
-    theme.value = "graphite-minimal";
+    theme.click();
     generationConsole.contentEl
       .querySelector<HTMLButtonElement>('[data-action="generate"]')
       ?.click();
@@ -324,7 +349,7 @@ describe("console-driven primary workflow", () => {
 
     const providerResponses = [
       openAiContent("unsupported"),
-      openAiContent("tool calls unavailable"),
+      toolsUnsupportedResponse(),
       openAiContent(themeModelResponse())
     ];
     setRequestUrlHandler(async () => {
@@ -594,6 +619,17 @@ function openAiContent(content: string): { status: number; json: unknown } {
           finish_reason: "stop"
         }
       ]
+    }
+  };
+}
+
+function toolsUnsupportedResponse(): { status: number; json: unknown } {
+  return {
+    status: 400,
+    json: {
+      error: {
+        message: "Function tools are not supported by this test provider."
+      }
     }
   };
 }

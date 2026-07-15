@@ -1,6 +1,17 @@
 import type { GalleyActions } from "./GalleyActions";
 import type { ConsolePageText } from "./ConsoleHome";
 import { appendText, button } from "./ConsoleHome";
+import type { UnavailableArticleReason } from "./ConsoleTypes";
+import type { MessageKey } from "../i18n/Resources";
+
+const UNAVAILABLE_REASON_KEYS: Readonly<Record<UnavailableArticleReason, MessageKey>> = {
+  missing_sidecar: "console.unavailable.missingSidecar",
+  missing_html: "console.unavailable.missingHtml",
+  invalid_sidecar: "console.unavailable.invalidSidecar",
+  invalid_document: "console.unavailable.invalidDocument",
+  html_hash_mismatch: "console.unavailable.hashMismatch",
+  unreadable: "console.unavailable.unreadable"
+};
 
 export interface ArticlePageState {
   query: string;
@@ -68,7 +79,9 @@ export async function ArticlePage(
       row.className = "galley-console__unavailable";
       const cell = document.createElement("td");
       cell.colSpan = 2;
-      cell.textContent = `${unavailable.path} — ${options.text.t("console.unavailable", { reason: unavailable.reason })}`;
+      cell.textContent = `${unavailable.path} — ${options.text.t("console.unavailable", {
+        reason: options.text.t(UNAVAILABLE_REASON_KEYS[unavailable.reason])
+      })}`;
       row.append(cell);
       body.append(row);
     }

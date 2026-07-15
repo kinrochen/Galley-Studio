@@ -228,7 +228,7 @@ export class OpenAiCompatibleClient {
     callerSignal.addEventListener("abort", forwardAbort, { once: true });
     const timeout = setTimeout(() => {
       attemptController.abort();
-      rejectCancellation(new AiError("timeout", { retryable: true }));
+      rejectCancellation(new AiError("timeout", { retryable: false }));
     }, this.timeoutMs);
 
     try {
@@ -262,7 +262,26 @@ function mapRequest(request: ChatRequest, stream: boolean): Record<string, unkno
   if (request.temperature !== undefined) {
     body.temperature = request.temperature;
   }
+  // DashScope's Qwen hybrid models enable deep thinking by default. Galley
+  // needs deterministic tool calls and direct HTML content, and its requests
+  // are valid non-streaming Chat Completions calls only with thinking disabled.
+  if (shouldDisableDashScopeThinking(request)) {
+    body.enable_thinking = false;
+  }
   return body;
+}
+
+function shouldDisableDashScopeThinking(request: ChatRequest): boolean {
+  let hostname: string;
+  try {
+    hostname = new URL(request.baseUrl).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  return (
+    (hostname === "dashscope.aliyuncs.com" || hostname.endsWith(".maas.aliyuncs.com")) &&
+    /^qwen3(?:\.[0-9]+)?-/iu.test(request.model)
+  );
 }
 
 function mapMessage(message: ChatMessage): Record<string, unknown> {

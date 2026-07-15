@@ -3,7 +3,7 @@ import type { App } from "obsidian";
 import themeGeneratorProfile from "../../assets/profiles/theme-generator.md?raw";
 import { AiError } from "../ai/AiError";
 import { validateBaseUrl } from "../ai/BaseUrlPolicy";
-import { CapabilityProbe, type ProviderCapabilities } from "../ai/CapabilityProbe";
+import type { ProviderCapabilities } from "../ai/CapabilityProbe";
 import { OpenAiCompatibleClient } from "../ai/OpenAiCompatibleClient";
 import { VisionCapabilityProbe } from "../ai/VisionCapabilityProbe";
 import { createObsidianTransport } from "../diagnostics/ObsidianTransport";
@@ -55,7 +55,15 @@ export async function createProductionSkillContext(
     secretStore
   );
   const target = { baseUrl: settings.baseUrl, model: settings.model };
-  const capabilities = await new CapabilityProbe(client).probe(target, signal);
+  // Generation is tool-first by contract. Avoid a separate capability request on
+  // every click: SkillSession already detects an unsupported tools response and
+  // falls back to complete file injection for that same run.
+  const capabilities: ProviderCapabilities = {
+    tools: true,
+    streaming: false,
+    vision: false,
+    checkedAt: new Date().toISOString()
+  };
   if (vision) {
     capabilities.vision = await new VisionCapabilityProbe(client).probe(target, signal);
   }

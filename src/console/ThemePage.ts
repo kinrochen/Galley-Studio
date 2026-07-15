@@ -13,9 +13,12 @@ export async function renderThemePage(
   }
 ): Promise<void> {
   heading(container, options.text.t("console.themes.title"));
+  appendText(container, options.text.t("console.themes.description"))
+    .className = "galley-console__lead";
   const runtime = options.actions.desktop;
   if (!runtime) return;
   const controls = document.createElement("div");
+  controls.className = "galley-console__page-actions";
   const themeLab = button(options.text.t("console.action.openThemeLab"), "theme-lab");
   themeLab.addEventListener("click", () =>
     void options.run("theme-lab", async () => runtime.openThemeLab?.())
@@ -38,12 +41,35 @@ export async function renderThemePage(
   controls.append(themeLab, upload);
   container.append(controls);
   const themes = (await runtime.listThemes?.()) ?? [];
-  if (!themes.length) appendText(container, options.text.t("console.themes.title"));
+  if (!themes.length) {
+    appendText(container, options.text.t("console.themes.empty"))
+      .className = "galley-console__empty";
+    return;
+  }
+  const grid = document.createElement("div");
+  grid.className = "galley-console__theme-library";
   for (const theme of themes) {
-    const row = document.createElement("div");
-    row.className = "galley-console__management-row";
-    appendText(row, `${theme.name} (${theme.id})`);
+    const row = document.createElement("section");
+    row.className = "galley-console__theme-item";
+    row.dataset.themeId = theme.id;
+    const details = document.createElement("div");
+    details.className = "galley-console__theme-details";
+    const name = document.createElement("h2");
+    name.textContent = theme.name;
+    const id = appendText(details, theme.id);
+    id.className = "galley-console__theme-id";
+    details.prepend(name);
+    const kind = appendText(
+      details,
+      options.text.t(
+        theme.builtIn ? "console.themes.builtIn" : "console.themes.custom"
+      )
+    );
+    kind.className = "galley-console__theme-kind";
+    row.append(details);
     if (!theme.builtIn) {
+      const actions = document.createElement("div");
+      actions.className = "galley-console__row-actions";
       const toggle = button(
         options.text.t(theme.enabled ? "console.themes.disable" : "console.themes.enable"),
         "theme-toggle"
@@ -65,10 +91,12 @@ export async function renderThemePage(
         if (!options.confirm(options.text.t("common.confirm.delete", { target: theme.id }))) return;
         void options.run("theme-delete", async () => runtime.deleteTheme?.(theme.id));
       });
-      row.append(toggle, exportTheme, remove);
+      actions.append(toggle, exportTheme, remove);
+      row.append(actions);
     }
-    container.append(row);
+    grid.append(row);
   }
+  container.append(grid);
 }
 
 function download(filename: string, bytes: Uint8Array): void {

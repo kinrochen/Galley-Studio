@@ -30,6 +30,26 @@ export interface SettingsSnapshot {
   readonly contextWindow: number;
   readonly outputFolder: string;
   readonly language: GalleyLanguage;
+  readonly activeSkillVersion?: string;
+}
+
+export interface ConnectionDiagnosticSnapshot {
+  readonly ok: boolean;
+  readonly model: string;
+  readonly capabilities: {
+    readonly tools: boolean;
+    readonly streaming: boolean;
+    readonly vision: boolean;
+  };
+  readonly skillVersion: string;
+  readonly skillLoadMode: "tool-calls" | "injected" | "mixed";
+  readonly skillFiles: readonly string[];
+  readonly errorCode?: string;
+}
+
+export interface ConsoleHomeActivitySnapshot {
+  readonly pendingExport?: { readonly path: string };
+  readonly unsavedThemeDraft?: { readonly name: string };
 }
 
 export interface DesktopGalleyActions {
@@ -49,7 +69,8 @@ export interface DesktopGalleyActions {
   readSettings?(): Promise<SettingsSnapshot>;
   listSecrets?(): Promise<readonly string[]>;
   saveSettings?(value: Partial<SettingsSnapshot>): Promise<SettingsSnapshot>;
-  runDiagnostic?(signal: AbortSignal): Promise<unknown>;
+  runDiagnostic?(signal: AbortSignal): Promise<ConnectionDiagnosticSnapshot>;
+  readHomeActivity?(): Promise<ConsoleHomeActivitySnapshot>;
 }
 
 export interface GalleyActions {
