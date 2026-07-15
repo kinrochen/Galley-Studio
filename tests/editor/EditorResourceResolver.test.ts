@@ -39,6 +39,47 @@ describe("EditorResourceResolver", () => {
     expect(restored).toBe("<img><a>bad</a><img><img>");
   });
 
+  it("retires a stale display marker when an editor replaces it with an allowed authoring URL", () => {
+    const resolver = new EditorResourceResolver((path) => `app://vault/${path}`);
+    const edited = [
+      '<a href="notes/new.md" data-galley-original-href="notes/old.md">local</a>',
+      '<a href="#heading" data-galley-original-href="notes/old.md">anchor</a>',
+      '<a href="notes/new.md?mode=read#heading" data-galley-original-href="notes/old.md">local anchor</a>',
+      '<a href="https://example.com/new" data-galley-original-href="notes/old.md">web</a>',
+      '<img src="assets/new.png" data-galley-original-src="assets/old.png">',
+      '<img src="https://cdn.example/new.png" data-galley-original-src="assets/old.png">'
+    ].join("");
+
+    expect(resolver.restoreForSave(edited)).toBe([
+      '<a href="notes/new.md">local</a>',
+      '<a href="#heading">anchor</a>',
+      '<a href="notes/new.md?mode=read#heading">local anchor</a>',
+      '<a href="https://example.com/new">web</a>',
+      '<img src="assets/new.png">',
+      '<img src="https://cdn.example/new.png">'
+    ].join(""));
+  });
+
+  it("fails closed when a stale or forged marker is paired with another runtime URL", () => {
+    const resolver = new EditorResourceResolver((path) => `app://vault/${path}`);
+
+    expect(resolver.restoreForSave([
+      '<a href="app://vault/notes/new.md" data-galley-original-href="notes/old.md">runtime</a>',
+      '<img src="file:///tmp/new.png" data-galley-original-src="assets/old.png">'
+    ].join(""))).toBe("<a>runtime</a><img>");
+  });
+
+  it("rejects unsafe replacements even when an old marker looks valid", () => {
+    const resolver = new EditorResourceResolver((path) => `app://vault/${path}`);
+    const restored = resolver.restoreForSave([
+      '<a href="//evil.example/x" data-galley-original-href="notes/old.md">protocol relative</a>',
+      '<a href="javascript:alert(1)" data-galley-original-href="notes/old.md">script</a>',
+      '<a href="/Users/alice/private" data-galley-original-href="notes/old.md">system</a>'
+    ].join(""));
+
+    expect(restored).toBe("<a>protocol relative</a><a>script</a><a>system</a>");
+  });
+
   it("is idempotent and leaves fragments, data URLs, and web URLs untouched", () => {
     const resolver = new EditorResourceResolver((path) => `app://vault/${path}`);
     const html = [

@@ -25,7 +25,12 @@ export type WorkbenchAction =
   | { type: "mode-selected"; mode: WorkbenchMode }
   | { type: "content-changed" }
   | { type: "save-started" }
-  | { type: "save-completed"; lastSavedAt: string | null; sourceChanged: boolean }
+  | {
+      type: "save-completed";
+      dirty: boolean;
+      lastSavedAt: string | null;
+      sourceChanged: boolean;
+    }
   | { type: "conflict-detected" }
   | { type: "document-reloaded"; sourceChanged: boolean }
   | { type: "source-selected"; sourceId: string | null }
@@ -77,7 +82,7 @@ export function reduceWorkbenchState(
     case "save-completed":
       return {
         ...state,
-        dirty: false,
+        dirty: action.dirty,
         saving: false,
         conflict: false,
         sourceChanged: action.sourceChanged,

@@ -52,4 +52,19 @@ describe("WorkbenchState", () => {
       })
     ).toMatchObject({ mode: "source", dirty: true });
   });
+
+  it("uses the real session dirty state when a save completes", () => {
+    const saving = {
+      ...initialWorkbenchState(),
+      dirty: true,
+      saving: true
+    };
+
+    expect(reduceWorkbenchState(saving, {
+      type: "save-completed",
+      dirty: true,
+      lastSavedAt: "2026-07-15T00:00:00.000Z",
+      sourceChanged: false
+    })).toMatchObject({ dirty: true, saving: false });
+  });
 });

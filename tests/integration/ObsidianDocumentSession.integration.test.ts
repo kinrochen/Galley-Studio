@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 import { GalleyDocumentCodec } from "../../src/documents/GalleyDocumentCodec";
+import { sha256Text } from "../../src/documents/GalleySidecar";
 import {
+  GalleyDocumentAmbiguousError,
   GalleyDocumentQuarantinedError,
   type OpenedGalleyDocumentSession
 } from "../../src/documents/DocumentSessionOpener";
 import { ObsidianDocumentSessionOpener } from "../../src/documents/ObsidianDocumentSessionOpener";
+import { ObsidianWorkbenchVault } from "../../src/documents/ObsidianWorkbenchVault";
 import { persistentObsidianVault } from "../support/obsidianVaultFixtures";
 import {
   OBSIDIAN_SESSION_DOCUMENT_ID,
@@ -152,6 +155,102 @@ describe("ObsidianDocumentSessionOpener production composition", () => {
     expect(fixture.backing.read(OBSIDIAN_SESSION_PATHS.sidecar)).toBe(
       externalSidecar
     );
+  });
+
+  it("surfaces open-time ambiguity as a typed non-renderable result and later reopens stably", async () => {
+    const fixture = await makeObsidianDocumentSessionFixture();
+    const nextHtml = fixture.html.replace("original", "interrupted open");
+    const nextSidecar = JSON.parse(fixture.sidecarJson) as Record<string, unknown>;
+    const crashingVault = new ObsidianWorkbenchVault(
+      persistentObsidianVault(fixture.backing),
+      {
+        crashAt: new Set(["after-html"]),
+        randomUUID: () => "723e4567-e89b-42d3-a456-426614174000"
+      }
+    );
+    const observation = (await crashingVault.readPair(
+      OBSIDIAN_SESSION_PATHS
+    ))!.observation;
+    await expect(crashingVault.replacePairTransactional(
+      OBSIDIAN_SESSION_PATHS,
+      observation,
+      {
+        html: nextHtml,
+        sidecarJson: `${JSON.stringify({
+          ...nextSidecar,
+          htmlHash: await sha256Text(nextHtml)
+        })}\n`
+      }
+    )).rejects.toMatchObject({
+      code: "workbench_simulated_crash"
+    });
+
+    let interruptedCleanup = false;
+    const ambiguousVault = persistentObsidianVault(fixture.backing, {
+      afterModify(path) {
+        if (
+          !interruptedCleanup &&
+          (path === OBSIDIAN_SESSION_PATHS.html ||
+            path === OBSIDIAN_SESSION_PATHS.sidecar)
+        ) {
+          interruptedCleanup = true;
+          throw new Error("rollback acknowledgement lost");
+        }
+      }
+    });
+    const ambiguousOpener = new ObsidianDocumentSessionOpener(ambiguousVault);
+    const failure = await ambiguousOpener.open(OBSIDIAN_SESSION_PATHS.html).then(
+      () => null,
+      (error: unknown) => error
+    );
+
+    expect(failure).toBeInstanceOf(GalleyDocumentAmbiguousError);
+    expect(failure).toMatchObject({
+      code: "galley_document_ambiguous",
+      paths: OBSIDIAN_SESSION_PATHS,
+      recovery: { status: "ambiguous" }
+    });
+
+    const recovered = await new ObsidianDocumentSessionOpener(
+      persistentObsidianVault(fixture.backing)
+    ).open(OBSIDIAN_SESSION_PATHS.html);
+    expect(recovered.recoveryState()).toEqual({ status: "ready" });
+    expect(recovered.bodyHtml()).toMatch(/original|interrupted open/u);
+  });
+
+  it("resets an ambiguous facade only after a later proof-bearing stable reload", async () => {
+    const fixture = await makeObsidianDocumentSessionFixture();
+    const saveAbort = new AbortController();
+    let abortOnce = true;
+    const opener = new ObsidianDocumentSessionOpener(
+      persistentObsidianVault(fixture.backing),
+      {
+        vaultOptions: {
+          onCrashPoint(point) {
+            if (abortOnce && point === "after-html") {
+              abortOnce = false;
+              saveAbort.abort();
+            }
+          }
+        },
+        historyOptions: {
+          randomUUID: uuidSequence("823e4567-e89b-42d3-a456-426614174")
+        }
+      }
+    );
+    const session = await opener.open(OBSIDIAN_SESSION_PATHS.html);
+    session.updateBody(
+      '<article data-galley-article="true"><p>ambiguous save</p></article>'
+    );
+
+    await expect(session.save("explicit", saveAbort.signal)).rejects.toMatchObject({
+      code: "workbench_mutation_ambiguous"
+    });
+    expect(session.recoveryState()).toMatchObject({ status: "ambiguous" });
+
+    await session.reload();
+    expect(session.recoveryState()).toEqual({ status: "ready" });
+    expect(session.bodyHtml()).toContain("original");
   });
 
   it("refreshes the facade history scope when reload adopts a new valid pair identity", async () => {

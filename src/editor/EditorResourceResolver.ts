@@ -70,8 +70,14 @@ export class EditorResourceResolver {
       const exactDisplay =
         isCanonicalVaultResource(original) &&
         current === this.resourceUrl(original);
-      if (exactDisplay) element.setAttribute(attribute, original);
-      else element.removeAttribute(attribute);
+      if (exactDisplay) {
+        element.setAttribute(attribute, original);
+      } else if (
+        current === null ||
+        !isAllowedAuthoringUrl(element, attribute, current)
+      ) {
+        element.removeAttribute(attribute);
+      }
       element.removeAttribute(marker);
       return;
     }
@@ -93,6 +99,45 @@ function isCanonicalVaultResource(value: string): boolean {
 
 function isSystemOrRuntimeUrl(value: string): boolean {
   return SYSTEM_OR_RUNTIME_URL.test(value.trim());
+}
+
+function isAllowedAuthoringUrl(
+  element: HTMLElement,
+  attribute: "src" | "href",
+  value: string
+): boolean {
+  if (
+    value !== value.trim() ||
+    !value ||
+    /[\\\u0000-\u001f\u007f-\u009f]/u.test(value) ||
+    value.startsWith("//") ||
+    isSystemOrRuntimeUrl(value)
+  ) {
+    return false;
+  }
+  if (isCanonicalVaultResource(value)) return true;
+  if (
+    attribute === "href" &&
+    (value.startsWith("#") || isCanonicalVaultReference(value))
+  ) {
+    return true;
+  }
+
+  const scheme = /^([a-z][a-z0-9+.-]*):/iu.exec(value)?.[1]?.toLowerCase();
+  if (scheme === "http" || scheme === "https") return true;
+  if (attribute === "href") {
+    return scheme === "mailto" || scheme === "tel" || scheme === "obsidian";
+  }
+  return (
+    scheme === "data" &&
+    element.localName === "img" &&
+    /^data:image\/(?:avif|bmp|gif|jpeg|png|svg\+xml|vnd\.microsoft\.icon|webp|x-icon)(?:;[^,;=]+=[^,;]*)*(?:;base64)?,/iu.test(value)
+  );
+}
+
+function isCanonicalVaultReference(value: string): boolean {
+  const suffixStart = value.search(/[?#]/u);
+  return suffixStart > 0 && isCanonicalVaultResource(value.slice(0, suffixStart));
 }
 
 function parseFragment(html: string): DocumentFragment {

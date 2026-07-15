@@ -67,11 +67,52 @@ describe("production Galley workbench editing", () => {
     expect(reopenedEditor.html).toContain("original");
     expect(fixture.backing.read(OBSIDIAN_SESSION_PATHS.html)).toContain("edited");
   });
+
+  it("preserves local and external link targets changed through the property inspector", async () => {
+    const fixture = await makeObsidianDocumentSessionFixture(
+      'original <a href="notes/old.md">old</a>'
+    );
+    const editor = new FakeEditor();
+    const view = makeView(productionOpener(fixture.backing), editor);
+    await view.openPath(OBSIDIAN_SESSION_PATHS.html);
+
+    editor.select("a");
+    const localInput = view.contentEl.querySelector(
+      'input[data-control="link-url"]'
+    ) as HTMLInputElement;
+    localInput.value = "notes/new.md";
+    localInput.dispatchEvent(new Event("change"));
+    await view.saveExplicit();
+
+    expect(fixture.backing.read(OBSIDIAN_SESSION_PATHS.html)).toContain(
+      'href="notes/new.md"'
+    );
+    expect(fixture.backing.read(OBSIDIAN_SESSION_PATHS.html)).not.toContain(
+      "data-galley-original"
+    );
+
+    editor.select("a");
+    const externalInput = view.contentEl.querySelector(
+      'input[data-control="link-url"]'
+    ) as HTMLInputElement;
+    externalInput.value = "https://example.com/new";
+    externalInput.dispatchEvent(new Event("change"));
+    await view.saveExplicit();
+
+    expect(fixture.backing.read(OBSIDIAN_SESSION_PATHS.html)).toContain(
+      'href="https://example.com/new"'
+    );
+    expect(fixture.backing.read(OBSIDIAN_SESSION_PATHS.html)).not.toContain(
+      "data-galley-original"
+    );
+  });
 });
 
 class FakeEditor implements HtmlEditorAdapter {
-  html = "";
+  readonly contentDocument = document.implementation.createHTMLDocument("editor");
   options: HtmlEditorMountOptions | null = null;
+  get html(): string { return this.contentDocument.body.innerHTML; }
+  set html(value: string) { this.contentDocument.body.innerHTML = value; }
   async mount(
     _container: HTMLElement,
     bodyHtml: string,
@@ -87,6 +128,10 @@ class FakeEditor implements HtmlEditorAdapter {
   emit(html: string): void {
     this.html = html;
     this.options?.onChange(html);
+  }
+  select(selector: string): void {
+    const element = this.contentDocument.querySelector(selector) as HTMLElement | null;
+    this.options?.onSelectionChange?.(element);
   }
 }
 

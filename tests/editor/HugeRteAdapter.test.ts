@@ -8,6 +8,7 @@ import {
   type HugeRteRuntime
 } from "../../src/editor/HugeRteAdapter";
 import { HUGERTE_VALID_ELEMENTS } from "../../src/security/AuthoringSanitizer";
+import { EditorResourceResolver } from "../../src/editor/EditorResourceResolver";
 import {
   HUGERTE_CONTENT_CSS,
   HUGERTE_INLINE_SKIN_CSS
@@ -322,6 +323,25 @@ describe("HugeRteAdapter event bridge", () => {
     for (const event of ["input", "change", "Undo", "Redo"]) editor.emit(event);
     expect(onChange).toHaveBeenCalledTimes(4);
     expect(onChange).toHaveBeenLastCalledWith("<p>user</p>");
+    adapter.destroy();
+  });
+
+  it("preserves a canonical URL edited by HugeRTE while retiring its old display marker", async () => {
+    const runtime = new FakeRuntime();
+    const resolver = new EditorResourceResolver((path) => `app://vault/${path}`);
+    const accepted: string[] = [];
+    const adapter = makeAdapter(runtime);
+    await adapter.mount(
+      document.createElement("div"),
+      resolver.rewriteForDisplay('<a href="notes/old.md">old</a>'),
+      mountOptions({ onChange: (html) => accepted.push(resolver.restoreForSave(html)) })
+    );
+    const editor = runtime.editors[0]!;
+
+    editor.html = '<a href="notes/new.md" data-galley-original-href="notes/old.md">new</a>';
+    editor.emit("input");
+
+    expect(accepted).toEqual(['<a href="notes/new.md">new</a>']);
     adapter.destroy();
   });
 

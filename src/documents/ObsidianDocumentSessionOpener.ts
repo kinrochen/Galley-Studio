@@ -8,6 +8,7 @@ import {
 import { DocumentSession, type SaveReason } from "./DocumentSession";
 import {
   GalleyDocumentMissingError,
+  GalleyDocumentAmbiguousError,
   GalleyDocumentOpenUnstableError,
   GalleyDocumentQuarantinedError,
   GalleyHistorySnapshotNotFoundError,
@@ -133,6 +134,9 @@ export class ObsidianDocumentSessionOpener implements DocumentSessionOpener {
       if (recovery?.status === "quarantined") {
         throw new GalleyDocumentQuarantinedError(paths, recovery, error);
       }
+      if (recovery?.status === "ambiguous") {
+        throw new GalleyDocumentAmbiguousError(paths, recovery, error);
+      }
       throw error;
     }
   }
@@ -201,14 +205,15 @@ class ObsidianOpenedDocumentSession implements OpenedGalleyDocumentSession {
   }
 
   async save(reason: SaveReason, signal?: AbortSignal): Promise<void> {
+    const provesReady = this.#session.state().dirty;
     await this.#run(async () => {
       await this.#session.save(reason, signal);
       if (reason === "overwrite") await this.#syncDocumentId(signal);
-    });
+    }, provesReady);
   }
 
   async reload(signal?: AbortSignal): Promise<void> {
-    await this.#run(() => this.#reloadStable(signal));
+    await this.#run(() => this.#reloadStable(signal), true);
   }
 
   async saveCopy(signal?: AbortSignal): Promise<ArtifactPaths> {
@@ -231,9 +236,11 @@ class ObsidianOpenedDocumentSession implements OpenedGalleyDocumentSession {
     return { ...this.#recovery };
   }
 
-  async #run<T>(operation: () => Promise<T>): Promise<T> {
+  async #run<T>(operation: () => Promise<T>, provesReady = false): Promise<T> {
     try {
-      return await operation();
+      const result = await operation();
+      if (provesReady) this.#recovery = { status: "ready" };
+      return result;
     } catch (error) {
       let recovery = recoveryStateFromError(error);
       if (recovery?.status === "ambiguous") {

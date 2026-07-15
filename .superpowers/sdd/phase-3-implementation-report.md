@@ -27,6 +27,16 @@ Phase 3 now provides the complete desktop Galley editing loop:
 - The workbench surfaces ready, ambiguous, and quarantined recovery states. Ambiguous or quarantined saves pause autosave and never imply overwrite authority.
 - The review-clean `ObsidianWorkbenchVault`, `ObsidianTransactionStore`, and `ObsidianVaultFileStore` contracts were not weakened or rewritten.
 
+## Consolidated remediation
+
+The Phase 3 consolidated review's three Important findings were remediated as one TDD batch:
+
+1. `EditorResourceResolver` now retires a stale temporary marker when the editor replaces its display URL with a canonical vault-relative target, a safe local anchor/reference, or an allowed external target. Exact display pairs still restore their original authoring URL, while forged markers paired with runtime/system URLs, protocol-relative URLs, control characters, or dangerous schemes fail closed. Unit coverage is joined by HugeRTE event-bridge and production Property Inspector integration coverage.
+2. Every workbench save reason now enters one serialization queue. A slow explicit save cannot consume or lose a newer debounced autosave, and `save-completed` reads the real `DocumentSessionState.dirty` value instead of fabricating clean state. The production-faithful revision test covers explicit save, an in-flight edit, pending autosave, and eventual persistence of the newer revision without a false-clean interval.
+3. Open-time ambiguous recovery now becomes a typed `galley_document_ambiguous` failure that the workbench maps to an explicit warning without mounting a document. A facade returns to `ready` only after a later proof-bearing successful save or bounded stable reload. Production integration covers an ambiguous recovery mutation, a later stable reopen, and a later stable facade reload.
+
+The new regressions were first run against the reviewed implementation and failed at the intended URL-retention, dirty-state, save-concurrency, and ambiguous-open assertions before the production changes were applied.
+
 ## Main implementation files
 
 ### Production session composition
@@ -75,16 +85,16 @@ Phase 3 now provides the complete desktop Galley editing loop:
 
 ```text
 npm test -- tests/documents tests/editor tests/workbench tests/preview tests/integration
-28 files, 641 tests passed
+28 files, 651 tests passed
 
 npm run test:typecheck
 passed
 
 npm test
-56 files, 1143 tests passed
+56 files, 1153 tests passed
 
 npm run build
-passed; main.js 2,463,810 bytes; styles.css 7,863 bytes
+passed; main.js 2,465,049 bytes; styles.css 7,863 bytes
 
 git diff --check
 passed

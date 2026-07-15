@@ -113,6 +113,7 @@ export class GalleyWorkbenchView extends ItemView {
   #closed = false;
   #mountGeneration = 0;
   #transition: Promise<void> = Promise.resolve();
+  #saveQueue: Promise<void> = Promise.resolve();
   #toolbar!: HTMLElement;
   #leftRail!: HTMLElement;
   #outlineHost!: HTMLElement;
@@ -198,7 +199,13 @@ export class GalleyWorkbenchView extends ItemView {
     try {
       opened = await this.#services.openDocument(path);
     } catch (error) {
-      if (
+      if (errorCode(error) === "galley_document_ambiguous") {
+        this.#state = reduceWorkbenchState(this.#state, {
+          type: "recovery-ambiguous",
+          message: "The last transaction outcome is ambiguous. No partial document was opened."
+        });
+        this.#render();
+      } else if (
         errorCode(error) === "transaction_recovery_conflict" ||
         errorCode(error) === "galley_document_quarantined"
       ) {
@@ -480,6 +487,13 @@ export class GalleyWorkbenchView extends ItemView {
   }
 
   async #save(reason: SaveReason): Promise<void> {
+    const operation = () => this.#performSave(reason);
+    const result = this.#saveQueue.then(operation, operation);
+    this.#saveQueue = result.catch(() => undefined);
+    return result;
+  }
+
+  async #performSave(reason: SaveReason): Promise<void> {
     const document = this.#document;
     if (!document) return;
     this.#state = reduceWorkbenchState(this.#state, { type: "save-started" });
@@ -489,6 +503,7 @@ export class GalleyWorkbenchView extends ItemView {
       const sessionState = document.session.state();
       this.#state = reduceWorkbenchState(this.#state, {
         type: "save-completed",
+        dirty: sessionState.dirty,
         lastSavedAt: sessionState.lastSavedAt,
         sourceChanged: sessionState.sourceChanged
       });

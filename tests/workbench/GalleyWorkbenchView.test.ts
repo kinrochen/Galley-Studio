@@ -119,6 +119,34 @@ describe("GalleyWorkbenchView", () => {
     expect(fixture.view.currentState().dirty).toBe(false);
   });
 
+  it("serializes a slow explicit save with an in-flight edit and eventually autosaves the newer revision", async () => {
+    vi.useFakeTimers();
+    const session = new SlowRevisionSession();
+    const fixture = makeCustomFixture(session);
+    await fixture.view.openPath("a.galley.html");
+    fixture.visual.emit("<article><p>explicit revision</p></article>");
+
+    const explicit = fixture.view.saveExplicit();
+    await settleMicrotasks();
+    expect(session.saveCalls).toEqual(["explicit"]);
+
+    fixture.visual.emit("<article><p>newer autosave revision</p></article>");
+    await vi.advanceTimersByTimeAsync(800);
+    expect(session.saveCalls).toEqual(["explicit"]);
+
+    session.releaseNextSave();
+    await explicit;
+    await settleMicrotasks();
+    expect(session.saveCalls).toEqual(["explicit", "auto"]);
+    expect(fixture.view.currentState()).toMatchObject({ dirty: true, saving: true });
+
+    session.releaseNextSave();
+    await settleMicrotasks();
+    expect(session.persistedBody).toContain("newer autosave revision");
+    expect(session.state().dirty).toBe(false);
+    expect(fixture.view.currentState()).toMatchObject({ dirty: false, saving: false });
+  });
+
   it("stops autosave on conflict and maps reload, copy, and overwrite explicitly", async () => {
     vi.useFakeTimers();
     const fixture = makeFixture({ conflictOnAuto: true });
@@ -191,6 +219,23 @@ describe("GalleyWorkbenchView", () => {
       .toContain("quarantined");
     expect(fixture.visual.mountCalls).toHaveLength(0);
   });
+
+  it("surfaces a typed production ambiguity instead of rendering a partial document", async () => {
+    const fixture = makeFixture();
+    fixture.openDocument.mockRejectedValueOnce(
+      Object.assign(new Error("ambiguous"), {
+        code: "galley_document_ambiguous"
+      })
+    );
+
+    await expect(fixture.view.openPath("a.galley.html")).rejects.toMatchObject({
+      code: "galley_document_ambiguous"
+    });
+    expect(fixture.view.currentState().recovery).toBe("ambiguous");
+    expect(fixture.view.contentEl.querySelector(".galley-workbench-warning")?.textContent)
+      .toContain("ambiguous");
+    expect(fixture.visual.mountCalls).toHaveLength(0);
+  });
 });
 
 class FakeEditor implements HtmlEditorAdapter {
@@ -257,6 +302,63 @@ class FakeSession implements WorkbenchSession {
   forceConflict(): void { this.#conflict = true; this.#dirty = true; }
 }
 
+class SlowRevisionSession implements WorkbenchSession {
+  #body = "<article><p>initial</p></article>";
+  #dirty = false;
+  #saving = false;
+  #revision = 0;
+  #lastSavedAt: string | null = null;
+  #pendingSaves: Array<() => void> = [];
+  persistedBody = this.#body;
+  readonly saveCalls: Array<"auto" | "explicit" | "overwrite"> = [];
+
+  html(): string {
+    return HTML.replace(/<body>[\s\S]*<\/body>/u, `<body>${this.#body}</body>`);
+  }
+  bodyHtml(): string { return this.#body; }
+  updateBody(body: string): void {
+    if (body === this.#body) return;
+    this.#body = body;
+    this.#revision += 1;
+    this.#dirty = true;
+  }
+  state() {
+    return {
+      dirty: this.#dirty,
+      saving: this.#saving,
+      conflict: false,
+      htmlHash: "hash",
+      sourceChanged: true,
+      lastSavedAt: this.#lastSavedAt
+    };
+  }
+  async save(reason: "auto" | "explicit" | "overwrite"): Promise<void> {
+    if (this.#saving) {
+      throw Object.assign(new Error("save in progress"), {
+        code: "document_save_in_progress"
+      });
+    }
+    this.#saving = true;
+    this.saveCalls.push(reason);
+    const revision = this.#revision;
+    const body = this.#body;
+    await new Promise<void>((resolve) => this.#pendingSaves.push(resolve));
+    this.persistedBody = body;
+    if (this.#revision === revision) this.#dirty = false;
+    this.#saving = false;
+    this.#lastSavedAt = `2026-07-15T00:00:0${this.saveCalls.length}.000Z`;
+  }
+  releaseNextSave(): void {
+    const release = this.#pendingSaves.shift();
+    if (!release) throw new Error("No save is awaiting release.");
+    release();
+  }
+  async reload(): Promise<void> {}
+  async saveCopy(): Promise<{ html: string; sidecar: string }> {
+    return { html: "copy.galley.html", sidecar: "copy.galley.json" };
+  }
+}
+
 function makeFixture(options: {
   conflictOnAuto?: boolean;
   history?: HistorySnapshot[];
@@ -286,6 +388,34 @@ function makeFixture(options: {
     confirm: async () => true
   });
   return { view, session, document, visual, source, openDocument, openCopy };
+}
+
+function makeCustomFixture(session: WorkbenchSession) {
+  const document: WorkbenchDocument = {
+    session,
+    listHistory: vi.fn(async () => []),
+    recovery: { status: "ready", quarantinedTransactionId: null }
+  };
+  const visual = new FakeEditor();
+  const source = new FakeEditor();
+  const view = new GalleyWorkbenchView(new WorkspaceLeaf(), {
+    capabilities: {
+      canGenerate: true,
+      canEdit: true,
+      canImportSkill: true,
+      canPreview: true
+    },
+    openDocument: vi.fn(async () => document),
+    createVisualEditor: async () => visual,
+    createSourceEditor: () => source,
+    openCopy: vi.fn(async () => undefined),
+    confirm: vi.fn(async () => true)
+  });
+  return { view, visual, source, document };
+}
+
+async function settleMicrotasks(): Promise<void> {
+  for (let index = 0; index < 12; index += 1) await Promise.resolve();
 }
 
 function snapshot(index: number): HistorySnapshot {

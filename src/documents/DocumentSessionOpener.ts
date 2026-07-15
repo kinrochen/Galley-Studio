@@ -93,6 +93,19 @@ export class GalleyDocumentQuarantinedError extends Error {
   }
 }
 
+export class GalleyDocumentAmbiguousError extends Error {
+  readonly code = "galley_document_ambiguous";
+
+  constructor(
+    readonly paths: ArtifactPaths,
+    readonly recovery: Extract<DocumentRecoveryState, { status: "ambiguous" }>,
+    readonly operationError: unknown
+  ) {
+    super("Galley could not prove recovery for this document scope.");
+    this.name = "GalleyDocumentAmbiguousError";
+  }
+}
+
 export class GalleyHistorySnapshotNotFoundError extends Error {
   readonly code = "galley_history_snapshot_missing";
 
