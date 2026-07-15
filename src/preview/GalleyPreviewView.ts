@@ -4,12 +4,17 @@ import { isNormalizedVaultRelativePath } from "../documents/GalleySidecar";
 import { GalleyDocumentCodec } from "../documents/GalleyDocumentCodec";
 import type { EditorResourceResolver } from "../editor/EditorResourceResolver";
 import { createSafePreviewFrame } from "./SafeHtmlPreview";
+import {
+  ENGLISH_LOCALIZED_TEXT,
+  type LocalizedText
+} from "../i18n/LocalizedText";
 
 export const GALLEY_PREVIEW_VIEW_TYPE = "galley-preview";
 
 export interface GalleyPreviewViewServices {
   readonly openDocument: (path: string) => Promise<{ readonly html: string }>;
   readonly resourceResolver?: Pick<EditorResourceResolver, "rewriteForDisplay">;
+  readonly locale?: LocalizedText;
 }
 
 export class GalleyPreviewPathError extends Error {
@@ -23,12 +28,15 @@ export class GalleyPreviewPathError extends Error {
 
 export class GalleyPreviewView extends ItemView {
   #path: string | null = null;
+  readonly #text: LocalizedText;
+  #unsubscribeLocale: (() => void) | null = null;
 
   constructor(
     leaf: WorkspaceLeaf,
     private readonly services: GalleyPreviewViewServices
   ) {
     super(leaf);
+    this.#text = services.locale ?? ENGLISH_LOCALIZED_TEXT;
     this.navigation = true;
   }
 
@@ -37,7 +45,7 @@ export class GalleyPreviewView extends ItemView {
   }
 
   getDisplayText(): string {
-    return this.#path?.split("/").at(-1) ?? "Galley preview";
+    return this.#path?.split("/").at(-1) ?? this.#text.t("preview.title");
   }
 
   getState(): Record<string, unknown> {
@@ -64,7 +72,21 @@ export class GalleyPreviewView extends ItemView {
         bodyHtml: this.services.resourceResolver.rewriteForDisplay(parsed.bodyHtml)
       });
     }
-    createSafePreviewFrame(this.contentEl, html);
+    createSafePreviewFrame(
+      this.contentEl,
+      html,
+      this.#text.t("preview.frameTitle")
+    );
+    this.#unsubscribeLocale ??= this.#text.subscribe(() => {
+      const frame = this.contentEl.querySelector("iframe");
+      if (frame) frame.title = this.#text.t("preview.frameTitle");
+    });
+  }
+
+  async onClose(): Promise<void> {
+    this.#unsubscribeLocale?.();
+    this.#unsubscribeLocale = null;
+    this.contentEl.replaceChildren();
   }
 }
 

@@ -15,6 +15,41 @@ it("normalizes provider settings without an apiKey field", () => {
   expect(settings.secretId).toBe("");
   expect(DEFAULT_SETTINGS.contextWindow).toBe(128_000);
   expect(settings.exportConfigurations).toHaveLength(3);
+  expect(settings.language).toBe("auto");
+});
+
+it("migrates old settings to auto without changing existing normalized fields", () => {
+  const oldSettings = {
+    baseUrl: "https://api.example.com/v1/",
+    model: "existing-model",
+    secretId: "existing-secret",
+    temperature: 0.8,
+    timeoutMs: 45_000,
+    contextWindow: 64_000,
+    outputFolder: "Galley",
+    activeSkillVersion: "2026.7.15"
+  };
+
+  const migrated = normalizeSettings(oldSettings);
+  const { language, ...withoutLanguage } = migrated;
+  const { language: explicitLanguage, ...explicitWithoutLanguage } =
+    normalizeSettings({ ...oldSettings, language: "auto" });
+
+  expect(language).toBe("auto");
+  expect(explicitLanguage).toBe("auto");
+  expect(withoutLanguage).toEqual(explicitWithoutLanguage);
+});
+
+it.each(["auto", "zh-CN", "en"] as const)(
+  "preserves supported language %s",
+  (language) => {
+    expect(normalizeSettings({ language }).language).toBe(language);
+  }
+);
+
+it("normalizes unsupported languages to auto", () => {
+  expect(normalizeSettings({ language: "de" }).language).toBe("auto");
+  expect(normalizeSettings({ language: null }).language).toBe("auto");
 });
 
 it("normalizes reusable export configurations and drops unsafe persisted entries", () => {

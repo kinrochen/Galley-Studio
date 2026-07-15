@@ -1,21 +1,29 @@
 import type { WorkbenchMode, WorkbenchState } from "./WorkbenchState";
+import {
+  ENGLISH_LOCALIZED_TEXT,
+  type LocalizedText
+} from "../i18n/LocalizedText";
 
 export interface WorkbenchToolbarActions {
   readonly onMode: (mode: WorkbenchMode) => void | Promise<void>;
   readonly onSave: () => void | Promise<void>;
 }
 
-export function saveStatus(state: WorkbenchState): string {
-  if (state.conflict) return "Conflict";
-  if (state.saving) return "Saving…";
-  if (state.dirty) return "Unsaved";
-  return "Saved";
+export function saveStatus(
+  state: WorkbenchState,
+  text: LocalizedText = ENGLISH_LOCALIZED_TEXT
+): string {
+  if (state.conflict) return text.t("workbench.status.conflict");
+  if (state.saving) return text.t("workbench.status.saving");
+  if (state.dirty) return text.t("workbench.status.unsaved");
+  return text.t("workbench.status.saved");
 }
 
 export function renderWorkbenchToolbar(
   host: HTMLElement,
   state: WorkbenchState,
-  actions: WorkbenchToolbarActions
+  actions: WorkbenchToolbarActions,
+  text: LocalizedText = ENGLISH_LOCALIZED_TEXT
 ): void {
   const document = host.ownerDocument;
   const fragment = document.createDocumentFragment();
@@ -30,7 +38,7 @@ export function renderWorkbenchToolbar(
     const button = document.createElement("button");
     button.type = "button";
     button.dataset.mode = mode;
-    button.textContent = mode[0]?.toUpperCase() + mode.slice(1);
+    button.textContent = text.t(`workbench.mode.${mode}` as const);
     button.classList.toggle("is-active", state.mode === mode);
     button.setAttribute("aria-pressed", String(state.mode === mode));
     button.addEventListener("click", () => void actions.onMode(mode));
@@ -40,21 +48,22 @@ export function renderWorkbenchToolbar(
 
   const status = document.createElement("span");
   status.dataset.saveStatus = "";
-  status.className = `galley-save-status is-${saveStatus(state).toLowerCase().replace("…", "")}`;
-  status.textContent = saveStatus(state);
+  const statusCode = state.conflict ? "conflict" : state.saving ? "saving" : state.dirty ? "unsaved" : "saved";
+  status.className = `galley-save-status is-${statusCode}`;
+  status.textContent = saveStatus(state, text);
   fragment.append(status);
 
   if (state.sourceChanged) {
     const source = document.createElement("span");
     source.className = "galley-source-changed";
-    source.textContent = "Source changed";
+    source.textContent = text.t("workbench.sourceChanged");
     fragment.append(source);
   }
 
   const save = document.createElement("button");
   save.type = "button";
   save.dataset.action = "save";
-  save.textContent = "Save";
+  save.textContent = text.t("workbench.save");
   save.disabled =
     state.saving ||
     state.conflict ||

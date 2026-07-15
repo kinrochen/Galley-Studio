@@ -12,8 +12,8 @@ for (const forbidden of [
   const staticImport = new RegExp(`from\\s+["'][^"']*${forbidden}[^"']*["']`, "u");
   if (staticImport.test(main)) failures.push(`main.ts statically imports ${forbidden}`);
 }
-if (!main.includes('import("./platform/DesktopThemeRuntime")')) {
-  failures.push("desktop Theme runtime is not dynamically isolated");
+if (!main.includes('import("./platform/DesktopConsoleRuntime")')) {
+  failures.push("desktop console runtime is not dynamically isolated");
 }
 if (!/canGenerate:\s*!isMobile/u.test(capabilities) || !/canImportSkill:\s*!isMobile/u.test(capabilities)) {
   failures.push("mobile capability gates for generation/import are missing");
@@ -31,7 +31,10 @@ for (const command of [
   "skill-import-zip",
   "skill-activate-imported"
 ]) {
-  const position = main.indexOf(`id: "${command}"`);
+  const position = Math.max(
+    main.indexOf(`id: "${command}"`),
+    main.indexOf(`"${command}"`)
+  );
   if (position < desktopGuard) failures.push(`${command} is outside the desktop registration guard`);
 }
 if (failures.length > 0) throw new Error(`Mobile/static audit failed:\n${failures.join("\n")}`);

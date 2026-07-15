@@ -9,6 +9,11 @@ import type {
   ThemeGenerationInput
 } from "./ThemeGenerationService";
 import { ThemePreview } from "./ThemePreview";
+import {
+  ENGLISH_LOCALIZED_TEXT,
+  type LocalizedText
+} from "../i18n/LocalizedText";
+import type { MessageKey } from "../i18n/Resources";
 
 export const GALLEY_THEME_LAB_VIEW_TYPE = "galley-theme-lab";
 
@@ -20,6 +25,7 @@ export interface ThemeLabViewServices {
   ): Promise<ThemeDraft>;
   save(draft: ThemeDraft): Promise<void>;
   report(message: string): void;
+  readonly locale?: LocalizedText;
 }
 
 export class ThemeLabView extends ItemView {
@@ -27,12 +33,15 @@ export class ThemeLabView extends ItemView {
   #controller: AbortController | null = null;
   #draft: ThemeDraft | null = null;
   #closed = false;
+  readonly #text: LocalizedText;
+  #unsubscribeLocale: (() => void) | null = null;
 
   constructor(
     leaf: WorkspaceLeaf,
     private readonly services: ThemeLabViewServices
   ) {
     super(leaf);
+    this.#text = services.locale ?? ENGLISH_LOCALIZED_TEXT;
   }
 
   getViewType(): string {
@@ -40,7 +49,7 @@ export class ThemeLabView extends ItemView {
   }
 
   getDisplayText(): string {
-    return "Galley Theme Lab";
+    return this.#text.t("themeLab.title");
   }
 
   async onOpen(): Promise<void> {
@@ -49,26 +58,26 @@ export class ThemeLabView extends ItemView {
     this.contentEl.classList.add("galley-theme-lab");
 
     const title = document.createElement("h2");
-    title.textContent = "AI Theme Lab";
+    title.textContent = this.#text.t("themeLab.title");
     const description = document.createElement("textarea");
     description.className = "galley-theme-lab__description";
-    description.placeholder = "Describe the visual style, mood, colors, and intended articles.";
-    description.setAttribute("aria-label", "Theme description");
+    description.placeholder = this.#text.t("themeLab.description.placeholder");
+    description.setAttribute("aria-label", this.#text.t("themeLab.description.aria"));
 
     let imageInput: HTMLInputElement | null = null;
     if (await this.services.supportsVision()) {
       imageInput = document.createElement("input");
       imageInput.type = "file";
       imageInput.accept = "image/png,image/jpeg,image/webp";
-      imageInput.setAttribute("aria-label", "Optional reference image");
+      imageInput.setAttribute("aria-label", this.#text.t("themeLab.image.aria"));
     }
 
     const actions = document.createElement("div");
     actions.className = "galley-theme-lab__actions";
     const generateButton = document.createElement("button");
-    generateButton.textContent = "Generate draft";
+    generateButton.textContent = this.#text.t("themeLab.generate");
     const saveButton = document.createElement("button");
-    saveButton.textContent = "Save theme";
+    saveButton.textContent = this.#text.t("themeLab.save");
     saveButton.disabled = true;
     actions.append(generateButton, saveButton);
 
@@ -84,6 +93,35 @@ export class ThemeLabView extends ItemView {
     if (imageInput) this.contentEl.append(imageInput);
     this.contentEl.append(actions, status, issues, previewHost);
 
+    let statusKey: MessageKey | null = null;
+    const renderIssues = (draft: ThemeDraft | null): void => {
+      issues.replaceChildren();
+      for (const issue of draft?.validation.issues ?? []) {
+        const item = document.createElement("li");
+        item.textContent = localizedThemeIssue(issue.code, this.#text);
+        item.dataset.severity = issue.severity;
+        issues.append(item);
+      }
+    };
+    const setStatus = (key: MessageKey): void => {
+      statusKey = key;
+      status.textContent = this.#text.t(key);
+    };
+    const updateChrome = (): void => {
+      title.textContent = this.#text.t("themeLab.title");
+      description.placeholder = this.#text.t("themeLab.description.placeholder");
+      description.setAttribute("aria-label", this.#text.t("themeLab.description.aria"));
+      imageInput?.setAttribute("aria-label", this.#text.t("themeLab.image.aria"));
+      generateButton.textContent = this.#text.t("themeLab.generate");
+      saveButton.textContent = this.#text.t("themeLab.save");
+      if (statusKey) status.textContent = this.#text.t(statusKey);
+      renderIssues(this.#draft);
+      const frame = previewHost.querySelector("iframe");
+      if (frame) frame.title = this.#text.t("themeLab.preview.title");
+    };
+    this.#unsubscribeLocale?.();
+    this.#unsubscribeLocale = this.#text.subscribe(updateChrome);
+
     generateButton.addEventListener("click", () => {
       this.#controller?.abort();
       const controller = new AbortController();
@@ -91,7 +129,7 @@ export class ThemeLabView extends ItemView {
       this.#draft = null;
       saveButton.disabled = true;
       issues.replaceChildren();
-      status.textContent = "Generating theme draft…";
+      setStatus("themeLab.status.generating");
       generateButton.disabled = true;
       void (async () => {
         try {
@@ -105,20 +143,22 @@ export class ThemeLabView extends ItemView {
           const draft = await this.services.generate(input, controller.signal);
           if (this.#closed || controller.signal.aborted || this.#controller !== controller) return;
           this.#draft = draft;
-          this.#preview.render(previewHost, draft.previewHtml);
-          for (const issue of draft.validation.issues) {
-            const item = document.createElement("li");
-            item.textContent = issue.message;
-            item.dataset.severity = issue.severity;
-            issues.append(item);
-          }
+          this.#preview.render(
+            previewHost,
+            draft.previewHtml,
+            this.#text.t("themeLab.preview.title")
+          );
+          renderIssues(draft);
           saveButton.disabled = !draft.validation.valid;
-          status.textContent = draft.validation.valid
-            ? "Draft is valid. Review the full page, then save explicitly."
-            : "Draft has validation errors and cannot be saved.";
+          setStatus(
+            draft.validation.valid
+              ? "themeLab.status.valid"
+              : "themeLab.status.invalid"
+          );
         } catch (error) {
           if (!controller.signal.aborted && !this.#closed) {
-            status.textContent = safeMessage(error);
+            statusKey = null;
+            status.textContent = safeMessage(error, this.#text);
           }
         } finally {
           if (!this.#closed && this.#controller === controller) {
@@ -135,12 +175,15 @@ export class ThemeLabView extends ItemView {
       void this.services.save(draft).then(
         () => {
           if (this.#closed) return;
-          status.textContent = "Theme saved and available to new Skill sessions.";
-          this.services.report(`Saved custom theme: ${draft.manifest.name}`);
+          setStatus("themeLab.status.saved");
+          this.services.report(
+            this.#text.t("themeLab.notice.saved", { name: draft.manifest.name })
+          );
         },
         (error: unknown) => {
           if (this.#closed) return;
-          status.textContent = safeMessage(error);
+          statusKey = null;
+          status.textContent = safeMessage(error, this.#text);
           saveButton.disabled = false;
         }
       );
@@ -151,6 +194,8 @@ export class ThemeLabView extends ItemView {
     this.#closed = true;
     this.#controller?.abort();
     this.#controller = null;
+    this.#unsubscribeLocale?.();
+    this.#unsubscribeLocale = null;
     this.#draft = null;
     this.contentEl.replaceChildren();
   }
@@ -162,7 +207,7 @@ async function selectedImage(
   const file = input.files?.[0];
   if (!file) return undefined;
   if (file.size > MAX_REFERENCE_IMAGE_BYTES) {
-    throw new Error("A theme reference image must be no larger than 10 MiB.");
+    throw new Error("reference_image_too_large");
   }
   return {
     selected: true,
@@ -172,12 +217,40 @@ async function selectedImage(
   };
 }
 
-function safeMessage(error: unknown): string {
+function safeMessage(error: unknown, text: LocalizedText): string {
   if (
     error instanceof DOMException &&
     error.name === "AbortError"
-  ) return "Theme generation cancelled.";
-  return error instanceof Error
-    ? error.message.slice(0, 240)
-    : "Theme operation failed.";
+  ) return text.t("themeLab.status.cancelled");
+  if (error instanceof Error && error.message === "reference_image_too_large") {
+    return text.t("themeLab.image.tooLarge");
+  }
+  return text.t("themeLab.status.operationFailed");
+}
+
+function localizedThemeIssue(code: string, text: LocalizedText): string {
+  const keys: Readonly<Record<string, MessageKey>> = {
+    component_design_variables: "themeLab.issue.designVariables",
+    component_html: "themeLab.issue.componentHtml",
+    component_template: "themeLab.issue.template",
+    component_recipes: "themeLab.issue.recipes",
+    component_mapping: "themeLab.issue.mapping",
+    component_oversize: "themeLab.issue.oversize",
+    component_html_missing: "themeLab.issue.htmlMissing",
+    component_attribute: "themeLab.issue.forbiddenAttribute",
+    component_white_space_pre: "themeLab.issue.whiteSpace",
+    component_dashed_border: "themeLab.issue.dashedBorder",
+    component_leaf: "themeLab.issue.leaf",
+    preview_document: "themeLab.issue.previewDocument",
+    preview_script: "themeLab.issue.previewScript",
+    preview_event_handler: "themeLab.issue.previewEvent",
+    preview_block_count: "themeLab.issue.previewCount",
+    preview_block_sequence: "themeLab.issue.previewSequence"
+  };
+  const key = keys[code] ?? (
+    code.startsWith("component_")
+      ? "themeLab.issue.forbiddenElement"
+      : "themeLab.issue.invalid"
+  );
+  return text.t(key);
 }

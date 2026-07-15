@@ -12,12 +12,33 @@ import {
   type WorkbenchSession
 } from "../../src/workbench/GalleyWorkbenchView";
 import type { HistorySnapshot } from "../../src/documents/HistoryRepository";
+import { LocaleStore } from "../../src/i18n/LocaleStore";
+import type { LocalizedText } from "../../src/i18n/LocalizedText";
 
 const HTML = "<!DOCTYPE html><html lang=\"en\"><head><title>x</title></head><body><article><h1 data-galley-source=\"h-1\">Title</h1><p>one</p></article></body></html>";
 
 afterEach(() => vi.useRealTimers());
 
 describe("GalleyWorkbenchView", () => {
+  it("switches chrome language without remounting the editor or changing HTML", async () => {
+    const locale = new LocaleStore({ language: "en", obsidianLocale: () => "en" });
+    const fixture = makeFixture({ locale });
+    await fixture.view.openPath("notes/a.galley.html");
+    fixture.visual.emit("<article><p>unsaved localized edit</p></article>");
+    const before = fixture.visual.getHtml();
+
+    locale.configure("zh-CN");
+
+    expect(
+      [...fixture.view.contentEl.querySelectorAll("button")].some(
+        (button) => button.textContent === "保存"
+      )
+    ).toBe(true);
+    expect(fixture.visual.mountCalls).toHaveLength(1);
+    expect(fixture.visual.getHtml()).toBe(before);
+    expect(fixture.session.bodyHtml()).toContain("unsaved localized edit");
+  });
+
   it("opens a strict Galley pair into the approved four-region desktop shell", async () => {
     const fixture = makeFixture();
     await fixture.view.openPath("notes/a.galley.html");
@@ -363,6 +384,7 @@ function makeFixture(options: {
   conflictOnAuto?: boolean;
   history?: HistorySnapshot[];
   canEdit?: boolean;
+  locale?: LocalizedText;
 } = {}) {
   const session = new FakeSession(options.conflictOnAuto);
   const document: WorkbenchDocument = {
@@ -386,6 +408,7 @@ function makeFixture(options: {
     createSourceEditor: () => source,
     openCopy,
     confirm: async () => true
+    ,...(options.locale ? { locale: options.locale } : {})
   });
   return { view, session, document, visual, source, openDocument, openCopy };
 }

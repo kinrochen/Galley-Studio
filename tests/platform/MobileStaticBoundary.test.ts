@@ -10,7 +10,7 @@ describe("mobile static startup boundary", () => {
     expect(main).not.toMatch(/from\s+["'][^"']*HugeRteAdapter["']/u);
     expect(main).not.toMatch(/from\s+["']\.\/platform\/DesktopGenerationRuntime["']/u);
     expect(main).not.toMatch(/from\s+["'][^"']*(?:OpenAiCompatibleClient|SkillSession|WechatRepairService)["']/u);
-    expect(main).toContain('import(\n          "./platform/DesktopGenerationRuntime"');
+    expect(main).toContain('import("./platform/DesktopConsoleRuntime")');
     expect(editorFactory).not.toMatch(/from\s+["']\.\/HugeRteAdapter["']/u);
     expect(editorFactory).toContain('import("./HugeRteAdapter")');
   });

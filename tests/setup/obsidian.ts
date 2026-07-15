@@ -70,6 +70,11 @@ export class Plugin {
   readonly settingTabs: unknown[] = [];
   readonly views = new Map<string, (leaf: WorkspaceLeaf) => ItemView>();
   readonly eventRefs: unknown[] = [];
+  readonly ribbonIcons: Array<{
+    icon: string;
+    title: string;
+    callback: (event: MouseEvent) => unknown;
+  }> = [];
 
   constructor(app: unknown, manifest: unknown) {
     this.app = app;
@@ -82,6 +87,15 @@ export class Plugin {
 
   addSettingTab(settingTab: unknown): void {
     this.settingTabs.push(settingTab);
+  }
+
+  addRibbonIcon(
+    icon: string,
+    title: string,
+    callback: (event: MouseEvent) => unknown
+  ): HTMLElement {
+    this.ribbonIcons.push({ icon, title, callback });
+    return document.createElement("div");
   }
 
   registerView(type: string, creator: (leaf: WorkspaceLeaf) => ItemView): void {

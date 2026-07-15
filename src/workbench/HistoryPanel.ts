@@ -1,4 +1,5 @@
 import type { HistorySnapshot } from "../documents/HistoryRepository";
+import { ENGLISH_LOCALIZED_TEXT, type LocalizedText } from "../i18n/LocalizedText";
 
 export function newestHistory(
   snapshots: readonly HistorySnapshot[],
@@ -15,13 +16,14 @@ export function newestHistory(
 export function renderHistoryPanel(
   host: HTMLElement,
   snapshots: readonly HistorySnapshot[],
-  onRestore: (snapshot: HistorySnapshot) => void | Promise<void>
+  onRestore: (snapshot: HistorySnapshot) => void | Promise<void>,
+  text: LocalizedText = ENGLISH_LOCALIZED_TEXT
 ): void {
   const document = host.ownerDocument;
   const section = document.createElement("section");
   section.className = "galley-history-panel";
   const heading = document.createElement("h3");
-  heading.textContent = "History";
+  heading.textContent = text.t("workbench.history.title");
   section.append(heading);
   const list = document.createElement("ol");
   list.className = "galley-history-list";
@@ -38,7 +40,7 @@ export function renderHistoryPanel(
   if (list.childElementCount === 0) {
     const empty = document.createElement("p");
     empty.className = "galley-history-empty";
-    empty.textContent = "No saved versions yet.";
+    empty.textContent = text.t("workbench.history.empty");
     section.append(empty);
   } else {
     section.append(list);

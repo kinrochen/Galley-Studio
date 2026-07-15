@@ -7,10 +7,28 @@ import {
   openGalleyPreview
 } from "../../src/preview/GalleyPreviewView";
 import { EditorResourceResolver } from "../../src/editor/EditorResourceResolver";
+import { LocaleStore } from "../../src/i18n/LocaleStore";
 
 const HTML = '<!DOCTYPE html><html lang="zh-CN"><head><title>x</title></head><body><article><p>safe preview</p><script>alert(1)</script></article></body></html>';
 
 describe("GalleyPreviewView", () => {
+  it("updates localized preview chrome without replacing or changing preview HTML", async () => {
+    const locale = new LocaleStore({ language: "en", obsidianLocale: () => "en" });
+    const view = new GalleyPreviewView(new WorkspaceLeaf(), {
+      openDocument: async () => ({ html: HTML }),
+      locale
+    });
+    await view.openPath("notes/a.galley.html");
+    const frame = view.contentEl.querySelector("iframe")!;
+    const srcdoc = frame.srcdoc;
+
+    locale.configure("zh-CN");
+
+    expect(view.contentEl.querySelector("iframe")).toBe(frame);
+    expect(frame.srcdoc).toBe(srcdoc);
+    expect(frame.title).toBe("Galley 文章预览");
+  });
+
   it("opens only canonical Galley files in an empty-sandbox, no-referrer iframe", async () => {
     const openDocument = vi.fn(async () => ({ html: HTML }));
     const view = new GalleyPreviewView(new WorkspaceLeaf(), { openDocument });

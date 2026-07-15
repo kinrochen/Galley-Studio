@@ -34,11 +34,12 @@ export function safePreviewHtml(html: string): string {
 
 export function createSafePreviewFrame(
   host: HTMLElement,
-  html: string
+  html: string,
+  title = "Galley article preview"
 ): HTMLIFrameElement {
   const frame = host.ownerDocument.createElement("iframe");
   frame.className = "galley-safe-preview";
-  frame.title = "Galley article preview";
+  frame.title = title;
   frame.setAttribute("sandbox", "");
   frame.setAttribute("referrerpolicy", "no-referrer");
   frame.srcdoc = safePreviewHtml(html);

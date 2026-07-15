@@ -24,12 +24,13 @@ export function extractDocumentOutline(bodyHtml: string): DocumentOutlineEntry[]
 export function renderDocumentOutline(
   host: HTMLElement,
   entries: readonly DocumentOutlineEntry[],
-  onSelect: (sourceId: string) => void
+  onSelect: (sourceId: string) => void,
+  text: LocalizedText = ENGLISH_LOCALIZED_TEXT
 ): void {
   const document = host.ownerDocument;
   const fragment = document.createDocumentFragment();
   const heading = document.createElement("h3");
-  heading.textContent = "Outline";
+  heading.textContent = text.t("workbench.outline.title");
   fragment.append(heading);
   const list = document.createElement("ol");
   list.className = "galley-outline-list";
@@ -47,3 +48,4 @@ export function renderDocumentOutline(
   fragment.append(list);
   host.replaceChildren(fragment);
 }
+import { ENGLISH_LOCALIZED_TEXT, type LocalizedText } from "../i18n/LocalizedText";

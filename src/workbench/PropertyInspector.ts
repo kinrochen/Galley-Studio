@@ -75,19 +75,20 @@ export function renderPropertyInspector(
   host: HTMLElement,
   selected: HTMLElement | null,
   availableRoles: readonly string[],
-  onChange: (command: ElementPropertyCommand) => void | Promise<void>
+  onChange: (command: ElementPropertyCommand) => void | Promise<void>,
+  text: LocalizedText = ENGLISH_LOCALIZED_TEXT
 ): void {
   const document = host.ownerDocument;
   const fragment = document.createDocumentFragment();
   const heading = document.createElement("h3");
-  heading.textContent = "Properties";
+  heading.textContent = text.t("workbench.properties.title");
   fragment.append(heading);
 
   const roleLabel = document.createElement("label");
-  roleLabel.textContent = "Component role";
+  roleLabel.textContent = text.t("workbench.properties.componentRole");
   const role = document.createElement("select");
   role.dataset.control = "role";
-  role.append(option(document, "Paragraph", ""));
+  role.append(option(document, text.t("workbench.properties.paragraph"), ""));
   for (const value of availableRoles) role.append(option(document, value, value));
   role.value = selected?.dataset.galleyRole ?? "";
   role.disabled = availableRoles.length === 0;
@@ -97,8 +98,13 @@ export function renderPropertyInspector(
 
   const alignment = document.createElement("select");
   alignment.dataset.control = "alignment";
-  for (const value of ["left", "center", "right", "justify"] as const) {
-    alignment.append(option(document, value, value));
+  for (const [value, key] of [
+    ["left", "workbench.properties.alignment.left"],
+    ["center", "workbench.properties.alignment.center"],
+    ["right", "workbench.properties.alignment.right"],
+    ["justify", "workbench.properties.alignment.justify"]
+  ] as const) {
+    alignment.append(option(document, text.t(key), value));
   }
   alignment.disabled = selected === null;
   alignment.addEventListener("change", () =>
@@ -115,7 +121,7 @@ export function renderPropertyInspector(
   spacing.max = "128";
   spacing.step = "1";
   spacing.dataset.control = "spacing";
-  spacing.title = "Paragraph spacing";
+  spacing.title = text.t("workbench.properties.spacing");
   spacing.disabled = selected === null;
   spacing.addEventListener("change", () =>
     void onChange({ type: "spacing", value: Number(spacing.value) })
@@ -123,8 +129,8 @@ export function renderPropertyInspector(
   fragment.append(spacing);
 
   for (const [type, label] of [
-    ["text-color", "Text color"],
-    ["background-color", "Background color"]
+    ["text-color", text.t("workbench.properties.textColor")],
+    ["background-color", text.t("workbench.properties.backgroundColor")]
   ] as const) {
     const input = document.createElement("input");
     input.type = "color";
@@ -138,7 +144,12 @@ export function renderPropertyInspector(
 
   const image = selected ? descendant(selected, "img") : null;
   if (image) {
-    const alt = textControl(document, "image-alt", image.getAttribute("alt") ?? "");
+    const alt = textControl(
+      document,
+      "image-alt",
+      image.getAttribute("alt") ?? "",
+      text.t("workbench.properties.imageAlt")
+    );
     alt.addEventListener("change", () =>
       void onChange({ type: "image-alt", value: alt.value })
     );
@@ -147,7 +158,8 @@ export function renderPropertyInspector(
     const caption = textControl(
       document,
       "image-caption",
-      figure?.querySelector(":scope > figcaption")?.textContent ?? ""
+      figure?.querySelector(":scope > figcaption")?.textContent ?? "",
+      text.t("workbench.properties.imageCaption")
     );
     caption.disabled = figure === null;
     caption.addEventListener("change", () =>
@@ -157,7 +169,13 @@ export function renderPropertyInspector(
     const imageAlignment = document.createElement("select");
     imageAlignment.dataset.control = "image-alignment";
     for (const value of ["left", "center", "right"] as const) {
-      imageAlignment.append(option(document, value, value));
+      imageAlignment.append(
+        option(
+          document,
+          text.t(`workbench.properties.alignment.${value}`),
+          value
+        )
+      );
     }
     imageAlignment.addEventListener("change", () =>
       void onChange({
@@ -170,12 +188,22 @@ export function renderPropertyInspector(
 
   const link = selected ? descendant(selected, "a") : null;
   if (link) {
-    const url = textControl(document, "link-url", link.getAttribute("href") ?? "");
+    const url = textControl(
+      document,
+      "link-url",
+      link.getAttribute("href") ?? "",
+      text.t("workbench.properties.linkUrl")
+    );
     url.addEventListener("change", () =>
       void onChange({ type: "link-url", value: url.value })
     );
     fragment.append(url);
-    const title = textControl(document, "link-title", link.getAttribute("title") ?? "");
+    const title = textControl(
+      document,
+      "link-title",
+      link.getAttribute("title") ?? "",
+      text.t("workbench.properties.linkTitle")
+    );
     title.addEventListener("change", () =>
       void onChange({ type: "link-title", value: title.value })
     );
@@ -193,7 +221,16 @@ export function renderPropertyInspector(
       const button = document.createElement("button");
       button.type = "button";
       button.dataset.control = `table-${dimension}-${operation}`;
-      button.textContent = `${operation === "add" ? "Add" : "Remove"} ${dimension}`;
+      button.textContent = text.t("workbench.properties.tableAction", {
+        action: text.t(
+          operation === "add" ? "common.action.add" : "common.action.remove"
+        ),
+        dimension: text.t(
+          dimension === "row"
+            ? "workbench.properties.row"
+            : "workbench.properties.column"
+        )
+      });
       button.addEventListener("click", () =>
         void onChange({
           type: dimension === "row" ? "table-row" : "table-column",
@@ -216,12 +253,15 @@ function option(document: Document, label: string, value: string): HTMLOptionEle
 function textControl(
   document: Document,
   control: string,
-  value: string
+  value: string,
+  label: string
 ): HTMLInputElement {
   const input = document.createElement("input");
   input.type = "text";
   input.dataset.control = control;
   input.value = value;
+  input.title = label;
+  input.setAttribute("aria-label", label);
   return input;
 }
 
@@ -295,3 +335,4 @@ function mutateTable(
   }
   for (const row of [...table.rows]) row.insertCell();
 }
+import { ENGLISH_LOCALIZED_TEXT, type LocalizedText } from "../i18n/LocalizedText";

@@ -7,6 +7,7 @@ import {
 } from "../../src/theme-lab/ThemeLabView";
 import type { ThemeDraft } from "../../src/theme-lab/ThemeGenerationService";
 import { customThemeManifest, validComponentLibrary, validThemePreview } from "../support/phase5Fixtures";
+import { LocaleStore } from "../../src/i18n/LocaleStore";
 
 function draft(valid: boolean): ThemeDraft {
   return {
@@ -30,6 +31,33 @@ function draft(valid: boolean): ThemeDraft {
 }
 
 describe("ThemeLabView", () => {
+  it("preserves description, draft, issues, and preview when language changes", async () => {
+    const locale = new LocaleStore({ language: "en", obsidianLocale: () => "en" });
+    const view = new ThemeLabView(new WorkspaceLeaf(), {
+      supportsVision: async () => false,
+      generate: async () => draft(true),
+      save: vi.fn(),
+      report: vi.fn(),
+      locale
+    });
+    await view.onOpen();
+    const description = view.contentEl.querySelector<HTMLTextAreaElement>("textarea")!;
+    description.value = "Warm editorial paper";
+    [...view.contentEl.querySelectorAll("button")].find(
+      (button) => button.textContent === "Generate draft"
+    )!.click();
+    await vi.waitFor(() => expect(view.contentEl.querySelector("iframe")).not.toBeNull());
+    const frame = view.contentEl.querySelector("iframe");
+    const srcdoc = frame?.getAttribute("srcdoc");
+
+    locale.configure("zh-CN");
+
+    expect(description.value).toBe("Warm editorial paper");
+    expect(view.contentEl.querySelector("iframe")).toBe(frame);
+    expect(frame?.getAttribute("srcdoc")).toBe(srcdoc);
+    expect(view.contentEl.textContent).toContain("保存主题");
+  });
+
   it("shows a scriptless full-page draft and saves only on explicit click", async () => {
     const generated = draft(true);
     const save = vi.fn().mockResolvedValue(undefined);
@@ -74,7 +102,11 @@ describe("ThemeLabView", () => {
     [...view.contentEl.querySelectorAll("button")].find(
       (button) => button.textContent === "Generate draft"
     )!.click();
-    await vi.waitFor(() => expect(view.contentEl.textContent).toContain("Unsafe component."));
+    await vi.waitFor(() =>
+      expect(view.contentEl.textContent).toContain(
+        "The theme draft contains a validation issue."
+      )
+    );
     const saveButton = [...view.contentEl.querySelectorAll("button")].find(
       (button) => button.textContent === "Save theme"
     );

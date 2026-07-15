@@ -15,6 +15,10 @@ import type { HtmlEditorAdapter } from "../editor/HtmlEditorAdapter";
 import { ThemeComponentCatalog } from "../editor/ThemeComponentCatalog";
 import { transformSelectedBlock } from "../editor/ComponentTransformer";
 import type { PlatformCapabilities } from "../platform/PlatformCapabilities";
+import {
+  ENGLISH_LOCALIZED_TEXT,
+  type LocalizedText
+} from "../i18n/LocalizedText";
 import { createSafePreviewFrame } from "../preview/SafeHtmlPreview";
 import type { ExportConfiguration } from "../export/ExportConfiguration";
 import type { GalleyExportRecordV1 } from "../export/ExportRecord";
@@ -103,6 +107,7 @@ export interface GalleyWorkbenchViewServices {
     configuration: ExportConfiguration
   ) => Promise<readonly ExportConfiguration[]>;
   readonly reportExportOutcome?: (message: string) => void;
+  readonly locale?: LocalizedText;
 }
 
 export class GalleyPathInvalidError extends Error {
@@ -141,6 +146,8 @@ export class GalleyWorkbenchView extends ItemView {
   #exportTasks = new Set<Promise<void>>();
   #exportConfigurations: readonly ExportConfiguration[];
   #exportState: ExportPanelState;
+  readonly #text: LocalizedText;
+  #unsubscribeLocale: (() => void) | null = null;
   #toolbar!: HTMLElement;
   #leftRail!: HTMLElement;
   #outlineHost!: HTMLElement;
@@ -153,13 +160,14 @@ export class GalleyWorkbenchView extends ItemView {
   constructor(leaf: WorkspaceLeaf, services: GalleyWorkbenchViewServices) {
     super(leaf);
     this.#services = services;
+    this.#text = services.locale ?? ENGLISH_LOCALIZED_TEXT;
     this.#exportConfigurations = Object.freeze([
       ...(services.exportConfigurations ?? [])
     ]);
     this.#exportState = {
       selectedId: this.#exportConfigurations[0]?.id ?? "",
       status: "idle",
-      message: "Ready"
+      message: this.#text.t("common.status.idle")
     };
     this.navigation = true;
   }
@@ -170,7 +178,7 @@ export class GalleyWorkbenchView extends ItemView {
 
   getDisplayText(): string {
     const path = this.#state.documentPath;
-    return path ? path.split("/").at(-1) ?? "Galley" : "Galley workbench";
+    return path ? path.split("/").at(-1) ?? "Galley" : this.#text.t("workbench.title");
   }
 
   getState(): Record<string, unknown> {
@@ -191,11 +199,14 @@ export class GalleyWorkbenchView extends ItemView {
   async onOpen(): Promise<void> {
     this.#closed = false;
     this.#ensureShell();
+    this.#subscribeLocale();
   }
 
   async onClose(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
+    this.#unsubscribeLocale?.();
+    this.#unsubscribeLocale = null;
     this.#exportController?.abort();
     this.#exportController = null;
     this.#mountGeneration += 1;
@@ -221,6 +232,7 @@ export class GalleyWorkbenchView extends ItemView {
 
   async openPath(path: string): Promise<void> {
     assertGalleyHtmlPath(path);
+    this.#subscribeLocale();
     this.#exportController?.abort();
     this.#exportController = null;
     this.#mountGeneration += 1;
@@ -246,7 +258,7 @@ export class GalleyWorkbenchView extends ItemView {
       if (errorCode(error) === "galley_document_ambiguous") {
         this.#state = reduceWorkbenchState(this.#state, {
           type: "recovery-ambiguous",
-          message: "The last transaction outcome is ambiguous. No partial document was opened."
+          message: this.#text.t("workbench.error.openAmbiguous")
         });
         this.#render();
       } else if (
@@ -255,7 +267,7 @@ export class GalleyWorkbenchView extends ItemView {
       ) {
         this.#state = reduceWorkbenchState(this.#state, {
           type: "recovery-quarantined",
-          message: "Recovery is quarantined for this document. No file was changed."
+          message: this.#text.t("workbench.error.openQuarantined")
         });
         this.#render();
       }
@@ -278,12 +290,12 @@ export class GalleyWorkbenchView extends ItemView {
     if (opened.recovery.status === "quarantined") {
       this.#state = reduceWorkbenchState(this.#state, {
         type: "recovery-quarantined",
-        message: "Recovery is quarantined for this document. No file was changed."
+        message: this.#text.t("workbench.error.openQuarantined")
       });
     } else if (opened.recovery.status === "ambiguous") {
       this.#state = reduceWorkbenchState(this.#state, {
         type: "recovery-ambiguous",
-        message: "The last transaction outcome is ambiguous. Saving is paused until recovery completes."
+        message: this.#text.t("workbench.error.recoveryAmbiguous")
       });
     }
     this.#autosave = new AutosaveController(800, () => this.#save("auto"));
@@ -352,7 +364,11 @@ export class GalleyWorkbenchView extends ItemView {
       this.#exportState = {
         selectedId: configuration.id,
         status: copy ? "copying" : "exporting",
-        message: copy ? "Copying…" : "Exporting…"
+        message: this.#text.t(
+          copy
+            ? "workbench.export.status.copying"
+            : "workbench.export.status.exporting"
+        )
       };
       this.#render();
       const result = await exportDocument(
@@ -366,7 +382,7 @@ export class GalleyWorkbenchView extends ItemView {
       durablePath = result.path;
       if (!isCurrent()) {
         this.#services.reportExportOutcome?.(
-          `Exported ${result.path} for the previous document`
+          this.#text.t("workbench.export.status.previous", { path: result.path })
         );
         return;
       }
@@ -379,7 +395,12 @@ export class GalleyWorkbenchView extends ItemView {
       this.#exportState = {
         selectedId: configuration.id,
         status: copy ? "copied" : "success",
-        message: copy ? `Copied: ${result.path}` : `Exported: ${result.path}`
+        message: this.#text.t(
+          copy
+            ? "workbench.export.status.copied"
+            : "workbench.export.status.exported",
+          { path: result.path }
+        )
       };
       this.#render();
     } catch (error) {
@@ -415,8 +436,8 @@ export class GalleyWorkbenchView extends ItemView {
     }
     const accepted = await this.#services.confirm(
       decision === "reload"
-        ? "Discard local edits and reload the external file?"
-        : "Overwrite the external file with the local Galley edit?"
+        ? this.#text.t("workbench.confirm.reload")
+        : this.#text.t("workbench.confirm.overwrite")
     );
     if (!accepted) return;
     if (decision === "reload") {
@@ -464,7 +485,7 @@ export class GalleyWorkbenchView extends ItemView {
     this.#leftRail.className = "galley-left-rail";
     const workflow = document.createElement("nav");
     workflow.className = "galley-workflow";
-    workflow.textContent = "Generate → Edit → Export";
+    workflow.textContent = this.#text.t("workbench.workflow");
     this.#outlineHost = document.createElement("section");
     this.#outlineHost.className = "galley-outline";
     this.#historyHost = document.createElement("section");
@@ -487,34 +508,47 @@ export class GalleyWorkbenchView extends ItemView {
   #render(): void {
     if (this.#closed) return;
     this.#ensureShell();
+    const workflow = this.#leftRail.querySelector<HTMLElement>(".galley-workflow");
+    if (workflow) workflow.textContent = this.#text.t("workbench.workflow");
     renderWorkbenchToolbar(this.#toolbar, this.#state, {
       onMode: (mode) => this.selectMode(mode),
       onSave: () => this.saveExplicit()
-    });
+    }, this.#text);
     if (this.#state.conflict) {
-      renderConflictBanner(this.#toolbar, (decision) => this.resolveConflict(decision));
+      renderConflictBanner(
+        this.#toolbar,
+        (decision) => this.resolveConflict(decision),
+        this.#text
+      );
     }
     if (this.#state.recovery === "quarantined" || this.#state.error) {
       const warning = this.#toolbar.ownerDocument.createElement("p");
       warning.className = "galley-workbench-warning";
       warning.setAttribute("role", "alert");
-      warning.textContent = this.#state.error ?? "Recovery requires attention.";
+      warning.textContent = this.#localizedStateMessage(
+        this.#state.error ?? this.#text.t("workbench.warning.recovery")
+      );
       this.#toolbar.append(warning);
     }
     const body = this.#document?.session.bodyHtml() ?? "";
     renderDocumentOutline(
       this.#outlineHost,
       extractDocumentOutline(body),
-      (sourceId) => this.#selectSource(sourceId)
+      (sourceId) => this.#selectSource(sourceId),
+      this.#text
     );
-    renderHistoryPanel(this.#historyHost, this.#history, (snapshot) =>
-      this.restoreHistory(snapshot)
+    renderHistoryPanel(
+      this.#historyHost,
+      this.#history,
+      (snapshot) => this.restoreHistory(snapshot),
+      this.#text
     );
     renderPropertyInspector(
       this.#propertyHost,
       this.#selectedElement,
       this.#catalog.roles(),
-      (command) => this.#applyProperty(command)
+      (command) => this.#applyProperty(command),
+      this.#text
     );
     if (this.#exportConfigurations.length > 0) {
       renderExportPanel(
@@ -537,7 +571,8 @@ export class GalleyWorkbenchView extends ItemView {
             };
             this.#render();
           }
-        }
+        },
+        this.#text
       );
     } else {
       this.#exportHost.replaceChildren();
@@ -554,13 +589,13 @@ export class GalleyWorkbenchView extends ItemView {
       this.#exportState = {
         selectedId: configuration.id,
         status: "idle",
-        message: "Configuration saved"
+      message: this.#text.t("workbench.export.saved")
       };
     } catch {
       this.#exportState = {
         selectedId: configuration.id,
         status: "error",
-        message: "Configuration save failed"
+        message: this.#text.t("workbench.export.status.saveFailed")
       };
     }
     this.#render();
@@ -613,7 +648,7 @@ export class GalleyWorkbenchView extends ItemView {
       if (this.#closed || generation !== this.#mountGeneration) return;
       this.#state = reduceWorkbenchState(this.#state, {
         type: "error",
-        message: "Galley could not initialize this editor mode."
+        message: this.#text.t("workbench.error.editorInit")
       });
       this.#render();
       throw error;
@@ -633,7 +668,36 @@ export class GalleyWorkbenchView extends ItemView {
         )
       });
     }
-    createSafePreviewFrame(this.#canvas, previewHtml);
+    createSafePreviewFrame(
+      this.#canvas,
+      previewHtml,
+      this.#text.t("preview.frameTitle")
+    );
+  }
+
+  #localizedStateMessage(message: string): string {
+    const messages: Readonly<Record<string, ReturnType<LocalizedText["t"]>>> = {
+      "Ready": this.#text.t("common.status.idle"),
+      "Configuration saved": this.#text.t("workbench.export.saved"),
+      "Configuration save failed": this.#text.t("workbench.export.status.saveFailed"),
+      "The last transaction outcome is ambiguous. No partial document was opened.":
+        this.#text.t("workbench.error.openAmbiguous"),
+      "Recovery is quarantined for this document. No file was changed.":
+        this.#text.t("workbench.error.openQuarantined"),
+      "The last transaction outcome is ambiguous. Saving is paused until recovery completes.":
+        this.#text.t("workbench.error.recoveryAmbiguous"),
+      "Galley could not initialize this editor mode.":
+        this.#text.t("workbench.error.editorInit"),
+      "Galley rejected an unsafe or invalid body edit.":
+        this.#text.t("workbench.error.invalidEdit"),
+      "Recovery is quarantined for this document. No file was overwritten.":
+        this.#text.t("workbench.error.saveQuarantined"),
+      "Galley could not prove the save outcome. Recovery must complete before another save.":
+        this.#text.t("workbench.error.saveAmbiguous"),
+      "Galley could not save this article.":
+        this.#text.t("workbench.error.saveFailed")
+    };
+    return messages[message] ?? message;
   }
 
   #editorChanged(adapter: SelectableHtmlEditorAdapter, displayHtml: string): void {
@@ -649,7 +713,7 @@ export class GalleyWorkbenchView extends ItemView {
     } catch {
       this.#state = reduceWorkbenchState(this.#state, {
         type: "error",
-        message: "Galley rejected an unsafe or invalid body edit."
+        message: this.#text.t("workbench.error.invalidEdit")
       });
       this.#render();
     }
@@ -711,7 +775,7 @@ export class GalleyWorkbenchView extends ItemView {
         this.#autosave?.pause();
         this.#state = reduceWorkbenchState(this.#state, {
           type: "recovery-quarantined",
-          message: "Recovery is quarantined for this document. No file was overwritten."
+          message: this.#text.t("workbench.error.saveQuarantined")
         });
       } else if (
         document.session.recoveryState?.().status === "ambiguous" ||
@@ -720,12 +784,12 @@ export class GalleyWorkbenchView extends ItemView {
         this.#autosave?.pause();
         this.#state = reduceWorkbenchState(this.#state, {
           type: "recovery-ambiguous",
-          message: "Galley could not prove the save outcome. Recovery must complete before another save."
+          message: this.#text.t("workbench.error.saveAmbiguous")
         });
       } else {
         this.#state = reduceWorkbenchState(this.#state, {
           type: "error",
-          message: "Galley could not save this article."
+          message: this.#text.t("workbench.error.saveFailed")
         });
       }
       this.#render();
@@ -788,6 +852,10 @@ export class GalleyWorkbenchView extends ItemView {
     this.#adapter = null;
     this.#selectedElement = null;
     if (adapter) this.#destroyAdapter(adapter);
+  }
+
+  #subscribeLocale(): void {
+    this.#unsubscribeLocale ??= this.#text.subscribe(() => this.#render());
   }
 
   #destroyAdapter(adapter: SelectableHtmlEditorAdapter): void {

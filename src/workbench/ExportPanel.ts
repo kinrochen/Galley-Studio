@@ -3,6 +3,8 @@ import {
   type ExportConfiguration
 } from "../export/ExportConfiguration";
 import type { ExportProfileId } from "../export/ExportProfile";
+import { ENGLISH_LOCALIZED_TEXT, type LocalizedText } from "../i18n/LocalizedText";
+import type { MessageKey } from "../i18n/Resources";
 
 export type ExportPanelStatus =
   | "idle"
@@ -26,30 +28,31 @@ export interface ExportPanelActions {
   readonly onValidationError?: (message: string) => void;
 }
 
-const PROFILE_LABELS: readonly [ExportProfileId, string][] = [
-  ["standard-web", "Standard web"],
-  ["portable-inline", "Portable inline"],
-  ["wechat", "WeChat editor"]
+const PROFILE_LABELS: readonly [ExportProfileId, MessageKey][] = [
+  ["standard-web", "workbench.export.profile.standardWeb"],
+  ["portable-inline", "workbench.export.profile.portableInline"],
+  ["wechat", "workbench.export.profile.wechat"]
 ];
 
 export function renderExportPanel(
   host: HTMLElement,
   state: ExportPanelState,
   configurations: readonly ExportConfiguration[],
-  actions: ExportPanelActions
+  actions: ExportPanelActions,
+  text: LocalizedText = ENGLISH_LOCALIZED_TEXT
 ): void {
   const document = host.ownerDocument;
   const section = document.createElement("section");
   section.className = "galley-export-panel";
   const heading = document.createElement("h3");
-  heading.textContent = "Export configuration";
+  heading.textContent = text.t("workbench.export.configuration");
   section.append(heading);
 
   const selected = configurations.find(({ id }) => id === state.selectedId)
     ?? configurations[0];
   if (!selected) {
     const empty = document.createElement("p");
-    empty.textContent = "No export configurations.";
+    empty.textContent = text.t("workbench.export.empty");
     section.append(empty);
     host.replaceChildren(section);
     return;
@@ -65,32 +68,32 @@ export function renderExportPanel(
     configSelect.append(option);
   }
   configSelect.addEventListener("change", () => actions.onSelect(configSelect.value));
-  section.append(label(document, "Saved configuration", configSelect));
+  section.append(label(document, text.t("workbench.export.saved"), configSelect));
 
   const name = input(document, "name", selected.name);
-  section.append(label(document, "Name", name));
+  section.append(label(document, text.t("workbench.export.name"), name));
   const profile = document.createElement("select");
   profile.dataset.exportProfile = "";
-  for (const [id, text] of PROFILE_LABELS) {
+  for (const [id, labelKey] of PROFILE_LABELS) {
     const option = document.createElement("option");
     option.value = id;
-    option.textContent = text;
+    option.textContent = text.t(labelKey);
     option.selected = id === selected.profileId;
     profile.append(option);
   }
-  section.append(label(document, "Profile", profile));
+  section.append(label(document, text.t("workbench.export.profile"), profile));
   const folder = input(document, "output-folder", selected.outputFolder);
-  section.append(label(document, "Output folder", folder));
+  section.append(label(document, text.t("workbench.export.folder"), folder));
   const template = input(document, "filename-template", selected.fileNameTemplate);
-  section.append(label(document, "Filename", template));
+  section.append(label(document, text.t("workbench.export.filename"), template));
 
   const actionsHost = document.createElement("div");
   actionsHost.className = "galley-export-actions";
   const busy = state.status === "exporting" || state.status === "copying";
   actionsHost.append(
-    actionButton(document, "export", "Export file", busy, () => actions.onExport(selected.id)),
-    actionButton(document, "copy", "Copy rich text", busy, () => actions.onCopy(selected.id)),
-    actionButton(document, "save-config", "Save configuration", busy, () => {
+    actionButton(document, "export", text.t("workbench.export.file"), busy, () => actions.onExport(selected.id)),
+    actionButton(document, "copy", text.t("workbench.export.copy"), busy, () => actions.onCopy(selected.id)),
+    actionButton(document, "save-config", text.t("workbench.export.save"), busy, () => {
       try {
         return actions.onSave(normalizeExportConfiguration({
           id: selected.id,
@@ -100,7 +103,7 @@ export function renderExportPanel(
           fileNameTemplate: template.value
         }));
       } catch {
-        actions.onValidationError?.("Export configuration is invalid");
+        actions.onValidationError?.(text.t("workbench.export.invalid"));
       }
     })
   );

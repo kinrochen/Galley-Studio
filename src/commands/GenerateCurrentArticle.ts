@@ -42,6 +42,7 @@ export interface GenerateCurrentArticleContext {
   getActiveFile(): ActiveMarkdownFile | null;
   read(file: ActiveMarkdownFile): Promise<string>;
   getSettings(): unknown;
+  readonly manualThemeId?: string;
   createPipeline(
     settings: Readonly<GalleySettings>,
     signal: AbortSignal
@@ -94,7 +95,10 @@ export async function generateCurrentArticle(
       {
         sourcePath: activeFile.path,
         markdown,
-        modelContextWindow: settings.contextWindow
+        modelContextWindow: settings.contextWindow,
+        ...(context.manualThemeId?.trim()
+          ? { manualThemeId: context.manualThemeId.trim() }
+          : {})
       },
       signal
     );

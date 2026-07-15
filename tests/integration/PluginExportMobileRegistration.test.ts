@@ -20,7 +20,10 @@ describe("desktop export and mobile preview registration", () => {
     };
     const commandIds = exposed.commands.map(({ id }) => id);
 
-    expect([...exposed.views.keys()]).toEqual([GALLEY_PREVIEW_VIEW_TYPE]);
+    expect([...exposed.views.keys()]).toEqual([
+      "galley-console",
+      GALLEY_PREVIEW_VIEW_TYPE
+    ]);
     expect(commandIds).toContain("open-current-galley-preview");
     expect(commandIds).not.toContain("open-current-galley-in-workbench");
     expect(commandIds).not.toContain("generate-current-article");

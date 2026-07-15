@@ -3,8 +3,13 @@ import {
   normalizeExportConfigurations,
   type ExportConfiguration
 } from "../export/ExportConfiguration";
+import {
+  isGalleyLanguage,
+  type GalleyLanguage
+} from "../i18n/LocaleStore";
 
 export interface GalleySettings {
+  language: GalleyLanguage;
   baseUrl: string;
   model: string;
   secretId: string;
@@ -17,6 +22,7 @@ export interface GalleySettings {
 }
 
 export const DEFAULT_SETTINGS: GalleySettings = {
+  language: "auto",
   baseUrl: "https://api.openai.com/v1",
   model: "",
   secretId: "",
@@ -36,6 +42,7 @@ export function normalizeSettings(value: unknown): GalleySettings {
 
   return {
     ...DEFAULT_SETTINGS,
+    language: isGalleyLanguage(input.language) ? input.language : "auto",
     baseUrl: String(input.baseUrl ?? DEFAULT_SETTINGS.baseUrl).replace(/\/+$/, ""),
     model: String(input.model ?? ""),
     secretId: String(input.secretId ?? ""),

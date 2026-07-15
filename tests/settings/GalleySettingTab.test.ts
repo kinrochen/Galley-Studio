@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import type { App, PluginManifest, SecretStorage } from "obsidian";
 import GalleyPlugin from "../../src/main";
 import { GalleySettingTab } from "../../src/settings/GalleySettingTab";
@@ -136,6 +136,42 @@ it("registers the settings tab when the plugin loads", async () => {
   expect(harness.settingTabs[0]).toBeInstanceOf(GalleySettingTab);
 });
 
+it("switches localized settings chrome after persistence without losing values", async () => {
+  const app = makeAppWithSecret("provider-key", "raw-provider-secret");
+  const plugin = new GalleyPlugin(app, {} as PluginManifest);
+  await plugin.onload();
+  const tab = (
+    plugin as unknown as { settingTabs: GalleySettingTab[] }
+  ).settingTabs[0]!;
+  plugin.settings.model = "stateful-model";
+  plugin.settings.secretId = "provider-key";
+  tab.display();
+  const language = tab.containerEl.querySelector<HTMLSelectElement>(
+    '[data-setting-name="Language"] select'
+  );
+  if (!language) throw new Error("missing language setting");
+
+  language.value = "zh-CN";
+  language.dispatchEvent(new Event("change"));
+  await vi.waitFor(() =>
+    expect(
+      tab.containerEl.querySelector('[data-setting-name="模型"]')
+    ).not.toBeNull()
+  );
+
+  expect(plugin.settings.language).toBe("zh-CN");
+  expect(
+    tab.containerEl.querySelector<HTMLInputElement>(
+      '[data-setting-name="模型"] input'
+    )?.value
+  ).toBe("stateful-model");
+  expect(
+    tab.containerEl.querySelector<HTMLInputElement>(
+      '[data-setting-name="API 密钥"] input'
+    )?.value
+  ).toBe("provider-key");
+});
+
 it("registers the connection and Skill diagnostic only on desktop", async () => {
   const desktop = new GalleyPlugin(
     makeAppWithSecret("provider-key", "raw-provider-secret"),
@@ -151,14 +187,14 @@ it("registers the connection and Skill diagnostic only on desktop", async () => 
   expect(desktopHarness.commands).toContainEqual(
     expect.objectContaining({
       id: "check-model-connection-and-skill-loading",
-      name: "Galley: Check model connection and Skill loading"
+      name: "Galley: Diagnostics / 诊断"
     })
   );
   expect(
     desktopHarness.settingTabs[0]?.containerEl.querySelector(
       '[data-setting-name="Connection and Skill diagnostic"] button'
     )?.textContent
-  ).toBe("Check model connection and Skill loading");
+  ).toBe("Run connection and Skill diagnostic");
 
   Platform.isMobileApp = true;
   const mobile = new GalleyPlugin(

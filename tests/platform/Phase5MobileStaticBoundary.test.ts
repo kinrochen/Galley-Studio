@@ -13,7 +13,7 @@ it("keeps Theme Lab and Skill import behind a desktop-only dynamic boundary", as
   expect(main).not.toMatch(
     /from\s+["'][^"']*(?:ThemeGenerationService|SkillArchiveImporter|ImportedSkillRepository)["']/u
   );
-  expect(main).toContain('import("./platform/DesktopThemeRuntime")');
+  expect(main).toContain('import("./platform/DesktopConsoleRuntime")');
 
   Platform.isMobileApp = true;
   const app = {

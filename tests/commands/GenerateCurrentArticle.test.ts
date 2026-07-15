@@ -371,7 +371,9 @@ describe("plugin command registration", () => {
     await desktop.onload();
     expect(commandIds(desktop)).toContain("generate-current-article");
     expect(commandIds(desktop)).toContain("open-current-galley-in-workbench");
-    expect(commandNames(desktop)).toContain("Galley: AI layout current article");
+    expect(commandNames(desktop)).toContain(
+      "Galley: Generate current article / 生成当前文章"
+    );
     expect((desktop as unknown as { views: Map<string, unknown> }).views.has("galley-workbench"))
       .toBe(true);
 
@@ -1014,9 +1016,8 @@ function makeProductionPluginApp(
       contents.delete(file.path);
     },
     on: (name: string, listener: (file: MemoryObsidianFile) => unknown) => {
-      if (name !== "create") throw new Error("Unexpected event");
       const ref = {};
-      createListeners.set(ref, listener);
+      if (name === "create") createListeners.set(ref, listener);
       return ref;
     },
     offref: (ref: object) => {
@@ -1029,7 +1030,11 @@ function makeProductionPluginApp(
       listSecrets: () => ["secret-id"],
       setSecret: () => undefined
     },
-    workspace: { getActiveFile: () => source },
+    workspace: {
+      getActiveFile: () => source,
+      getLeaf: () => ({ setViewState: async () => undefined }),
+      revealLeaf: () => undefined
+    },
     vault
   } as unknown as App;
   return {

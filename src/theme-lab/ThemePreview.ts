@@ -1,9 +1,8 @@
 import { createSafePreviewFrame } from "../preview/SafeHtmlPreview";
 
 export class ThemePreview {
-  render(host: HTMLElement, html: string): HTMLIFrameElement {
-    const frame = createSafePreviewFrame(host, html);
-    frame.title = "Galley custom theme full-page preview";
+  render(host: HTMLElement, html: string, title = "Galley custom theme full-page preview"): HTMLIFrameElement {
+    const frame = createSafePreviewFrame(host, html, title);
     return frame;
   }
 }
