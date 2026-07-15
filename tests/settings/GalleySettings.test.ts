@@ -14,6 +14,32 @@ it("normalizes provider settings without an apiKey field", () => {
   expect(settings).not.toHaveProperty("apiKey");
   expect(settings.secretId).toBe("");
   expect(DEFAULT_SETTINGS.contextWindow).toBe(128_000);
+  expect(settings.exportConfigurations).toHaveLength(3);
+});
+
+it("normalizes reusable export configurations and drops unsafe persisted entries", () => {
+  const settings = normalizeSettings({
+    exportConfigurations: [
+      {
+        id: "client-handoff",
+        name: "Client handoff",
+        profileId: "portable-inline",
+        outputFolder: "exports/client",
+        fileNameTemplate: "{stem}-handoff.html"
+      },
+      {
+        id: "unsafe",
+        name: "Unsafe",
+        profileId: "standard-web",
+        outputFolder: "../outside",
+        fileNameTemplate: "{stem}.html"
+      }
+    ]
+  });
+
+  expect(settings.exportConfigurations).toEqual([
+    expect.objectContaining({ id: "client-handoff", profileId: "portable-inline" })
+  ]);
 });
 
 it("uses field defaults for non-finite numeric settings", () => {

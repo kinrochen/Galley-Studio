@@ -16,6 +16,8 @@ import { ThemeComponentCatalog } from "../editor/ThemeComponentCatalog";
 import { transformSelectedBlock } from "../editor/ComponentTransformer";
 import type { PlatformCapabilities } from "../platform/PlatformCapabilities";
 import { createSafePreviewFrame } from "../preview/SafeHtmlPreview";
+import type { ExportConfiguration } from "../export/ExportConfiguration";
+import type { GalleyExportRecordV1 } from "../export/ExportRecord";
 import { AutosaveController } from "./AutosaveController";
 import {
   renderConflictBanner,
@@ -38,6 +40,10 @@ import {
   type WorkbenchState
 } from "./WorkbenchState";
 import { renderWorkbenchToolbar } from "./WorkbenchToolbar";
+import {
+  renderExportPanel,
+  type ExportPanelState
+} from "./ExportPanel";
 
 export const GALLEY_WORKBENCH_VIEW_TYPE = "galley-workbench";
 
@@ -51,6 +57,8 @@ export interface WorkbenchSession {
   saveCopy(): Promise<ArtifactPaths>;
   restoreHistory?(path: string): Promise<void>;
   recoveryState?(): DocumentRecoveryState;
+  documentId?(): string;
+  recordExport?(record: GalleyExportRecordV1, signal?: AbortSignal): Promise<void>;
 }
 
 export interface WorkbenchRecoveryState {
@@ -80,6 +88,19 @@ export interface GalleyWorkbenchViewServices {
     "rewriteForDisplay" | "restoreForSave"
   >;
   readonly documentBaseUrl?: (path: string) => string;
+  readonly exportConfigurations?: readonly ExportConfiguration[];
+  readonly exportDocument?: (
+    input: {
+      readonly session: WorkbenchSession;
+      readonly documentPath: string;
+      readonly configuration: Readonly<ExportConfiguration>;
+    },
+    signal: AbortSignal
+  ) => Promise<{ readonly path: string; readonly html: string }>;
+  readonly copyExportHtml?: (html: string) => Promise<void>;
+  readonly saveExportConfiguration?: (
+    configuration: ExportConfiguration
+  ) => Promise<readonly ExportConfiguration[]>;
 }
 
 export class GalleyPathInvalidError extends Error {
@@ -114,16 +135,29 @@ export class GalleyWorkbenchView extends ItemView {
   #mountGeneration = 0;
   #transition: Promise<void> = Promise.resolve();
   #saveQueue: Promise<void> = Promise.resolve();
+  #exportController: AbortController | null = null;
+  #exportConfigurations: readonly ExportConfiguration[];
+  #exportState: ExportPanelState;
   #toolbar!: HTMLElement;
   #leftRail!: HTMLElement;
   #outlineHost!: HTMLElement;
   #historyHost!: HTMLElement;
   #canvas!: HTMLElement;
   #inspector!: HTMLElement;
+  #propertyHost!: HTMLElement;
+  #exportHost!: HTMLElement;
 
   constructor(leaf: WorkspaceLeaf, services: GalleyWorkbenchViewServices) {
     super(leaf);
     this.#services = services;
+    this.#exportConfigurations = Object.freeze([
+      ...(services.exportConfigurations ?? [])
+    ]);
+    this.#exportState = {
+      selectedId: this.#exportConfigurations[0]?.id ?? "",
+      status: "idle",
+      message: "Ready"
+    };
     this.navigation = true;
   }
 
@@ -167,6 +201,8 @@ export class GalleyWorkbenchView extends ItemView {
       throw error;
     }
     this.#closed = true;
+    this.#exportController?.abort();
+    this.#exportController = null;
     this.#mountGeneration += 1;
     this.#autosave?.dispose();
     this.#autosave = null;
@@ -181,6 +217,8 @@ export class GalleyWorkbenchView extends ItemView {
 
   async openPath(path: string): Promise<void> {
     assertGalleyHtmlPath(path);
+    this.#exportController?.abort();
+    this.#exportController = null;
     this.#closed = false;
     if (this.#document) {
       this.#captureAdapterBody();
@@ -273,6 +311,74 @@ export class GalleyWorkbenchView extends ItemView {
     await this.#save("explicit");
   }
 
+  async exportCurrent(configurationId: string, copy: boolean): Promise<void> {
+    const exportDocument = this.#services.exportDocument;
+    const document = this.#document;
+    const configuration = this.#exportConfigurations.find(
+      ({ id }) => id === configurationId
+    );
+    if (!exportDocument || !document || !configuration) {
+      throw new Error("Galley export is unavailable.");
+    }
+    const controller = new AbortController();
+    this.#exportController?.abort();
+    this.#exportController = controller;
+    const operationGeneration = this.#mountGeneration;
+    const isCurrent = (): boolean =>
+      !controller.signal.aborted &&
+      !this.#closed &&
+      this.#exportController === controller &&
+      this.#document === document &&
+      this.#mountGeneration === operationGeneration;
+    try {
+      this.#captureAdapterBody();
+      if (document.session.state().dirty) await this.#save("explicit");
+      if (!isCurrent()) return;
+      this.#exportState = {
+        selectedId: configuration.id,
+        status: copy ? "copying" : "exporting",
+        message: copy ? "Copying…" : "Exporting…"
+      };
+      this.#render();
+      const result = await exportDocument(
+        {
+          session: document.session,
+          documentPath: this.#state.documentPath ?? "",
+          configuration
+        },
+        controller.signal
+      );
+      if (!isCurrent()) return;
+      if (copy) {
+        const copyHtml = this.#services.copyExportHtml;
+        if (!copyHtml) throw new Error("Galley rich-text copy is unavailable.");
+        await copyHtml(result.html);
+        if (!isCurrent()) return;
+      }
+      this.#exportState = {
+        selectedId: configuration.id,
+        status: copy ? "copied" : "success",
+        message: copy ? `Copied: ${result.path}` : `Exported: ${result.path}`
+      };
+      this.#render();
+    } catch (error) {
+      if (!isCurrent()) return;
+      this.#exportState = {
+        selectedId: configuration.id,
+        status: "error",
+        message: errorCode(error) === "export_record_failed"
+          ? "Export file was written, but its sidecar record failed"
+          : copy
+            ? "Copy failed"
+            : "Export failed"
+      };
+      this.#render();
+      throw error;
+    } finally {
+      if (this.#exportController === controller) this.#exportController = null;
+    }
+  }
+
   async resolveConflict(decision: ConflictDecision): Promise<void> {
     const session = this.#document?.session;
     if (!session) return;
@@ -342,6 +448,11 @@ export class GalleyWorkbenchView extends ItemView {
     this.#canvas.className = "galley-canvas";
     this.#inspector = document.createElement("aside");
     this.#inspector.className = "galley-inspector";
+    this.#propertyHost = document.createElement("div");
+    this.#propertyHost.className = "galley-property-host";
+    this.#exportHost = document.createElement("div");
+    this.#exportHost.className = "galley-export-host";
+    this.#inspector.append(this.#propertyHost, this.#exportHost);
     body.append(this.#leftRail, this.#canvas, this.#inspector);
     root.append(this.#toolbar, body);
     this.contentEl.replaceChildren(root);
@@ -373,11 +484,51 @@ export class GalleyWorkbenchView extends ItemView {
       this.restoreHistory(snapshot)
     );
     renderPropertyInspector(
-      this.#inspector,
+      this.#propertyHost,
       this.#selectedElement,
       this.#catalog.roles(),
       (command) => this.#applyProperty(command)
     );
+    if (this.#exportConfigurations.length > 0) {
+      renderExportPanel(
+        this.#exportHost,
+        this.#exportState,
+        this.#exportConfigurations,
+        {
+          onSelect: (selectedId) => {
+            this.#exportState = { ...this.#exportState, selectedId };
+            this.#render();
+          },
+          onExport: (selectedId) => this.exportCurrent(selectedId, false),
+          onCopy: (selectedId) => this.exportCurrent(selectedId, true),
+          onSave: (configuration) => this.#saveExportConfiguration(configuration)
+        }
+      );
+    } else {
+      this.#exportHost.replaceChildren();
+    }
+  }
+
+  async #saveExportConfiguration(
+    configuration: ExportConfiguration
+  ): Promise<void> {
+    const save = this.#services.saveExportConfiguration;
+    if (!save) return;
+    try {
+      this.#exportConfigurations = Object.freeze([...(await save(configuration))]);
+      this.#exportState = {
+        selectedId: configuration.id,
+        status: "idle",
+        message: "Configuration saved"
+      };
+    } catch {
+      this.#exportState = {
+        selectedId: configuration.id,
+        status: "error",
+        message: "Configuration save failed"
+      };
+    }
+    this.#render();
   }
 
   async #mountMode(mode: WorkbenchMode, generation: number): Promise<void> {

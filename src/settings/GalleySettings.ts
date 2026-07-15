@@ -1,3 +1,9 @@
+import {
+  DEFAULT_EXPORT_CONFIGURATIONS,
+  normalizeExportConfigurations,
+  type ExportConfiguration
+} from "../export/ExportConfiguration";
+
 export interface GalleySettings {
   baseUrl: string;
   model: string;
@@ -7,6 +13,7 @@ export interface GalleySettings {
   contextWindow: number;
   outputFolder: string;
   activeSkillVersion: string;
+  exportConfigurations: readonly ExportConfiguration[];
 }
 
 export const DEFAULT_SETTINGS: GalleySettings = {
@@ -17,7 +24,8 @@ export const DEFAULT_SETTINGS: GalleySettings = {
   timeoutMs: 120_000,
   contextWindow: 128_000,
   outputFolder: "",
-  activeSkillVersion: "bundled"
+  activeSkillVersion: "bundled",
+  exportConfigurations: DEFAULT_EXPORT_CONFIGURATIONS
 };
 
 export function normalizeSettings(value: unknown): GalleySettings {
@@ -50,7 +58,8 @@ export function normalizeSettings(value: unknown): GalleySettings {
       DEFAULT_SETTINGS.contextWindow
     ),
     outputFolder: String(input.outputFolder ?? ""),
-    activeSkillVersion: String(input.activeSkillVersion ?? "bundled")
+    activeSkillVersion: String(input.activeSkillVersion ?? "bundled"),
+    exportConfigurations: normalizeExportConfigurations(input.exportConfigurations)
   };
 }
 

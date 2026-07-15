@@ -39,6 +39,7 @@ import {
   TransactionRecordInvalidError,
   TransactionRecordUnstableError
 } from "./ObsidianTransactionStore";
+import type { GalleyExportRecordV1 } from "../export/ExportRecord";
 
 const MAX_OPEN_ATTEMPTS = 8;
 
@@ -230,6 +231,13 @@ class ObsidianOpenedDocumentSession implements OpenedGalleyDocumentSession {
     if (!snapshot) throw new GalleyHistorySnapshotNotFoundError(path);
     const restored = GalleyDocumentCodec.parse(snapshot.html);
     this.#session.updateBody(restored.bodyHtml);
+  }
+
+  async recordExport(
+    record: GalleyExportRecordV1,
+    signal?: AbortSignal
+  ): Promise<void> {
+    await this.#run(() => this.#session.recordExport(record, signal), true);
   }
 
   recoveryState(): DocumentRecoveryState {

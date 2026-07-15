@@ -44,7 +44,8 @@ describe("Galley plugin workbench registration", () => {
     const galleyMenu = new Menu();
     listener(galleyMenu, { path: "notes/a.galley.html", name: "a.galley.html" });
     expect(menuItems(galleyMenu).map(({ title }) => title)).toEqual([
-      "Open in Galley workbench"
+      "Open in Galley workbench",
+      "Open Galley preview"
     ]);
 
     const normalMenu = new Menu();

@@ -22,6 +22,10 @@ import type {
   HistoryCommitPlan,
   PreparedHistorySnapshot
 } from "./HistoryRepository";
+import {
+  GalleyExportRecordV1Schema,
+  type GalleyExportRecordV1
+} from "../export/ExportRecord";
 
 export interface DocumentSessionState {
   dirty: boolean;
@@ -84,6 +88,24 @@ export class DocumentSaveInProgressError extends Error {
   constructor() {
     super("A Galley document save is already in progress.");
     this.name = "DocumentSaveInProgressError";
+  }
+}
+
+export class DocumentExportDirtyError extends Error {
+  readonly code = "document_export_dirty" as const;
+
+  constructor() {
+    super("Save the current Galley edit before recording an export.");
+    this.name = "DocumentExportDirtyError";
+  }
+}
+
+export class DocumentExportSourceMismatchError extends Error {
+  readonly code = "document_export_source_mismatch" as const;
+
+  constructor() {
+    super("The export was not produced from the current saved Galley bytes.");
+    this.name = "DocumentExportSourceMismatchError";
   }
 }
 
@@ -353,6 +375,59 @@ export class DocumentSession<
     this.#conflict = false;
   }
 
+  async recordExport(
+    recordInput: GalleyExportRecordV1,
+    signal?: AbortSignal
+  ): Promise<void> {
+    if (this.#saving) throw new DocumentSaveInProgressError();
+    if (this.#dirty) throw new DocumentExportDirtyError();
+    throwIfAborted(signal);
+    const record = GalleyExportRecordV1Schema.parse(recordInput);
+    if (record.sourceHtmlHash !== this.#htmlHash) {
+      throw new DocumentExportSourceMismatchError();
+    }
+    this.#saving = true;
+    try {
+      const current = await this.#repository.readPair(this.#paths, signal);
+      if (
+        !current ||
+        !this.#repository.sameObservation(this.#observation, current.observation)
+      ) {
+        this.#conflict = true;
+        throw new DocumentConflictError();
+      }
+      const nextSidecar = GalleySidecarV1Schema.parse({
+        ...this.#sidecar,
+        exports: [...this.#sidecar.exports, record]
+      });
+      const sidecarJson = serializeSidecar(nextSidecar);
+      try {
+        const result = await this.#repository.replacePair(
+          this.#paths,
+          current.observation,
+          { html: current.html, sidecarJson },
+          signal
+        );
+        if (result.status === "conflict") {
+          this.#conflict = true;
+          throw new DocumentConflictError();
+        }
+        verifyCommittedSnapshot(result.snapshot, nextSidecar);
+        this.#applyExportCommit(result.snapshot, nextSidecar);
+      } catch (error) {
+        if (error instanceof DocumentPostCommitError && error.snapshot) {
+          verifyCommittedSnapshot(error.snapshot, nextSidecar);
+          this.#applyExportCommit(error.snapshot, nextSidecar);
+          return;
+        }
+        if (!isAbortError(error)) this.#conflict = true;
+        throw error;
+      }
+    } finally {
+      this.#saving = false;
+    }
+  }
+
   async saveCopy(signal?: AbortSignal): Promise<ArtifactPaths> {
     if (this.#saving) throw new DocumentSaveInProgressError();
     throwIfAborted(signal);
@@ -475,6 +550,16 @@ export class DocumentSession<
     this.#sourceChanged = nextSourceChanged;
     this.#lastSavedAt = validClockIso(savedAt);
     this.#dirty = this.#currentHtml !== targetHtml;
+  }
+
+  #applyExportCommit(
+    snapshot: DocumentPairSnapshot<Observation>,
+    nextSidecar: GalleySidecarV1
+  ): void {
+    this.#observation = snapshot.observation;
+    this.#sidecar = nextSidecar;
+    this.#htmlHash = snapshot.htmlHash;
+    this.#conflict = false;
   }
 }
 

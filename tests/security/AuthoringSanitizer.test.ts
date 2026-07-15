@@ -15,6 +15,15 @@ describe("sanitizeAuthoringDocument", () => {
     expect(result.removed.length).toBeGreaterThan(0);
   });
 
+  it("preserves the inert WeChat leaf marker while stripping executable markup", () => {
+    const result = sanitizeAuthoringDocument(
+      '<!doctype html><html><head></head><body><section><span leaf="">中文</span><img src="javascript:alert(1)" onerror="alert(1)"></section></body></html>'
+    );
+
+    expect(result.html).toContain('<span leaf="">中文</span>');
+    expect(result.html).not.toMatch(/onerror|javascript:/iu);
+  });
+
   it("scans an ordinary script and reports its DOMPurify removal", () => {
     const result = sanitizeAuthoringDocument(
       "<!doctype html><html><head></head><body><script>alert(1)</script><p>safe</p></body></html>"

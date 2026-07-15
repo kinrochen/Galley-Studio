@@ -2,6 +2,7 @@ import type { DocumentSessionState, SaveReason } from "./DocumentSession";
 import type { ArtifactPaths } from "./GalleyDocumentRepository";
 import { isNormalizedVaultRelativePath } from "./GalleySidecar";
 import type { HistorySnapshot } from "./HistoryRepository";
+import type { GalleyExportRecordV1 } from "../export/ExportRecord";
 
 const GALLEY_HTML_SUFFIX = ".galley.html";
 const GALLEY_SIDECAR_SUFFIX = ".galley.json";
@@ -39,6 +40,7 @@ export interface OpenedGalleyDocumentSession {
   saveCopy(signal?: AbortSignal): Promise<ArtifactPaths>;
   history(signal?: AbortSignal): Promise<readonly HistorySnapshot[]>;
   restoreHistory(path: string, signal?: AbortSignal): Promise<void>;
+  recordExport(record: GalleyExportRecordV1, signal?: AbortSignal): Promise<void>;
   recoveryState(): DocumentRecoveryState;
 }
 

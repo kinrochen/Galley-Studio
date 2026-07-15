@@ -26,6 +26,7 @@ const EXPECTED_TAG_ATTRIBUTES: Record<string, string[]> = {
   ol: ["reversed", "start", "type"],
   q: ["cite"],
   source: ["media", "src", "type"],
+  span: ["leaf"],
   td: ["colspan", "headers", "rowspan"],
   th: ["abbr", "colspan", "headers", "rowspan", "scope"],
   time: ["datetime"],

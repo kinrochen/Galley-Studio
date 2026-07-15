@@ -10,10 +10,6 @@ import {
   type Vault,
   type WorkspaceLeaf
 } from "obsidian";
-import { AiError } from "./ai/AiError";
-import { validateBaseUrl } from "./ai/BaseUrlPolicy";
-import { OpenAiCompatibleClient } from "./ai/OpenAiCompatibleClient";
-import { CapabilityProbe } from "./ai/CapabilityProbe";
 import {
   generateCurrentArticle,
   type GenerateCurrentArticleContext
@@ -32,8 +28,18 @@ import type { OpenedGalleyDocumentSession } from "./documents/DocumentSessionOpe
 import { ObsidianDocumentSessionOpener } from "./documents/ObsidianDocumentSessionOpener";
 import { EditorFactory } from "./editor/EditorFactory";
 import { EditorResourceResolver } from "./editor/EditorResourceResolver";
-import { BUNDLED_SKILL } from "./generated/bundledSkill";
-import { GenerationPipeline } from "./generation/GenerationPipeline";
+import {
+  normalizeExportConfiguration,
+  type ExportConfiguration
+} from "./export/ExportConfiguration";
+import { ExportService } from "./export/ExportService";
+import { ObsidianExportArtifactWriter } from "./export/ObsidianExportArtifactWriter";
+import { RichTextClipboard } from "./export/RichTextClipboard";
+import {
+  PortableInlineProfile,
+  StandardWebProfile,
+  WechatProfile
+} from "./export/profiles";
 import {
   derivePlatformCapabilities,
   type PlatformCapabilities
@@ -44,10 +50,12 @@ import {
   normalizeSettings
 } from "./settings/GalleySettings";
 import { GalleySettingTab } from "./settings/GalleySettingTab";
-import { BundledSkillLoader } from "./skill/BundledSkillLoader";
-import { SkillSession } from "./skill/SkillSession";
-import { SkillVirtualFileSystem } from "./skill/SkillVirtualFileSystem";
-import { BuiltInThemeRepository } from "./themes/BuiltInThemeRepository";
+import {
+  GALLEY_PREVIEW_VIEW_TYPE,
+  GalleyPreviewView,
+  isGalleyPreviewPath,
+  openGalleyPreview
+} from "./preview/GalleyPreviewView";
 import {
   GALLEY_WORKBENCH_VIEW_TYPE,
   GalleyWorkbenchView,
@@ -77,6 +85,21 @@ export default class GalleyPlugin extends Plugin {
       name: "Show Galley capabilities",
       callback: () => console.info("Galley capabilities", this.capabilities)
     });
+    this.registerView(
+      GALLEY_PREVIEW_VIEW_TYPE,
+      (leaf) => this.#createPreviewView(leaf)
+    );
+    this.addCommand({
+      id: "open-current-galley-preview",
+      name: "Galley: Preview current Galley document",
+      checkCallback: (checking) => {
+        const path = this.#activeGalleyPath();
+        if (!path) return false;
+        if (!checking) void this.openGalleyPreview(path);
+        return true;
+      }
+    });
+    this.#registerGalleyFileMenu();
     if (this.canGenerate) {
       this.registerView(
         GALLEY_WORKBENCH_VIEW_TYPE,
@@ -92,7 +115,6 @@ export default class GalleyPlugin extends Plugin {
           return true;
         }
       });
-      this.#registerGalleyFileMenu();
       this.addCommand({
         id: "check-model-connection-and-skill-loading",
         name: "Galley: Check model connection and Skill loading",
@@ -152,8 +174,12 @@ export default class GalleyPlugin extends Plugin {
         return this.app.vault.read(activeFile);
       },
       getSettings: () => this.settings,
-      createPipeline: async (settings, signal) =>
-        createProductionGeneration(this.app, settings, signal),
+      createPipeline: async (settings, signal) => {
+        const { createProductionGeneration } = await import(
+          "./platform/DesktopGenerationRuntime"
+        );
+        return createProductionGeneration(this.app, settings, signal);
+      },
       createRepository: (settings) =>
         new ArtifactRepository(new ObsidianArtifactVault(this.app.vault), {
           outputFolder: settings.outputFolder
@@ -188,6 +214,27 @@ export default class GalleyPlugin extends Plugin {
     }
   }
 
+  async openGalleyPreview(path: string): Promise<void> {
+    if (!isGalleyPreviewPath(path)) return;
+    const workspace = (this.app as GalleyPlugin["app"] | undefined)?.workspace;
+    if (!workspace || typeof workspace.getLeaf !== "function") return;
+    await openGalleyPreview(workspace, path);
+  }
+
+  #createPreviewView(leaf: WorkspaceLeaf): GalleyPreviewView {
+    const resourceResolver = new EditorResourceResolver((path) => {
+      const file = this.app.vault.getFileByPath(path);
+      return file ? this.app.vault.getResourcePath(file) : path;
+    });
+    return new GalleyPreviewView(leaf, {
+      openDocument: async (path) => {
+        const session = await this.#opener().open(path);
+        return { html: session.html() };
+      },
+      resourceResolver
+    });
+  }
+
   #createWorkbenchView(leaf: WorkspaceLeaf): GalleyWorkbenchView {
     const resourceResolver = new EditorResourceResolver((path) => {
       const file = this.app.vault.getFileByPath(path);
@@ -202,7 +249,50 @@ export default class GalleyPlugin extends Plugin {
       openCopy: (path) => this.openGalleyDocument(path),
       confirm: async (message) => window.confirm(message),
       resourceResolver,
-      documentBaseUrl: () => "app://vault/"
+      documentBaseUrl: () => "app://vault/",
+      exportConfigurations: this.settings.exportConfigurations,
+      exportDocument: async (
+        { session, documentPath, configuration },
+        signal
+      ) => {
+        const documentId = session.documentId?.();
+        const recordExport = session.recordExport?.bind(session);
+        if (!documentId || !recordExport) {
+          throw new Error("The production document session cannot record exports.");
+        }
+        const service = new ExportService({
+          profiles: [
+            new StandardWebProfile(),
+            new PortableInlineProfile(),
+            new WechatProfile()
+          ],
+          writer: new ObsidianExportArtifactWriter(this.app.vault),
+          recorder: { record: recordExport },
+          repairer: {
+            repair: async (html, repairSignal) => {
+              const { createProductionWechatRepairer } = await import(
+                "./platform/DesktopGenerationRuntime"
+              );
+              return createProductionWechatRepairer(
+                this.app,
+                this.settings
+              ).repair(html, repairSignal);
+            }
+          }
+        });
+        const result = await service.export({
+          source: {
+            htmlPath: documentPath,
+            documentId,
+            html: session.html()
+          },
+          configuration
+        }, signal);
+        return { path: result.path, html: result.html };
+      },
+      copyExportHtml: (html) => new RichTextClipboard().copy(html),
+      saveExportConfiguration: (configuration) =>
+        this.#saveExportConfiguration(configuration)
     };
     return new GalleyWorkbenchView(leaf, services);
   }
@@ -225,6 +315,22 @@ export default class GalleyPlugin extends Plugin {
     return this.#documentOpener;
   }
 
+  async #saveExportConfiguration(
+    configurationInput: ExportConfiguration
+  ): Promise<readonly ExportConfiguration[]> {
+    const configuration = normalizeExportConfiguration(configurationInput);
+    const configurations = [...this.settings.exportConfigurations];
+    const index = configurations.findIndex(({ id }) => id === configuration.id);
+    if (index < 0) configurations.push(configuration);
+    else configurations[index] = configuration;
+    this.settings = {
+      ...this.settings,
+      exportConfigurations: Object.freeze(configurations)
+    };
+    await this.saveSettings();
+    return this.settings.exportConfigurations;
+  }
+
   #activeGalleyPath(): string | null {
     const workspace = (this.app as GalleyPlugin["app"] | undefined)?.workspace;
     const active = workspace?.getActiveFile?.();
@@ -237,53 +343,23 @@ export default class GalleyPlugin extends Plugin {
     this.registerEvent(
       workspace.on("file-menu", (menu: Menu, file: TAbstractFile) => {
         if (isFolder(file) || !isGalleyHtmlPath(file.path)) return;
+        if (this.capabilities.canEdit) {
+          menu.addItem((item) =>
+            item
+              .setTitle("Open in Galley workbench")
+              .setIcon("layout-dashboard")
+              .onClick(() => this.openGalleyDocument(file.path))
+          );
+        }
         menu.addItem((item) =>
           item
-            .setTitle("Open in Galley workbench")
-            .setIcon("layout-dashboard")
-            .onClick(() => this.openGalleyDocument(file.path))
+            .setTitle("Open Galley preview")
+            .setIcon("eye")
+            .onClick(() => this.openGalleyPreview(file.path))
         );
       })
     );
   }
-}
-
-async function createProductionGeneration(
-  app: GalleyPlugin["app"],
-  settings: Readonly<GalleySettings>,
-  signal: AbortSignal
-): Promise<{ model: string; pipeline: GenerationPipeline }> {
-  const secretStore = new ObsidianSecretStore(app);
-  if (!settings.secretId || !secretStore.get(settings.secretId)) {
-    throw new AiError("missing_secret");
-  }
-  try {
-    validateBaseUrl(settings.baseUrl);
-  } catch {
-    throw new AiError("invalid_base_url");
-  }
-  const client = OpenAiCompatibleClient.fromSettings(
-    createObsidianTransport(),
-    settings,
-    secretStore
-  );
-  const target = { baseUrl: settings.baseUrl, model: settings.model };
-  const capabilities = await new CapabilityProbe(client).probe(target, signal);
-  const skillPackage = await new BundledSkillLoader().load();
-  const vfs = new SkillVirtualFileSystem(skillPackage.files);
-  const session = new SkillSession({
-    client,
-    target,
-    capabilities,
-    skillPackage,
-    vfs,
-    packageHash: BUNDLED_SKILL.archiveSha256
-  });
-  const themes = new BuiltInThemeRepository(vfs);
-  return {
-    model: settings.model,
-    pipeline: new GenerationPipeline({ session, themes })
-  };
 }
 
 interface ObsidianOwnedArtifact {

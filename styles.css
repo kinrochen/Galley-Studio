@@ -254,6 +254,72 @@
   margin-bottom: 12px;
 }
 
+.galley-property-host,
+.galley-export-host {
+  min-width: 0;
+}
+
+.galley-export-host {
+  border-top: 1px solid var(--galley-border);
+  margin-top: 18px;
+  padding-top: 16px;
+}
+
+.galley-export-panel h3 {
+  font-size: var(--font-ui-small);
+  letter-spacing: 0.06em;
+  margin: 0 0 14px;
+  text-transform: uppercase;
+}
+
+.galley-export-panel :is(input, select) {
+  box-sizing: border-box;
+  width: 100%;
+}
+
+.galley-export-actions {
+  display: grid;
+  gap: 7px;
+  grid-template-columns: 1fr 1fr;
+}
+
+.galley-export-actions button:last-child {
+  grid-column: 1 / -1;
+}
+
+.galley-export-status {
+  border-left: 3px solid var(--interactive-accent);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  margin: 12px 0 0;
+  padding-left: 9px;
+}
+
+.galley-export-status.is-error {
+  border-left-color: var(--text-error);
+  color: var(--text-error);
+}
+
+.galley-preview-view {
+  background: var(--background-secondary);
+  box-sizing: border-box;
+  height: 100%;
+  overflow: hidden;
+  padding: clamp(10px, 3vw, 28px);
+}
+
+.galley-preview-view > .galley-safe-preview {
+  background: #fff;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--galley-radius, 10px);
+  box-shadow: 0 14px 42px rgb(24 32 48 / 0.14);
+  display: block;
+  height: 100%;
+  margin: 0 auto;
+  max-width: 900px;
+  width: 100%;
+}
+
 .galley-inspector > :is(select, input) {
   display: block;
   margin-bottom: 10px;
@@ -310,6 +376,11 @@
     grid-column: 1 / -1;
     grid-template-columns: repeat(4, minmax(120px, 1fr));
     max-height: 170px;
+  }
+
+  .galley-property-host,
+  .galley-export-host {
+    min-width: 0;
   }
 
   .galley-inspector h3 {

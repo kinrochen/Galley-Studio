@@ -141,6 +141,7 @@ const TAG_ATTRIBUTES: Readonly<Record<string, ReadonlySet<string>>> = {
   ol: new Set(["reversed", "start", "type"]),
   q: new Set(["cite"]),
   source: new Set(["media", "src", "type"]),
+  span: new Set(["leaf"]),
   td: new Set(["colspan", "headers", "rowspan"]),
   th: new Set(["abbr", "colspan", "headers", "rowspan", "scope"]),
   time: new Set(["datetime"]),
@@ -255,7 +256,10 @@ function preprocessDocument(
         continue;
       }
 
-      if (URL_ATTRIBUTES.has(name) && !isSafeUrl(attribute.value, name, tag)) {
+      if (
+        URL_ATTRIBUTES.has(name) &&
+        !isSafeAuthoringUrl(attribute.value, name, tag)
+      ) {
         element.removeAttribute(attribute.name);
         removed.push({ kind: "url", name });
       }
@@ -303,7 +307,11 @@ function secureLinkTarget(
   }
 }
 
-function isSafeUrl(value: string, attribute: string, tag: string): boolean {
+export function isSafeAuthoringUrl(
+  value: string,
+  attribute: string,
+  tag: string
+): boolean {
   const views = decodeUrlSecurityViews(value);
   return Boolean(
     views && views.every((view) => isSafeUrlView(view, attribute, tag))

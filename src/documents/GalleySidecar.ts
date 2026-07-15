@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import type { GeneratedDocument } from "../generation/GenerationPipeline";
+import { GalleyExportRecordV1Schema } from "../export/ExportRecord";
 
 const LOWERCASE_SHA256 = /^[a-f0-9]{64}$/;
 const THEME_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -138,7 +139,24 @@ export const GalleySidecarV1Schema = z
     promptVersion: z.literal(1),
     generatedAt: z.string().datetime({ offset: true }),
     validation: ValidationReportSchema,
-    exports: z.array(z.never()).max(0)
+    exports: z
+      .array(GalleyExportRecordV1Schema)
+      .max(256)
+      .superRefine((records, context) => {
+        const ids = new Set<string>();
+        const paths = new Set<string>();
+        for (const record of records) {
+          if (ids.has(record.id) || paths.has(record.path)) {
+            context.addIssue({
+              code: "custom",
+              message: "Export record ids and paths must be unique."
+            });
+            return;
+          }
+          ids.add(record.id);
+          paths.add(record.path);
+        }
+      })
   })
   .strict();
 
