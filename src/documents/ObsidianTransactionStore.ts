@@ -91,6 +91,12 @@ export interface VerifiedTransactionReceipt extends TransactionReceiptPlan {
   readonly checksum: string;
 }
 
+export interface TransactionCleanupEvidence {
+  readonly path: string;
+  readonly sha256: string;
+  readonly byteLength: number;
+}
+
 export interface TransactionQuarantineEvidence {
   readonly path: string;
   readonly state: "absent" | "present" | "unreadable";
@@ -862,6 +868,56 @@ export class ObsidianTransactionStore {
       throw error;
     }
     return { status: "cleaned", directory: "retained" };
+  }
+
+  async cleanupEvidence(
+    record: TransactionRecord,
+    receipt: VerifiedTransactionReceipt,
+    signal?: AbortSignal
+  ): Promise<readonly TransactionCleanupEvidence[]> {
+    const current = await this.#currentFor(record, signal);
+    if (current.record.phase !== "completed") {
+      throw new TransactionPhaseInvalidError();
+    }
+    if (
+      receipt.transactionId !== current.record.id ||
+      receipt.manifestChecksum !== current.record.committedManifestChecksum ||
+      receipt.aggregateDigest !== current.record.committedAggregateDigest
+    ) {
+      throw new TransactionReceiptInvalidError();
+    }
+    const folderPath = transactionFolder(current.record.id);
+    const receiptPath = `${folderPath}/${RECEIPT_NAME}`;
+    const receiptOwned = await this.files.readTextStable(receiptPath, signal);
+    if (!receiptOwned || receiptOwned.text !== serializeCanonical(receipt)) {
+      throw new TransactionReceiptInvalidError();
+    }
+    const members = [
+      current.manifestOwnership,
+      ...current.blobs.map(({ ownership }) => ownership),
+      receiptOwned
+    ].sort((left, right) => compareText(left.path, right.path));
+    const expectedPaths = new Set(members.map(({ path }) => path));
+    const entries = await this.files.list(folderPath, signal);
+    if (
+      entries.length !== members.length ||
+      entries.some(
+        ({ path, kind }) => kind !== "file" || !expectedPaths.has(path)
+      )
+    ) {
+      throw new TransactionRecordInvalidError();
+    }
+    for (const member of members) {
+      const observed = await this.files.readTextStable(member.path, signal);
+      if (!sameOwned(observed, member)) {
+        throw new TransactionRecordUnstableError();
+      }
+    }
+    return Object.freeze(
+      members.map(({ path, sha256, byteLength }) =>
+        Object.freeze({ path, sha256, byteLength })
+      )
+    );
   }
 
   async #openStrict(id: string, signal?: AbortSignal): Promise<OpenedTransaction> {

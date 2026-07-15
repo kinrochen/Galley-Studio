@@ -2,7 +2,7 @@
 
 ## Status
 
-DONE — R1, R2, and R3 remediation included
+DONE — R1, R2, R3, and R4 remediation included
 
 - Required base: `2ae5c19cc9571d8985618b7c920713ce1388f89f`
 - Base HEAD and clean worktree verified before the formal RED
@@ -35,7 +35,9 @@ The adapter now provides:
 - fresh-runtime compaction of exact orphan combined receipts without losing or
   duplicating pair/history state;
 - WAL-independent closing proof with target revalidation throughout combined
-  receipt compaction.
+  receipt compaction;
+- proof-bound independent WAL cleanup evidence and redundant pair/history
+  closing routes that survive partial member deletion or one lost scope index.
 
 ## TDD evidence
 
@@ -110,34 +112,57 @@ All six planned-target races (first/middle/last combined WAL deletion, each for
 pair HTML and promoted history final) incorrectly resolved and erased all
 proof/locks/indexes instead of retaining a scoped recovery conflict.
 
+### R4 formal RED
+
+The R4 public-retry, member-cleanup, and post-WAL routing reproductions were
+added before production changes and run against R3 HEAD
+`d91f1f36490a4c090bb6375c693bc4c7b32531a7`:
+
+```text
+npx vitest run tests/documents/ObsidianTransactionRecovery.test.ts
+
+Test Files  1 failed (1)
+Tests       5 failed | 66 passed (71)
+exit 1
+```
+
+The failures proved that a real `HistoryRepository` retry was marked inactive,
+fresh runtimes could not resume after the first or middle WAL member deletion,
+and loss of either the pair or history scope index disconnected that scope
+from a still-valid post-WAL closing proof. Last-member deletion already reached
+the prior empty-folder recovery path, while malformed indexes already failed
+closed; both remain permanent positive controls.
+
 ### Final GREEN
 
 ```text
 npm test -- tests/documents/ObsidianWorkbenchVault.test.ts tests/documents/ObsidianTransactionRecovery.test.ts
 Test Files  2 passed (2)
-Tests       74 passed (74)
+Tests       82 passed (82)
 
 npm test -- tests/documents/ObsidianVaultFileStore.test.ts tests/documents/ObsidianTransactionStore.test.ts tests/documents/ObsidianWorkbenchVault.test.ts tests/documents/ObsidianTransactionRecovery.test.ts
 Test Files  4 passed (4)
-Tests       169 passed (169)
+Tests       177 passed (177)
 
 npm run test:typecheck
 exit 0
 
 npm test
 Test Files  42 passed (42)
-Tests       1021 passed (1021)
+Tests       1029 passed (1029)
 
 npm run build
 exit 0
 ```
 
 The forced two-adapter history interleaving was additionally repeated ten
-times after its cleanup-race fix; all ten runs passed. The fix keeps the
+times after the R4 fix; all ten rounds passed both the pair-CAS and history
+interleaving cases. The fix keeps the
 durable scope lock through WAL cleanup, and uses the exact scope index to clean
 an id-matching orphan lock if a crash leaves an empty transaction tombstone.
-A non-empty partially cleaned directory remains quarantined; it is never
-treated as successfully cleaned.
+A non-empty partially cleaned combined directory is resumed only from the
+independent exact cleanup set in its checksummed closing proof; partial WAL is
+never treated as a valid aggregate or used to infer missing members.
 
 ## Public evidence and provenance
 
@@ -199,6 +224,10 @@ store was extended only with strict optional/derived records:
    It still preflights every exact owned file and rejects unexpected members.
 5. The history scope validator accepts the same canonical UUID form already
    admitted by the sidecar contract.
+6. `cleanupEvidence(record, receipt)` derives a closed, sorted vector of exact
+   WAL member paths, SHA-256 hashes, and byte lengths only from a stable valid
+   completed aggregate whose exact receipt is present. The vector is captured
+   before any member deletion and is never reconstructed from a partial WAL.
 
 The adapter adds canonical checksummed internal blobs:
 
@@ -216,6 +245,8 @@ It also adds closed routing/admission records:
   scopes/history-<document-hash>/<transaction>.json
   closing/<transaction>.json
   closing/<transaction>.quarantine.json
+  closing-route/pair-<scope-hash>/<transaction>.json
+  closing-route/history-<document-hash>/<transaction>.json
   closing-final/pair-<scope-hash>/<transaction>.json
   closing-final/history-<document-hash>/<transaction>.json
 ```
@@ -231,7 +262,11 @@ Before a completed combined receipt can lose any WAL member, the adapter
 creates one strict canonical/checksummed closing proof outside the WAL. It
 binds transaction ID, exact scope, the complete verified receipt envelope,
 pair-after text/hash/length, and the complete signed history plan (provisional,
-final, observed, removals, hashes, lengths, and plan checksum). A separate
+final, observed, removals, hashes, lengths, and plan checksum). It also binds
+the independent closed cleanup vector for every exact manifest/blob/receipt
+member. Two scope-hashed canonical/checksummed closing routes bind the same
+transaction, scope, and proof checksum, so pair and history entry points can
+discover the proof without their ordinary scope index. A separate
 checksummed closing quarantine records target evidence if closing validation
 fails after WAL deletion. Scope-hashed signed final markers are created only
 after the last target validation; they distinguish a legally removed closing
@@ -286,6 +321,14 @@ only after that full forward state is already proved. Missing/tampered proof or
 external drift remains locked and becomes a scoped recovery conflict/target
 quarantine; it is never compacted.
 
+If WAL cleanup stops after an individual member deletion, a fresh runtime
+validates the closing proof and its scope route, rejects any unexpected or
+changed remaining member, and identity-conditionally removes only remaining
+members whose path/hash/length match the proof-bound cleanup vector. Missing
+members are interpreted only as members of that already-validated closed set
+that were deleted by the interrupted cleanup; the shrunken WAL is never opened
+or accepted as a new aggregate.
+
 That proof is re-read and the full planned target vector is revalidated
 immediately after WAL cleanup and again after lock release. Drift at either
 boundary writes the independent closing quarantine and preserves the closing
@@ -314,14 +357,17 @@ History-only and live-continuation combined success retain WAL, receipt, exact
 locks, and scope indexes until `HistoryRepository` calls `acknowledgeRetention`;
 acknowledgement then cleans WAL, releases exact locks, removes exact scope
 indexes, and forgets deletion provenance. The retention ID is bound when the
-transaction becomes committed. An exact same-plan retry verifies the durable
-receipt and final state and returns the idempotent `created` result; a changed
-retry plan returns `lost`.
+transaction becomes committed. A retry verifies the original durable completed
+receipt and final state and returns that receipt's promoted file before
+considering the legitimately re-planned final path/observed/removal vector.
+`rollbackPrepared` cannot mark the preparation rolled back while that exact
+completed retention proof remains.
 
 When the continuation registry is absent after a true restart, exact orphan
-combined proof is compacted in the crash-replayable order `closing proof ->
-WAL -> target revalidation -> pair/history locks -> target revalidation ->
-final marker -> scope indexes -> final marker cleanup`. The consumed
+combined proof is compacted in the crash-replayable order `closing proof +
+pair/history routes -> WAL -> target revalidation -> pair/history locks ->
+target revalidation -> final markers -> proof/index/route cleanup -> final
+marker cleanup`. The consumed
 pending-preparation WAL is
 removed only when its signed path/hash/length exactly match the combined plan
 whose forward state and receipt were just verified. Empty transaction
@@ -387,6 +433,16 @@ repeated fresh recovery. Additional controls cover closing-proof tamper and
 absence after WAL cleanup, all four cleanup crash boundaries, a later valid
 out-of-plan history final, and the same race through live combined
 acknowledgement.
+
+The R4 matrix retries an `after-completed` history-only interruption through
+the real `HistoryRepository`, including a newly generated plan and repeated
+acknowledgement. It interrupts combined cleanup after the first, middle, and
+last exact WAL member deletion, then proves convergence on two successive fresh
+runtimes. Finally, it removes or malforms each ordinary pair/history scope
+index after WAL cleanup, drifts the corresponding target, and proves the
+independent closing route fails that scope closed while an unrelated pair
+remains readable. Existing closing-proof tamper/missing cases supply the other
+half of the proof/index corruption matrix.
 
 ## Reconciliation and quarantine outcomes
 

@@ -405,6 +405,72 @@ describe("Obsidian workbench transaction recovery", () => {
     });
   }
 
+  for (const scope of ["pair", "history"] as const) {
+    for (const mutation of ["missing", "malformed"] as const) {
+      it(`routes a post-WAL ${scope} recovery through closing proof when its index is ${mutation}`, async () => {
+        const fixture = await completedCombinedFixture(1);
+        await fixture.vault.replacePairWithHistoryTransactional(
+          PATHS,
+          fixture.observed.observation,
+          fixture.nextPair,
+          fixture.plan
+        );
+        const crashing = new ObsidianWorkbenchVault(
+          persistentObsidianVault(fixture.backing),
+          { crashAt: new Set(["after-recovery-wal-cleanup"]) }
+        );
+        await expect(
+          new HistoryRepository(crashing, 20).list(DOCUMENT_ID)
+        ).rejects.toMatchObject({ code: "workbench_simulated_crash" });
+
+        const proofPath = fixture.backing
+          .paths()
+          .find(
+            (path) =>
+              path.startsWith(".galley/transactions/closing/") &&
+              !path.endsWith(".quarantine.json")
+          );
+        if (!proofPath) throw new Error("missing closing proof");
+        const transactionId = proofPath.slice(
+          proofPath.lastIndexOf("/") + 1,
+          -".json".length
+        );
+        const indexPath = fixture.backing
+          .paths()
+          .find(
+            (path) =>
+              path.startsWith(`.galley/transactions/scopes/${scope}-`) &&
+              path.endsWith(`/${transactionId}.json`)
+          );
+        if (!indexPath) throw new Error(`missing ${scope} scope index`);
+        if (mutation === "missing") fixture.backing.remove(indexPath);
+        else fixture.backing.replace(indexPath, "{}\n");
+
+        const targetPath = scope === "pair" ? PATHS.html : fixture.plan.finalPath;
+        const external = `external-post-wal-${scope}-${mutation}`;
+        fixture.backing.replace(targetPath, external);
+        const restarted = new ObsidianWorkbenchVault(
+          persistentObsidianVault(fixture.backing)
+        );
+        if (scope === "pair") {
+          await expect(restarted.readPair(PATHS)).rejects.toMatchObject({
+            code: "transaction_recovery_conflict"
+          });
+        } else {
+          await expect(
+            new HistoryRepository(restarted, 20).list(DOCUMENT_ID)
+          ).rejects.toMatchObject({ code: "transaction_recovery_conflict" });
+        }
+        expect(fixture.backing.read(targetPath)).toBe(external);
+        await expect(
+          new ObsidianWorkbenchVault(persistentObsidianVault(fixture.backing)).readPair(
+            UNRELATED_PATHS
+          )
+        ).resolves.toMatchObject(fixture.unrelatedPair);
+      });
+    }
+  }
+
   it("does not compact a fresh combined transaction with a tampered receipt", async () => {
     const fixture = await completedCombinedFixture(1);
     await fixture.vault.replacePairWithHistoryTransactional(
@@ -543,6 +609,74 @@ describe("Obsidian workbench transaction recovery", () => {
         ).resolves.toMatchObject(fixture.unrelatedPair);
       });
     }
+  }
+
+  for (const interruption of ["first", "middle", "last"] as const) {
+    it(`resumes exact combined WAL cleanup after the ${interruption} member deletion throws`, async () => {
+      const fixture = await completedCombinedFixture(1);
+      await fixture.vault.replacePairWithHistoryTransactional(
+        PATHS,
+        fixture.observed.observation,
+        fixture.nextPair,
+        fixture.plan
+      );
+      const receiptPath = fixture.backing
+        .paths()
+        .find((path) => path.endsWith("/receipt.json"));
+      if (!receiptPath) throw new Error("missing combined receipt");
+      const transactionFolder = receiptPath.slice(0, receiptPath.lastIndexOf("/"));
+      const members = fixture.backing
+        .paths()
+        .filter((path) => path.startsWith(`${transactionFolder}/`));
+      const interruptionNumber =
+        interruption === "first"
+          ? 1
+          : interruption === "middle"
+            ? Math.ceil(members.length / 2)
+            : members.length;
+      let deleted = 0;
+      const interrupted = new ObsidianWorkbenchVault(
+        persistentObsidianVault(fixture.backing, {
+          afterDelete(path) {
+            if (!path.startsWith(`${transactionFolder}/`)) return;
+            deleted += 1;
+            if (deleted === interruptionNumber) {
+              throw new Error(`interrupt after ${interruption} WAL member`);
+            }
+          }
+        })
+      );
+
+      await expect(
+        new HistoryRepository(interrupted, 20).list(DOCUMENT_ID)
+      ).rejects.toBeDefined();
+      const fresh = new ObsidianWorkbenchVault(
+        persistentObsidianVault(fixture.backing)
+      );
+      await expect(new HistoryRepository(fresh, 20).list(DOCUMENT_ID)).resolves.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            path: fixture.plan.finalPath,
+            html: fixture.oldPair.html
+          })
+        ])
+      );
+      await expect(fresh.readPair(PATHS)).resolves.toMatchObject(fixture.nextPair);
+      await expect(
+        new HistoryRepository(
+          new ObsidianWorkbenchVault(persistentObsidianVault(fixture.backing)),
+          20
+        ).list(DOCUMENT_ID)
+      ).resolves.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            path: fixture.plan.finalPath,
+            html: fixture.oldPair.html
+          })
+        ])
+      );
+      expect(transactionProofFiles(fixture.backing)).toEqual([]);
+    });
   }
 
   for (const point of [
@@ -926,11 +1060,41 @@ describe("Obsidian workbench transaction recovery", () => {
         plan.observedFiles,
         plan.removals
       )
-    ).resolves.toEqual({ status: "lost" });
+    ).resolves.toMatchObject({
+      status: "created",
+      file: { path: plan.finalPath, html: "newer" }
+    });
     await vault.acknowledgeRetention(plan.provisional);
     await vault.acknowledgeRetention(plan.provisional);
     expect(backing.paths().filter((path) => path.endsWith(".lock"))).toEqual([]);
     expect(backing.read(plan.finalPath)).toBe("newer");
+  });
+
+  it("retries an after-completed history commit through the real repository", async () => {
+    const backing = new PersistentObsidianBacking();
+    const obsidianVault = persistentObsidianVault(backing);
+    const crashAt = new Set<ObsidianWorkbenchCrashPoint>();
+    const vault = new ObsidianWorkbenchVault(obsidianVault, { crashAt });
+    const history = new HistoryRepository(vault, 20, {
+      randomUUID: () => "323e4567-e89b-42d3-a456-426614174000"
+    });
+    const prepared = await history.prepare(
+      DOCUMENT_ID,
+      "newer",
+      new Date("2026-07-14T08:09:10.000Z")
+    );
+    crashAt.add("after-completed");
+    await expect(history.commit(prepared)).rejects.toMatchObject({
+      code: "workbench_simulated_crash"
+    });
+    crashAt.clear();
+
+    const committed = await history.commit(prepared);
+    expect(committed.html).toBe("newer");
+    await expect(history.commit(prepared)).resolves.toEqual(committed);
+    await expect(history.list(DOCUMENT_ID)).resolves.toEqual([committed]);
+    expect(backing.paths().filter((path) => path.endsWith(".lock"))).toEqual([]);
+    expect(transactionProofFiles(backing)).toEqual([]);
   });
 
   it("returns unknown and preserves bytes when a combined receipt is replaced", async () => {
