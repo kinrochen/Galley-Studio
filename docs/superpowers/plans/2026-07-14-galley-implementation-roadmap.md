@@ -1,6 +1,6 @@
 # Galley Multi-Phase Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement the linked plans task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** Phase 1–2 的历史任务保持不变。Phase 3–5 使用 consolidated phase delivery：每阶段一个端到端交付和一个阶段级审查门禁。
 
 **Goal:** Deliver the approved Galley Obsidian plugin as five independently testable increments.
 
@@ -19,7 +19,7 @@
 - The Authoring HTML is independent from its Markdown source after generation.
 - Do not execute Python or shell scripts imported from Skill packages.
 - Generated HTML is untrusted until parsed, sanitized, and validated.
-- Commit after every task and run the task's named verification command before committing.
+- Phase 3–5 不再按模块拆独立任务；阶段内部允许 checkpoint commits，但只按整个 phase 执行交付、审查和完成标记。
 
 ---
 
@@ -27,11 +27,11 @@
 
 1. [Foundation and Skill Runtime](2026-07-14-galley-phase-1-foundation-skill-runtime.md)
 2. [Direct-HTML Generation Loop](2026-07-14-galley-phase-2-generation-loop.md)
-3. [Workbench and HugeRTE Editing](2026-07-14-galley-phase-3-workbench-editor.md)
-4. [Export Profiles and Mobile Preview](2026-07-14-galley-phase-4-export-mobile.md)
-5. [Theme Lab, Skill Import, and Release](2026-07-14-galley-phase-5-theme-lab-release.md)
+3. [Phase 3 integrated desktop workbench](2026-07-14-galley-phases-3-5-consolidated.md#phase-3-delivery--complete-desktop-workbench)
+4. [Phase 4 integrated export and mobile preview](2026-07-14-galley-phases-3-5-consolidated.md#phase-4-delivery--export-profiles-and-mobile-preview)
+5. [Phase 5 integrated Theme Lab and release](2026-07-14-galley-phases-3-5-consolidated.md#phase-5-delivery--theme-lab-skill-packages-acceptance-and-010-release)
 
-Each phase starts only after the preceding plan's final verification passes. Do not parallelize phases because later plans consume concrete interfaces introduced earlier.
+Each phase starts only after the preceding phase-level review and final verification pass. Do not parallelize phases because later plans consume concrete interfaces introduced earlier. Within one phase, bounded workstreams with non-overlapping file ownership may run in parallel under one integrator.
 
 ## Phase Gates
 
@@ -54,11 +54,11 @@ Each phase starts only after the preceding plan's final verification passes. Do 
 | Six built-in themes and direct Authoring HTML prompts | Phase 2 Task 2 |
 | Sanitization, CSS policy, deterministic validation, two repair rounds | Phase 2 Tasks 3–5 |
 | Independent HTML/sidecar artifacts and one-click command | Phase 2 Task 6 |
-| HugeRTE, approved workbench layout, visual component editing | Phase 3 Tasks 2–4 |
-| Autosave, twenty-version history, source-change notice, conflict recovery | Phase 3 Tasks 1 and 5 |
-| Standard web, portable inline, WeChat conversion/repair, rich-text copy | Phase 4 Tasks 1–4 |
-| Scriptless mobile preview without claiming unrelated HTML | Phase 4 Task 5 |
-| Custom theme generation, reference images, preview, validation, persistence | Phase 5 Tasks 1–3 |
-| Theme import/export/disable and merged virtual index | Phase 5 Tasks 1 and 3 |
-| Safe Skill ZIP import and explicit activation | Phase 5 Task 4 |
-| Six-theme acceptance, long article, secret leakage, licenses, release | Phase 5 Tasks 5–6 |
+| HugeRTE, approved workbench layout, visual component editing | Phase 3 integrated delivery |
+| Autosave, twenty-version history, source-change notice, conflict recovery | Phase 3 integrated delivery |
+| Standard web, portable inline, WeChat conversion/repair, rich-text copy | Phase 4 integrated delivery |
+| Scriptless mobile preview without claiming unrelated HTML | Phase 4 integrated delivery |
+| Custom theme generation, reference images, preview, validation, persistence | Phase 5 integrated delivery |
+| Theme import/export/disable and merged virtual index | Phase 5 integrated delivery |
+| Safe Skill ZIP import and explicit activation | Phase 5 integrated delivery |
+| Six-theme acceptance, long article, secret leakage, licenses, release | Phase 5 integrated delivery |
