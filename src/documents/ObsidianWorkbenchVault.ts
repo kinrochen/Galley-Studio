@@ -36,6 +36,7 @@ import {
 import {
   ObsidianVaultFileStore,
   canonicalVaultPath,
+  type VaultCreateExclusiveResult,
   type VaultFileObservation,
   type VaultOwnedFile
 } from "./ObsidianVaultFileStore";
@@ -188,6 +189,7 @@ const CLOSING_ROUTE_ROOT = `${TRANSACTION_ROOT}/closing-route`;
 const CLOSING_ADMISSION_ROOT = `${TRANSACTION_ROOT}/closing-admission`;
 const CLOSING_CLEANED_ROOT = `${TRANSACTION_ROOT}/closing-cleaned`;
 const CLOSING_FINAL_ROOT = `${TRANSACTION_ROOT}/closing-final`;
+const CLOSING_TOMBSTONE_ROOT = `${TRANSACTION_ROOT}/closing-tombstone`;
 const COMBINED_CLEANUP_FILENAMES = [
   "blob-history-plan.json",
   "blob-metadata.json",
@@ -211,6 +213,10 @@ const RETENTION_CONTINUATIONS = new WeakMap<
 const CLOSING_CLEANUP_OWNERSHIP = new WeakMap<
   object,
   Map<string, readonly VaultFileObservation[]>
+>();
+const CLOSING_MARKER_OWNERSHIP = new WeakMap<
+  object,
+  Map<string, Map<string, VaultFileObservation>>
 >();
 
 interface RetentionContinuationData {
@@ -281,6 +287,13 @@ interface ClosingCleanedData extends ClosingRouteData {
   readonly admissionChecksum: string;
 }
 
+interface ClosingTombstoneData extends ClosingRouteData {
+  readonly admissionChecksum: string;
+  readonly cleanedChecksum: string;
+  readonly routeChecksum: string;
+  readonly finalChecksum: string;
+}
+
 export class ObsidianWorkbenchVault
   implements
     GalleyDocumentVault<
@@ -302,6 +315,10 @@ export class ObsidianWorkbenchVault
   readonly #closingCleanupOwnership: Map<
     string,
     readonly VaultFileObservation[]
+  >;
+  readonly #closingMarkerOwnership: Map<
+    string,
+    Map<string, VaultFileObservation>
   >;
 
   constructor(vault: Vault, options: ObsidianWorkbenchVaultOptions = {}) {
@@ -329,6 +346,17 @@ export class ObsidianWorkbenchVault
       );
     }
     this.#closingCleanupOwnership = closingOwnership;
+    let markerOwnership = CLOSING_MARKER_OWNERSHIP.get(
+      this.#files.backingIdentity
+    );
+    if (!markerOwnership) {
+      markerOwnership = new Map();
+      CLOSING_MARKER_OWNERSHIP.set(
+        this.#files.backingIdentity,
+        markerOwnership
+      );
+    }
+    this.#closingMarkerOwnership = markerOwnership;
     this.#options = options;
     this.#transactions = new ObsidianTransactionStore(this.#files, {
       ...(options.randomUUID ? { randomUUID: options.randomUUID } : {}),
@@ -1308,6 +1336,7 @@ export class ObsidianWorkbenchVault
       const transactionId = entry.name.slice(0, -".json".length);
       const current = await this.#files.readTextStable(entry.path, signal);
       if (!current) continue;
+      this.#requireClosingMarkerObservation(transactionId, current);
       let finalized: ClosingFinalData;
       try {
         finalized = await parseClosingFinal(current.text, transactionId);
@@ -1318,6 +1347,34 @@ export class ObsidianWorkbenchVault
         throw new ObsidianWorkbenchRecoveryConflictError(transactionId);
       }
       await this.#finishClosingFinal(finalized, signal);
+    }
+  }
+
+  async #recoverClosedTombstoneFolder(
+    folder: string,
+    expected: (scope: TransactionScope) => boolean,
+    signal?: AbortSignal
+  ): Promise<void> {
+    for (const entry of await this.#files.list(folder, signal)) {
+      if (entry.kind !== "file" || !entry.name.endsWith(".json")) {
+        throw new ObsidianWorkbenchRecoveryConflictError(
+          "closing-tombstone-invalid"
+        );
+      }
+      const transactionId = entry.name.slice(0, -".json".length);
+      const current = await this.#files.readTextStable(entry.path, signal);
+      if (!current) continue;
+      this.#requireClosingMarkerObservation(transactionId, current);
+      let tombstone: ClosingTombstoneData;
+      try {
+        tombstone = await parseClosingTombstone(current.text, transactionId);
+      } catch {
+        throw new ObsidianWorkbenchRecoveryConflictError(transactionId);
+      }
+      if (!expected(tombstone.scope)) {
+        throw new ObsidianWorkbenchRecoveryConflictError(transactionId);
+      }
+      await this.#finishClosingTombstone(tombstone, signal);
     }
   }
 
@@ -1333,6 +1390,7 @@ export class ObsidianWorkbenchVault
       const transactionId = entry.name.slice(0, -".json".length);
       const current = await this.#files.readTextStable(entry.path, signal);
       if (!current) continue;
+      this.#requireClosingMarkerObservation(transactionId, current);
       let route: ClosingRouteData;
       try {
         route = await parseClosingRoute(current.text, transactionId);
@@ -1341,6 +1399,15 @@ export class ObsidianWorkbenchVault
       }
       if (!expected(route.scope)) {
         throw new ObsidianWorkbenchRecoveryConflictError(transactionId);
+      }
+      const tombstone = await this.#readClosingTombstone(
+        route.scope,
+        transactionId,
+        signal
+      );
+      if (tombstone) {
+        await this.#finishClosingTombstone(tombstone, signal);
+        continue;
       }
       const proof = await this.#readClosingProof(
         transactionId,
@@ -1378,6 +1445,7 @@ export class ObsidianWorkbenchVault
         signal
       );
       if (!current) continue;
+      this.#requireClosingMarkerObservation(transactionId, current);
       let parsed: ClosingFinalData;
       try {
         parsed = await parseClosingFinal(current.text, transactionId, scope);
@@ -1412,6 +1480,7 @@ export class ObsidianWorkbenchVault
         signal
       );
       if (!current) continue;
+      this.#requireClosingMarkerObservation(finalized.transactionId, current);
       let parsed: ClosingFinalData;
       try {
         parsed = await parseClosingFinal(
@@ -1428,7 +1497,12 @@ export class ObsidianWorkbenchVault
       observations.push(current);
     }
     for (const observed of observations) {
-      if (!sameFile(await this.#files.readTextStable(observed.path, signal), observed)) {
+      if (
+        !sameCleanupObservation(
+          await this.#files.readTextStable(observed.path, signal),
+          observed
+        )
+      ) {
         throw new ObsidianWorkbenchRecoveryConflictError(finalized.transactionId);
       }
     }
@@ -1449,6 +1523,7 @@ export class ObsidianWorkbenchVault
       if (!current) {
         throw new ObsidianWorkbenchRecoveryConflictError(finalized.transactionId);
       }
+      this.#requireClosingMarkerObservation(finalized.transactionId, current);
       let parsed: ClosingRouteData;
       try {
         parsed = await parseClosingRoute(
@@ -1466,7 +1541,12 @@ export class ObsidianWorkbenchVault
       observations.push(current);
     }
     for (const observed of observations) {
-      if (!sameFile(await this.#files.readTextStable(observed.path, signal), observed)) {
+      if (
+        !sameCleanupObservation(
+          await this.#files.readTextStable(observed.path, signal),
+          observed
+        )
+      ) {
         throw new ObsidianWorkbenchRecoveryConflictError(finalized.transactionId);
       }
     }
@@ -1488,78 +1568,180 @@ export class ObsidianWorkbenchVault
     ) {
       throw new ObsidianWorkbenchRecoveryConflictError(finalized.transactionId);
     }
+    const tombstone = await this.#readClosingTombstone(
+      finalized.scope,
+      finalized.transactionId,
+      signal
+    );
+    if (tombstone) {
+      if (
+        tombstone.proofChecksum !== finalized.proofChecksum ||
+        tombstone.finalChecksum !== finalized.checksum
+      ) {
+        throw new ObsidianWorkbenchRecoveryConflictError(
+          finalized.transactionId
+        );
+      }
+      await this.#finishClosingTombstone(tombstone, signal);
+      return;
+    }
     const proof = await this.#readClosingProof(
       finalized.transactionId,
       finalized.scope,
       signal
     );
-    if (proof && proof.checksum !== finalized.proofChecksum) {
+    if (!proof || proof.checksum !== finalized.proofChecksum) {
       throw new ObsidianWorkbenchRecoveryConflictError(finalized.transactionId);
     }
-    const alreadyFinalized = await this.#hasBothClosingFinalMarkers(
-      finalized,
-      signal
-    );
-    if (!alreadyFinalized) {
-      if (!proof) {
-        throw new ObsidianWorkbenchRecoveryConflictError(finalized.transactionId);
-      }
-      const admission = await this.#readClosingAdmission(proof, signal);
-      if (
-        !admission ||
-        !(await this.#readClosingCleaned(proof, admission, signal)) ||
-        !(await this.#transactionFolderEmpty(proof.transactionId, signal))
-      ) {
-        throw new ObsidianWorkbenchRecoveryConflictError(finalized.transactionId);
-      }
-      await this.#ensureClosingRoutes(proof, signal);
-      const drift = await this.#closingProofDrift(proof, signal);
-      if (drift) {
-        await this.#writeClosingQuarantine(proof, drift, signal);
-        throw new ObsidianWorkbenchRecoveryConflictError(finalized.transactionId);
-      }
+    const admission = await this.#requireClosingAdmission(proof, signal);
+    const cleaned = await this.#readClosingCleaned(proof, admission, signal);
+    if (
+      !cleaned ||
+      !(await this.#transactionFolderEmpty(proof.transactionId, signal))
+    ) {
+      throw new ObsidianWorkbenchRecoveryConflictError(finalized.transactionId);
+    }
+    const drift = await this.#closingProofDrift(proof, signal);
+    if (drift) {
+      await this.#writeClosingQuarantine(proof, drift, signal);
+      throw new ObsidianWorkbenchRecoveryConflictError(finalized.transactionId);
+    }
+    if (!(await this.#hasBothClosingFinalMarkers(finalized, signal))) {
       finalized = await this.#createClosingFinalMarkers(proof, signal);
     }
     await this.#readBothClosingFinalMarkers(finalized, signal);
     const routes = await this.#readBothClosingRoutesForFinal(finalized, signal);
-    if (routes.proofChecksum !== finalized.proofChecksum) {
-      throw new ObsidianWorkbenchRecoveryConflictError(finalized.transactionId);
-    }
-    await this.#releaseScopeLocks(
-      finalized.scope,
-      finalized.transactionId,
-      signal
-    );
-    await this.#removeScopeIndexesFor(
-      finalized.scope,
-      finalized.transactionId,
-      signal
-    );
-    if (proof) {
-      await this.#removeClosingCleaned(proof, signal);
-      await this.#removeClosingAdmission(proof, signal);
-      await this.#removeClosingProof(proof, signal);
-    } else if (
-      (await this.#files.readTextStable(
-        closingCleanedPath(finalized.transactionId),
-        signal
-      )) ||
-      (await this.#files.readTextStable(
-        closingAdmissionPath(finalized.transactionId),
-        signal
-      ))
+    if (
+      routes.proofChecksum !== finalized.proofChecksum ||
+      routes.checksum !== admission.routeChecksum
     ) {
       throw new ObsidianWorkbenchRecoveryConflictError(finalized.transactionId);
     }
-    this.#forgetDeletionOwnership(finalized.transactionId);
-    this.#forgetRetentionContinuation(finalized.transactionId);
-    this.#closingCleanupOwnership.delete(finalized.transactionId);
+    const created = await this.#createClosingTombstones(
+      proof,
+      admission,
+      cleaned,
+      routes,
+      finalized,
+      signal
+    );
+    await this.#finishClosingTombstone(created, signal);
+  }
+
+  async #finishClosingTombstone(
+    tombstone: ClosingTombstoneData,
+    signal?: AbortSignal
+  ): Promise<void> {
+    await this.#readBothClosingTombstones(tombstone, signal);
+    if (
+      await this.#files.readTextStable(
+        closingQuarantinePath(tombstone.transactionId),
+        signal
+      )
+    ) {
+      throw new ObsidianWorkbenchRecoveryConflictError(tombstone.transactionId);
+    }
+    const admissionObservation = await this.#files.readTextStable(
+      closingAdmissionPath(tombstone.transactionId),
+      signal
+    );
+    if (!admissionObservation) {
+      throw new ObsidianWorkbenchRecoveryConflictError(tombstone.transactionId);
+    }
+    this.#requireClosingMarkerObservation(
+      tombstone.transactionId,
+      admissionObservation
+    );
+    let admission: ClosingAdmissionData;
+    try {
+      admission = await parseClosingAdmission(
+        admissionObservation.text,
+        tombstone.transactionId,
+        tombstone.scope,
+        tombstone.proofChecksum
+      );
+    } catch {
+      throw new ObsidianWorkbenchRecoveryConflictError(tombstone.transactionId);
+    }
+    const cleanedObservation = await this.#files.readTextStable(
+      closingCleanedPath(tombstone.transactionId),
+      signal
+    );
+    if (!cleanedObservation) {
+      throw new ObsidianWorkbenchRecoveryConflictError(tombstone.transactionId);
+    }
+    this.#requireClosingMarkerObservation(
+      tombstone.transactionId,
+      cleanedObservation
+    );
+    let cleaned: ClosingCleanedData;
+    try {
+      cleaned = await parseClosingCleaned(
+        cleanedObservation.text,
+        tombstone.transactionId,
+        tombstone.scope,
+        tombstone.proofChecksum,
+        admission.checksum
+      );
+    } catch {
+      throw new ObsidianWorkbenchRecoveryConflictError(tombstone.transactionId);
+    }
+    const finalized: ClosingFinalData = {
+      schemaVersion: 1,
+      transactionId: tombstone.transactionId,
+      scope: tombstone.scope,
+      proofChecksum: tombstone.proofChecksum,
+      checksum: tombstone.finalChecksum
+    };
+    await this.#readBothClosingFinalMarkers(finalized, signal);
+    const routes = await this.#readBothClosingRoutesForFinal(finalized, signal);
+    if (
+      admission.checksum !== tombstone.admissionChecksum ||
+      cleaned.checksum !== tombstone.cleanedChecksum ||
+      admission.routeChecksum !== routes.checksum ||
+      routes.proofChecksum !== tombstone.proofChecksum ||
+      routes.checksum !== tombstone.routeChecksum ||
+      !(await this.#transactionFolderEmpty(tombstone.transactionId, signal))
+    ) {
+      throw new ObsidianWorkbenchRecoveryConflictError(tombstone.transactionId);
+    }
+    const proof = await this.#readClosingProof(
+      tombstone.transactionId,
+      tombstone.scope,
+      signal
+    );
+    if (proof && proof.checksum !== tombstone.proofChecksum) {
+      throw new ObsidianWorkbenchRecoveryConflictError(tombstone.transactionId);
+    }
+    await this.#releaseClosedScopeLocks(
+      tombstone.scope,
+      tombstone.transactionId,
+      signal
+    );
+    await this.#removeScopeIndexesFor(
+      tombstone.scope,
+      tombstone.transactionId,
+      signal
+    );
+    if (proof) await this.#removeClosingProof(proof, signal);
+    this.#forgetDeletionOwnership(tombstone.transactionId);
+    this.#forgetRetentionContinuation(tombstone.transactionId);
+    this.#closingCleanupOwnership.delete(tombstone.transactionId);
   }
 
   async #recoverClosingTombstone(
     index: ScopeIndexData,
     signal?: AbortSignal
   ): Promise<boolean> {
+    const tombstone = await this.#readClosingTombstone(
+      index.scope,
+      index.transactionId,
+      signal
+    );
+    if (tombstone) {
+      await this.#finishClosingTombstone(tombstone, signal);
+      return true;
+    }
     const finalized = await this.#readClosingFinal(
       index.scope,
       index.transactionId,
@@ -1647,6 +1829,12 @@ export class ObsidianWorkbenchVault
     paths: ArtifactPaths,
     signal?: AbortSignal
   ): Promise<void> {
+    await this.#recoverClosedTombstoneFolder(
+      await closingTombstonePairFolder(paths),
+      (scope) =>
+        scope.pair.html === paths.html && scope.pair.sidecar === paths.sidecar,
+      signal
+    );
     await this.#recoverClosingFinalFolder(
       await closingFinalPairFolder(paths),
       (scope) =>
@@ -1669,6 +1857,11 @@ export class ObsidianWorkbenchVault
     signal?: AbortSignal
   ): Promise<void> {
     const { documentId } = historyFolder(folder);
+    await this.#recoverClosedTombstoneFolder(
+      await closingTombstoneHistoryFolder(documentId),
+      (scope) => scope.historyDocumentId === documentId,
+      signal
+    );
     await this.#recoverClosingFinalFolder(
       await closingFinalHistoryFolder(documentId),
       (scope) => scope.historyDocumentId === documentId,
@@ -2113,11 +2306,29 @@ export class ObsidianWorkbenchVault
     proof: ClosingProofData,
     signal?: AbortSignal
   ): Promise<void> {
-    const admission = await this.#ensureClosingRoutes(proof, signal);
+    const rawCleaned = await this.#files.readTextStable(
+      closingCleanedPath(proof.transactionId),
+      signal
+    );
+    const rawAdmission = await this.#files.readTextStable(
+      closingAdmissionPath(proof.transactionId),
+      signal
+    );
+    if (rawCleaned && !rawAdmission) {
+      throw new ObsidianWorkbenchRecoveryConflictError(proof.transactionId);
+    }
+    const admission = rawAdmission
+      ? await this.#requireClosingAdmission(proof, signal)
+      : await this.#admitClosingRoutes(proof, signal);
     if (await this.#readClosingQuarantine(proof, signal)) {
       throw new ObsidianWorkbenchRecoveryConflictError(proof.transactionId);
     }
-    let cleaned = await this.#readClosingCleaned(proof, admission, signal);
+    let cleaned = rawCleaned
+      ? await this.#readClosingCleaned(proof, admission, signal)
+      : null;
+    if (rawCleaned && !cleaned) {
+      throw new ObsidianWorkbenchRecoveryConflictError(proof.transactionId);
+    }
     if (!cleaned) {
       const drift = await this.#closingProofDrift(proof, signal);
       if (drift) {
@@ -2129,7 +2340,7 @@ export class ObsidianWorkbenchVault
     } else if (!(await this.#transactionFolderEmpty(proof.transactionId, signal))) {
       throw new ObsidianWorkbenchRecoveryConflictError(proof.transactionId);
     }
-    const verifiedAdmission = await this.#ensureClosingRoutes(proof, signal);
+    const verifiedAdmission = await this.#requireClosingAdmission(proof, signal);
     const verifiedCleaned = await this.#readClosingCleaned(
       proof,
       verifiedAdmission,
@@ -2158,6 +2369,21 @@ export class ObsidianWorkbenchVault
     proof: ClosingProofData,
     signal?: AbortSignal
   ): Promise<void> {
+    const currentMembers = await this.#preflightClosingOwned(proof, signal);
+    const folder = `${TRANSACTION_ROOT}/${proof.transactionId}`;
+    for (const current of currentMembers) {
+      await this.#removeExact(current, proof.transactionId, signal);
+    }
+    if ((await this.#files.list(folder, signal)).length !== 0) {
+      throw new ObsidianWorkbenchRecoveryConflictError(proof.transactionId);
+    }
+    this.#closingCleanupOwnership.delete(proof.transactionId);
+  }
+
+  async #preflightClosingOwned(
+    proof: ClosingProofData,
+    signal?: AbortSignal
+  ): Promise<VaultFileObservation[]> {
     const folder = `${TRANSACTION_ROOT}/${proof.transactionId}`;
     const ownership = this.#closingCleanupOwnership.get(proof.transactionId);
     if (!ownership || ownership.length !== proof.cleanup.length) {
@@ -2175,13 +2401,13 @@ export class ObsidianWorkbenchVault
       if (
         !evidence ||
         !current ||
-        !sameFile(current, owned) ||
+        !sameCleanupObservation(current, owned) ||
         current.sha256 !== evidence.sha256 ||
         current.byteLength !== evidence.byteLength
       ) {
         throw new ObsidianWorkbenchRecoveryConflictError(proof.transactionId);
       }
-      currentMembers.push(current);
+      currentMembers.push(owned);
     }
     if (
       entries.some(
@@ -2190,15 +2416,9 @@ export class ObsidianWorkbenchVault
     ) {
       throw new ObsidianWorkbenchRecoveryConflictError(proof.transactionId);
     }
-    for (const current of currentMembers.sort((left, right) =>
+    return currentMembers.sort((left, right) =>
       compareText(left.path, right.path)
-    )) {
-      await this.#removeExact(current, proof.transactionId, signal);
-    }
-    if ((await this.#files.list(folder, signal)).length !== 0) {
-      throw new ObsidianWorkbenchRecoveryConflictError(proof.transactionId);
-    }
-    this.#closingCleanupOwnership.delete(proof.transactionId);
+    );
   }
 
   async #finishClosingProof(
@@ -2208,7 +2428,7 @@ export class ObsidianWorkbenchVault
     if (await this.#readClosingQuarantine(proof, signal)) {
       throw new ObsidianWorkbenchRecoveryConflictError(proof.transactionId);
     }
-    const admittedBeforeLockRelease = await this.#ensureClosingRoutes(
+    const admittedBeforeLockRelease = await this.#requireClosingAdmission(
       proof,
       signal
     );
@@ -2234,7 +2454,7 @@ export class ObsidianWorkbenchVault
       await this.#writeClosingQuarantine(proof, drift, signal);
       throw new ObsidianWorkbenchRecoveryConflictError(proof.transactionId);
     }
-    const admission = await this.#ensureClosingRoutes(proof, signal);
+    const admission = await this.#requireClosingAdmission(proof, signal);
     const cleaned = await this.#readClosingCleaned(proof, admission, signal);
     if (
       admission.checksum !== admittedBeforeLockRelease.checksum ||
@@ -2247,18 +2467,29 @@ export class ObsidianWorkbenchVault
     await this.#readBothClosingFinalMarkers(finalized, signal);
     const routes = await this.#readBothClosingRoutesForFinal(finalized, signal);
     const stableAdmission = await this.#readClosingAdmission(proof, signal);
+    const stableCleaned = stableAdmission
+      ? await this.#readClosingCleaned(proof, stableAdmission, signal)
+      : null;
     if (
       routes.proofChecksum !== proof.checksum ||
       !stableAdmission ||
       stableAdmission.checksum !== admission.checksum ||
-      !(await this.#readClosingCleaned(proof, stableAdmission, signal)) ||
+      !stableCleaned ||
+      stableCleaned.checksum !== cleaned.checksum ||
       !(await this.#transactionFolderEmpty(proof.transactionId, signal))
     ) {
       throw new ObsidianWorkbenchRecoveryConflictError(proof.transactionId);
     }
+    const tombstone = await this.#createClosingTombstones(
+      proof,
+      stableAdmission,
+      stableCleaned,
+      routes,
+      finalized,
+      signal
+    );
+    await this.#readBothClosingTombstones(tombstone, signal);
     await this.#removeScopeIndexesFor(proof.scope, proof.transactionId, signal);
-    await this.#removeClosingCleaned(proof, signal);
-    await this.#removeClosingAdmission(proof, signal);
     await this.#removeClosingProof(proof, signal);
     await this.#crashPointFor("after-recovery-index-cleanup", proof.transactionId);
     await this.#crashPointFor("after-recovery-proof-cleanup", proof.transactionId);
@@ -2333,7 +2564,12 @@ export class ObsidianWorkbenchVault
       cleanupOwnership.push(current);
     }
     for (const owned of cleanupOwnership) {
-      if (!sameFile(await this.#files.readTextStable(owned.path, signal), owned)) {
+      if (
+        !sameCleanupObservation(
+          await this.#files.readTextStable(owned.path, signal),
+          owned
+        )
+      ) {
         throw new ObsidianWorkbenchRecoveryConflictError(record.id);
       }
     }
@@ -2364,11 +2600,13 @@ export class ObsidianWorkbenchVault
     };
     await this.#files.ensureFolder(CLOSING_ROOT, signal);
     const path = closingProofPath(record.id);
+    const proofText = serializeCanonical(expected);
     const result = await this.#files.createExclusive(
       path,
-      serializeCanonical(expected),
+      proofText,
       signal
     );
+    this.#rememberClosingCreateResult(record.id, path, proofText, result);
     if (result.status === "ambiguous") {
       throw new ObsidianWorkbenchAmbiguousError(record.id, result);
     }
@@ -2376,13 +2614,14 @@ export class ObsidianWorkbenchVault
     if (result.status === "collision") {
       const existing = await this.#files.readTextStable(path, signal);
       if (!existing) throw new ObsidianWorkbenchRecoveryConflictError(record.id);
+      this.#requireClosingMarkerObservation(record.id, existing);
       const parsed = await parseClosingProof(existing.text, record.id, record.scope);
       if (canonicalJson(parsed) !== canonicalJson(expected)) {
         throw new ObsidianWorkbenchRecoveryConflictError(record.id);
       }
       proof = parsed;
     }
-    await this.#ensureClosingRoutes(proof, signal);
+    await this.#admitClosingRoutes(proof, signal);
     return proof;
   }
 
@@ -2403,10 +2642,17 @@ export class ObsidianWorkbenchVault
     for (const folder of await closingRouteFolders(proof.scope)) {
       await this.#files.ensureFolder(folder, signal);
       const path = `${folder}/${proof.transactionId}.json`;
+      const routeText = serializeCanonical(expected);
       const result = await this.#files.createExclusive(
         path,
-        serializeCanonical(expected),
+        routeText,
         signal
+      );
+      this.#rememberClosingCreateResult(
+        proof.transactionId,
+        path,
+        routeText,
+        result
       );
       if (result.status === "ambiguous") {
         throw new ObsidianWorkbenchAmbiguousError(proof.transactionId, result);
@@ -2416,6 +2662,7 @@ export class ObsidianWorkbenchVault
         if (!current) {
           throw new ObsidianWorkbenchRecoveryConflictError(proof.transactionId);
         }
+        this.#requireClosingMarkerObservation(proof.transactionId, current);
         const parsed = await parseClosingRoute(
           current.text,
           proof.transactionId,
@@ -2429,10 +2676,18 @@ export class ObsidianWorkbenchVault
     return expected;
   }
 
-  async #ensureClosingRoutes(
+  async #admitClosingRoutes(
     proof: ClosingProofData,
     signal?: AbortSignal
   ): Promise<ClosingAdmissionData> {
+    if (
+      await this.#files.readTextStable(
+        closingCleanedPath(proof.transactionId),
+        signal
+      )
+    ) {
+      throw new ObsidianWorkbenchRecoveryConflictError(proof.transactionId);
+    }
     const existingAdmission = await this.#readClosingAdmission(proof, signal);
     if (existingAdmission) {
       const routes = await this.#readBothClosingRoutes(proof, signal);
@@ -2441,6 +2696,7 @@ export class ObsidianWorkbenchVault
       }
       return existingAdmission;
     }
+    await this.#requireCompleteClosingWal(proof, signal);
     await this.#createClosingRoutes(proof, signal);
     const routes = await this.#readBothClosingRoutes(proof, signal);
     const unsigned = {
@@ -2456,10 +2712,17 @@ export class ObsidianWorkbenchVault
     };
     await this.#files.ensureFolder(CLOSING_ADMISSION_ROOT, signal);
     const path = closingAdmissionPath(proof.transactionId);
+    const admissionText = serializeCanonical(expected);
     const result = await this.#files.createExclusive(
       path,
-      serializeCanonical(expected),
+      admissionText,
       signal
+    );
+    this.#rememberClosingCreateResult(
+      proof.transactionId,
+      path,
+      admissionText,
+      result
     );
     if (result.status === "ambiguous") {
       throw new ObsidianWorkbenchAmbiguousError(proof.transactionId, result);
@@ -2470,6 +2733,7 @@ export class ObsidianWorkbenchVault
       if (!current) {
         throw new ObsidianWorkbenchRecoveryConflictError(proof.transactionId);
       }
+      this.#requireClosingMarkerObservation(proof.transactionId, current);
       admission = await parseClosingAdmission(
         current.text,
         proof.transactionId,
@@ -2482,6 +2746,46 @@ export class ObsidianWorkbenchVault
     }
     const verifiedRoutes = await this.#readBothClosingRoutes(proof, signal);
     if (verifiedRoutes.checksum !== admission.routeChecksum) {
+      throw new ObsidianWorkbenchRecoveryConflictError(proof.transactionId);
+    }
+    return admission;
+  }
+
+  async #requireCompleteClosingWal(
+    proof: ClosingProofData,
+    signal?: AbortSignal
+  ): Promise<void> {
+    const folder = `${TRANSACTION_ROOT}/${proof.transactionId}`;
+    const expected = new Map(proof.cleanup.map((item) => [item.path, item]));
+    const entries = await this.#files.list(folder, signal);
+    if (
+      entries.length !== expected.size ||
+      entries.some(({ path, kind }) => kind !== "file" || !expected.has(path))
+    ) {
+      throw new ObsidianWorkbenchRecoveryConflictError(proof.transactionId);
+    }
+    for (const evidence of expected.values()) {
+      const current = await this.#files.readTextStable(evidence.path, signal);
+      if (
+        !current ||
+        current.sha256 !== evidence.sha256 ||
+        current.byteLength !== evidence.byteLength
+      ) {
+        throw new ObsidianWorkbenchRecoveryConflictError(proof.transactionId);
+      }
+    }
+  }
+
+  async #requireClosingAdmission(
+    proof: ClosingProofData,
+    signal?: AbortSignal
+  ): Promise<ClosingAdmissionData> {
+    const admission = await this.#readClosingAdmission(proof, signal);
+    if (!admission) {
+      throw new ObsidianWorkbenchRecoveryConflictError(proof.transactionId);
+    }
+    const routes = await this.#readBothClosingRoutes(proof, signal);
+    if (routes.checksum !== admission.routeChecksum) {
       throw new ObsidianWorkbenchRecoveryConflictError(proof.transactionId);
     }
     return admission;
@@ -2501,6 +2805,7 @@ export class ObsidianWorkbenchVault
       if (!current) {
         throw new ObsidianWorkbenchRecoveryConflictError(proof.transactionId);
       }
+      this.#requireClosingMarkerObservation(proof.transactionId, current);
       let route: ClosingRouteData;
       try {
         route = await parseClosingRoute(
@@ -2521,7 +2826,12 @@ export class ObsidianWorkbenchVault
       observations.push(current);
     }
     for (const observed of observations) {
-      if (!sameFile(await this.#files.readTextStable(observed.path, signal), observed)) {
+      if (
+        !sameCleanupObservation(
+          await this.#files.readTextStable(observed.path, signal),
+          observed
+        )
+      ) {
         throw new ObsidianWorkbenchRecoveryConflictError(proof.transactionId);
       }
     }
@@ -2540,6 +2850,7 @@ export class ObsidianWorkbenchVault
       signal
     );
     if (!current) return null;
+    this.#requireClosingMarkerObservation(proof.transactionId, current);
     try {
       return await parseClosingAdmission(
         current.text,
@@ -2550,22 +2861,6 @@ export class ObsidianWorkbenchVault
     } catch {
       throw new ObsidianWorkbenchRecoveryConflictError(proof.transactionId);
     }
-  }
-
-  async #removeClosingAdmission(
-    proof: ClosingProofData,
-    signal?: AbortSignal
-  ): Promise<void> {
-    const path = closingAdmissionPath(proof.transactionId);
-    const current = await this.#files.readTextStable(path, signal);
-    if (!current) return;
-    await parseClosingAdmission(
-      current.text,
-      proof.transactionId,
-      proof.scope,
-      proof.checksum
-    );
-    await this.#removeExact(current, proof.transactionId, signal);
   }
 
   async #createClosingCleaned(
@@ -2586,10 +2881,17 @@ export class ObsidianWorkbenchVault
     };
     await this.#files.ensureFolder(CLOSING_CLEANED_ROOT, signal);
     const path = closingCleanedPath(proof.transactionId);
+    const cleanedText = serializeCanonical(expected);
     const result = await this.#files.createExclusive(
       path,
-      serializeCanonical(expected),
+      cleanedText,
       signal
+    );
+    this.#rememberClosingCreateResult(
+      proof.transactionId,
+      path,
+      cleanedText,
+      result
     );
     if (result.status === "ambiguous") {
       throw new ObsidianWorkbenchAmbiguousError(proof.transactionId, result);
@@ -2599,6 +2901,7 @@ export class ObsidianWorkbenchVault
       if (!current) {
         throw new ObsidianWorkbenchRecoveryConflictError(proof.transactionId);
       }
+      this.#requireClosingMarkerObservation(proof.transactionId, current);
       return parseClosingCleaned(
         current.text,
         proof.transactionId,
@@ -2620,6 +2923,7 @@ export class ObsidianWorkbenchVault
       signal
     );
     if (!current) return null;
+    this.#requireClosingMarkerObservation(proof.transactionId, current);
     try {
       return await parseClosingCleaned(
         current.text,
@@ -2633,27 +2937,6 @@ export class ObsidianWorkbenchVault
     }
   }
 
-  async #removeClosingCleaned(
-    proof: ClosingProofData,
-    signal?: AbortSignal
-  ): Promise<void> {
-    const path = closingCleanedPath(proof.transactionId);
-    const current = await this.#files.readTextStable(path, signal);
-    if (!current) return;
-    const admission = await this.#readClosingAdmission(proof, signal);
-    if (!admission) {
-      throw new ObsidianWorkbenchRecoveryConflictError(proof.transactionId);
-    }
-    await parseClosingCleaned(
-      current.text,
-      proof.transactionId,
-      proof.scope,
-      proof.checksum,
-      admission.checksum
-    );
-    await this.#removeExact(current, proof.transactionId, signal);
-  }
-
   async #readClosingProof(
     transactionId: string,
     scope: TransactionScope,
@@ -2664,6 +2947,7 @@ export class ObsidianWorkbenchVault
       signal
     );
     if (!current) return null;
+    this.#requireClosingMarkerObservation(transactionId, current);
     try {
       return await parseClosingProof(current.text, transactionId, scope);
     } catch {
@@ -2680,6 +2964,7 @@ export class ObsidianWorkbenchVault
       signal
     );
     if (!current) return;
+    this.#requireClosingMarkerObservation(proof.transactionId, current);
     const parsed = await parseClosingProof(
       current.text,
       proof.transactionId,
@@ -2779,10 +3064,17 @@ export class ObsidianWorkbenchVault
     for (const folder of await closingFinalFolders(proof.scope)) {
       await this.#files.ensureFolder(folder, signal);
       const path = `${folder}/${proof.transactionId}.json`;
+      const finalText = serializeCanonical(expected);
       const result = await this.#files.createExclusive(
         path,
-        serializeCanonical(expected),
+        finalText,
         signal
+      );
+      this.#rememberClosingCreateResult(
+        proof.transactionId,
+        path,
+        finalText,
+        result
       );
       if (result.status === "ambiguous") {
         throw new ObsidianWorkbenchAmbiguousError(proof.transactionId, result);
@@ -2790,6 +3082,7 @@ export class ObsidianWorkbenchVault
       if (result.status === "collision") {
         const current = await this.#files.readTextStable(path, signal);
         if (!current) throw new ObsidianWorkbenchRecoveryConflictError(proof.transactionId);
+        this.#requireClosingMarkerObservation(proof.transactionId, current);
         const parsed = await parseClosingFinal(
           current.text,
           proof.transactionId,
@@ -2801,6 +3094,149 @@ export class ObsidianWorkbenchVault
       }
     }
     return expected;
+  }
+
+  async #createClosingTombstones(
+    proof: ClosingProofData,
+    admission: ClosingAdmissionData,
+    cleaned: ClosingCleanedData,
+    route: ClosingRouteData,
+    finalized: ClosingFinalData,
+    signal?: AbortSignal
+  ): Promise<ClosingTombstoneData> {
+    const unsigned = {
+      schemaVersion: 1 as const,
+      transactionId: proof.transactionId,
+      scope: proof.scope,
+      proofChecksum: proof.checksum,
+      admissionChecksum: admission.checksum,
+      cleanedChecksum: cleaned.checksum,
+      routeChecksum: route.checksum,
+      finalChecksum: finalized.checksum
+    };
+    const expected = {
+      ...unsigned,
+      checksum: await sha256Text(canonicalJson(unsigned))
+    };
+    const tombstoneText = serializeCanonical(expected);
+    for (const folder of await closingTombstoneFolders(proof.scope)) {
+      await this.#files.ensureFolder(folder, signal);
+      const path = `${folder}/${proof.transactionId}.json`;
+      const result = await this.#files.createExclusive(
+        path,
+        tombstoneText,
+        signal
+      );
+      this.#rememberClosingCreateResult(
+        proof.transactionId,
+        path,
+        tombstoneText,
+        result
+      );
+      if (result.status === "ambiguous") {
+        throw new ObsidianWorkbenchAmbiguousError(proof.transactionId, result);
+      }
+      if (result.status === "collision") {
+        const current = await this.#files.readTextStable(path, signal);
+        if (!current) {
+          throw new ObsidianWorkbenchRecoveryConflictError(proof.transactionId);
+        }
+        this.#requireClosingMarkerObservation(proof.transactionId, current);
+        const parsed = await parseClosingTombstone(
+          current.text,
+          proof.transactionId,
+          proof.scope
+        );
+        if (parsed.checksum !== expected.checksum) {
+          throw new ObsidianWorkbenchRecoveryConflictError(proof.transactionId);
+        }
+      }
+    }
+    await this.#readBothClosingTombstones(expected, signal);
+    return expected;
+  }
+
+  async #readClosingTombstone(
+    scope: TransactionScope,
+    transactionId: string,
+    signal?: AbortSignal
+  ): Promise<ClosingTombstoneData | null> {
+    let found: ClosingTombstoneData | null = null;
+    for (const folder of await closingTombstoneFolders(scope)) {
+      const current = await this.#files.readTextStable(
+        `${folder}/${transactionId}.json`,
+        signal
+      );
+      if (!current) continue;
+      this.#requireClosingMarkerObservation(transactionId, current);
+      let parsed: ClosingTombstoneData;
+      try {
+        parsed = await parseClosingTombstone(
+          current.text,
+          transactionId,
+          scope
+        );
+      } catch {
+        throw new ObsidianWorkbenchRecoveryConflictError(transactionId);
+      }
+      if (found && found.checksum !== parsed.checksum) {
+        throw new ObsidianWorkbenchRecoveryConflictError(transactionId);
+      }
+      found = parsed;
+    }
+    return found;
+  }
+
+  async #readBothClosingTombstones(
+    tombstone: ClosingTombstoneData,
+    signal?: AbortSignal
+  ): Promise<void> {
+    const observations: VaultFileObservation[] = [];
+    for (const folder of await closingTombstoneFolders(tombstone.scope)) {
+      const current = await this.#files.readTextStable(
+        `${folder}/${tombstone.transactionId}.json`,
+        signal
+      );
+      if (!current) {
+        throw new ObsidianWorkbenchRecoveryConflictError(
+          tombstone.transactionId
+        );
+      }
+      this.#requireClosingMarkerObservation(tombstone.transactionId, current);
+      let parsed: ClosingTombstoneData;
+      try {
+        parsed = await parseClosingTombstone(
+          current.text,
+          tombstone.transactionId,
+          tombstone.scope
+        );
+      } catch {
+        throw new ObsidianWorkbenchRecoveryConflictError(
+          tombstone.transactionId
+        );
+      }
+      if (parsed.checksum !== tombstone.checksum) {
+        throw new ObsidianWorkbenchRecoveryConflictError(
+          tombstone.transactionId
+        );
+      }
+      observations.push(current);
+    }
+    for (const observed of observations) {
+      if (
+        !sameCleanupObservation(
+          await this.#files.readTextStable(observed.path, signal),
+          observed
+        )
+      ) {
+        throw new ObsidianWorkbenchRecoveryConflictError(
+          tombstone.transactionId
+        );
+      }
+    }
+    if (observations.length !== 2) {
+      throw new ObsidianWorkbenchRecoveryConflictError(tombstone.transactionId);
+    }
   }
 
   async #transactionFolderEmpty(
@@ -3318,6 +3754,47 @@ export class ObsidianWorkbenchVault
     this.#retentionContinuations.delete(transactionId);
   }
 
+  #rememberClosingMarker(
+    transactionId: string,
+    marker: VaultFileObservation
+  ): void {
+    let markers = this.#closingMarkerOwnership.get(transactionId);
+    if (!markers) {
+      markers = new Map();
+      this.#closingMarkerOwnership.set(transactionId, markers);
+    }
+    markers.set(marker.path, marker);
+  }
+
+  #rememberClosingCreateResult(
+    transactionId: string,
+    path: string,
+    text: string,
+    result: VaultCreateExclusiveResult
+  ): void {
+    const marker =
+      result.status === "created"
+        ? result.file
+        : result.status === "ambiguous"
+          ? result.observation
+          : null;
+    if (marker && marker.path === path && marker.text === text) {
+      this.#rememberClosingMarker(transactionId, marker);
+    }
+  }
+
+  #requireClosingMarkerObservation(
+    transactionId: string,
+    current: VaultFileObservation
+  ): void {
+    const original = this.#closingMarkerOwnership
+      .get(transactionId)
+      ?.get(current.path);
+    if (original && !sameCleanupObservation(current, original)) {
+      throw new ObsidianWorkbenchRecoveryConflictError(transactionId);
+    }
+  }
+
   #retentionFinalMatches(
     transactionId: string,
     current: VaultFileObservation | null,
@@ -3450,6 +3927,21 @@ export class ObsidianWorkbenchVault
       if (current.text !== transactionId) {
         throw new ObsidianWorkbenchRecoveryConflictError(transactionId);
       }
+      await this.#removeExact(current, transactionId, signal);
+    }
+  }
+
+  async #releaseClosedScopeLocks(
+    scope: TransactionScope,
+    transactionId: string,
+    signal?: AbortSignal
+  ): Promise<void> {
+    const kinds: ("pair" | "history")[] = ["pair"];
+    if (scope.historyDocumentId !== undefined) kinds.unshift("history");
+    for (const kind of kinds) {
+      const path = await lockPathForScope(scope, kind);
+      const current = await this.#files.readTextStable(path, signal);
+      if (!current || current.text !== transactionId) continue;
       await this.#removeExact(current, transactionId, signal);
     }
   }
@@ -3792,6 +4284,30 @@ async function closingFinalHistoryFolder(documentId: string): Promise<string> {
   return `${CLOSING_FINAL_ROOT}/history-${await sha256Text(documentId)}`;
 }
 
+async function closingTombstoneFolders(
+  scope: TransactionScope
+): Promise<string[]> {
+  const result = [await closingTombstonePairFolder(scope.pair)];
+  if (scope.historyDocumentId !== undefined) {
+    result.push(await closingTombstoneHistoryFolder(scope.historyDocumentId));
+  }
+  return result.sort(compareText);
+}
+
+async function closingTombstonePairFolder(
+  paths: ArtifactPaths
+): Promise<string> {
+  return `${CLOSING_TOMBSTONE_ROOT}/pair-${await sha256Text(
+    canonicalJson({ html: paths.html, sidecar: paths.sidecar })
+  )}`;
+}
+
+async function closingTombstoneHistoryFolder(
+  documentId: string
+): Promise<string> {
+  return `${CLOSING_TOMBSTONE_ROOT}/history-${await sha256Text(documentId)}`;
+}
+
 async function signedScopeIndex(
   transactionId: string,
   scope: TransactionScope
@@ -4087,6 +4603,60 @@ async function parseClosingCleaned(
   return result;
 }
 
+async function parseClosingTombstone(
+  text: string,
+  expectedId: string,
+  expectedScope?: TransactionScope
+): Promise<ClosingTombstoneData> {
+  const value = parseObject(text);
+  exactKeys(value, [
+    "schemaVersion",
+    "transactionId",
+    "scope",
+    "proofChecksum",
+    "admissionChecksum",
+    "cleanedChecksum",
+    "routeChecksum",
+    "finalChecksum",
+    "checksum"
+  ]);
+  const scope = parseClosingScope(value.scope);
+  const proofChecksum = stringValue(value.proofChecksum);
+  const admissionChecksum = stringValue(value.admissionChecksum);
+  const cleanedChecksum = stringValue(value.cleanedChecksum);
+  const routeChecksum = stringValue(value.routeChecksum);
+  const finalChecksum = stringValue(value.finalChecksum);
+  const checksum = stringValue(value.checksum);
+  const unsigned = {
+    schemaVersion: 1 as const,
+    transactionId: expectedId,
+    scope,
+    proofChecksum,
+    admissionChecksum,
+    cleanedChecksum,
+    routeChecksum,
+    finalChecksum
+  };
+  const result = { ...unsigned, checksum };
+  if (
+    value.schemaVersion !== 1 ||
+    value.transactionId !== expectedId ||
+    (expectedScope !== undefined &&
+      canonicalJson(scope) !== canonicalJson(expectedScope)) ||
+    !SHA256.test(proofChecksum) ||
+    !SHA256.test(admissionChecksum) ||
+    !SHA256.test(cleanedChecksum) ||
+    !SHA256.test(routeChecksum) ||
+    !SHA256.test(finalChecksum) ||
+    !SHA256.test(checksum) ||
+    checksum !== (await sha256Text(canonicalJson(unsigned))) ||
+    text !== serializeCanonical(result)
+  ) {
+    throw new TransactionRecordInvalidError();
+  }
+  return result;
+}
+
 async function parseClosingReceipt(
   input: unknown,
   expectedId: string
@@ -4300,6 +4870,19 @@ function sameFile(
     left.text === right.text &&
     left.sha256 === right.sha256 &&
     left.byteLength === right.byteLength
+  );
+}
+
+function sameCleanupObservation(
+  left: VaultFileObservation | null,
+  right: VaultFileObservation
+): boolean {
+  return (
+    left !== null &&
+    sameFile(left, right) &&
+    left.stat.ctime === right.stat.ctime &&
+    left.stat.mtime === right.stat.mtime &&
+    left.stat.size === right.stat.size
   );
 }
 

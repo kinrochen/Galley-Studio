@@ -285,6 +285,12 @@ export class ObsidianVaultFileStore {
     const current = await this.readTextStable(path, signal);
     if (!sameOwnedFile(current, owned)) return { status: "conflict" };
     throwIfAborted(signal);
+    if (
+      this.vault.getFileByPath(path) !== owned.identity ||
+      !sameStat(owned.identity.stat, owned.stat)
+    ) {
+      return { status: "conflict" };
+    }
     try {
       await this.vault.delete(owned.identity);
     } catch (error) {
@@ -462,7 +468,19 @@ function sameOwnedFile(
     current.identity === expected.identity &&
     current.sha256 === expected.sha256 &&
     current.byteLength === expected.byteLength &&
-    current.text === expected.text
+    current.text === expected.text &&
+    sameStat(current.stat, expected.stat)
+  );
+}
+
+function sameStat(
+  current: FileStats | VaultFileStatEvidence,
+  expected: VaultFileStatEvidence
+): boolean {
+  return (
+    current.ctime === expected.ctime &&
+    current.mtime === expected.mtime &&
+    current.size === expected.size
   );
 }
 
