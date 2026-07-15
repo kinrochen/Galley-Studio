@@ -9,8 +9,16 @@
     "embed:hugerte": "node tools/embed-hugerte-assets.mjs",
     "embed:gzh-skill": "node tools/embed-gzh-skill.mjs",
     "test": "vitest run",
+    "test:acceptance": "vitest run tests/acceptance",
     "test:watch": "vitest",
-    "test:typecheck": "tsc -p tsconfig.test.json --noEmit"
+    "test:typecheck": "tsc -p tsconfig.test.json --noEmit",
+    "benchmark:long": "node tools/benchmark-long.mjs",
+    "audit:licenses": "node tools/audit-licenses.mjs",
+    "audit:package": "node tools/audit-package.mjs",
+    "audit:secrets": "node tools/audit-secrets.mjs",
+    "audit:mobile": "node tools/audit-mobile-boundary.mjs",
+    "audit:static": "npm run audit:secrets && npm run audit:mobile",
+    "release": "npm run build && npm run audit:package && npm run audit:static && node tools/build-release.mjs"
   },
   "dependencies": {
     "dompurify": "3.4.12",

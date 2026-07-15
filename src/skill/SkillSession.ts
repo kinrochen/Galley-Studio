@@ -4,7 +4,8 @@ import type {
   ChatRequest,
   ChatTool,
   ChatToolCall,
-  ChatTurnResult
+  ChatTurnResult,
+  ChatUserContent
 } from "../ai/AiProtocol";
 import type { ProviderCapabilities } from "../ai/CapabilityProbe";
 import type { SkillLoadAudit, SkillLoadMode } from "./SkillAudit";
@@ -219,12 +220,36 @@ export class SkillSession {
   }
 
   async completeScoped(prompt: string, signal: AbortSignal): Promise<string> {
+    return this.#completeScopedContent(prompt, signal);
+  }
+
+  async completeScopedWithImage(
+    prompt: string,
+    imageDataUrl: string,
+    signal: AbortSignal
+  ): Promise<string> {
+    if (!/^data:image\/(?:png|jpeg|webp);base64,[a-z0-9+/]+=*$/iu.test(imageDataUrl)) {
+      throw invalidToolResponse();
+    }
+    return this.#completeScopedContent(
+      [
+        { type: "text", text: prompt },
+        { type: "image_url", image_url: { url: imageDataUrl, detail: "high" } }
+      ],
+      signal
+    );
+  }
+
+  async #completeScopedContent(
+    content: ChatUserContent,
+    signal: AbortSignal
+  ): Promise<string> {
     await this.bootstrap(signal);
     await this.ensureFiles([...this.#requiredFiles], signal);
     this.#throwIfAborted(signal);
 
     let messages = this.#cloneMessages(this.#loadMessages);
-    messages.push({ role: "user", content: prompt });
+    messages.push({ role: "user", content });
     const seenToolCallIds = this.#toolCallIds(messages);
     if (!this.#capabilities.tools) {
       const result = await this.#request(false, signal, messages);
@@ -244,7 +269,7 @@ export class SkillSession {
         this.#capabilities.tools = false;
         this.#injectFiles([...this.#requiredFiles], true);
         messages = this.#cloneMessages(this.#loadMessages);
-        messages.push({ role: "user", content: prompt });
+        messages.push({ role: "user", content });
         const retry = await this.#request(false, signal, messages);
         this.#appendAssistant(retry, [messages]);
         return this.#acceptFinalContent(retry);
@@ -455,18 +480,8 @@ export class SkillSession {
 
   #appendLoadMessage(message: ChatRequest["messages"][number]): void {
     this.#messages.push(message);
-    this.#loadMessages.push(
-      message.role === "tool"
-        ? { ...message }
-        : {
-            ...message,
-            ...(message.toolCalls === undefined
-              ? {}
-              : {
-                  toolCalls: message.toolCalls.map((call) => ({ ...call }))
-                })
-          }
-    );
+    const clone = this.#cloneMessages([message])[0];
+    if (clone) this.#loadMessages.push(clone);
   }
 
   #persistReads(
@@ -493,7 +508,7 @@ export class SkillSession {
     for (const message of messages) {
       if (message.role === "tool") {
         ids.add(message.toolCallId);
-      } else {
+      } else if (message.role === "assistant") {
         for (const call of message.toolCalls ?? []) {
           ids.add(call.id);
         }
@@ -508,6 +523,18 @@ export class SkillSession {
     return messages.map((message) =>
       message.role === "tool"
         ? { ...message }
+        : message.role === "user"
+          ? {
+              ...message,
+              content:
+                typeof message.content === "string"
+                  ? message.content
+                  : message.content.map((part) =>
+                      part.type === "text"
+                        ? { ...part }
+                        : { ...part, image_url: { ...part.image_url } }
+                    ) as unknown as ChatUserContent
+            }
         : {
             ...message,
             ...(message.toolCalls === undefined

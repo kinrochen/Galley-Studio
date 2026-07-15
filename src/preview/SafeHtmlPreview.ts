@@ -13,7 +13,9 @@ const PREVIEW_CSP = [
 ].join("; ");
 
 export function safePreviewHtml(html: string): string {
-  const sanitized = sanitizeAuthoringDocument(html).html;
+  const sanitized = sanitizeAuthoringDocument(html, {
+    additionalAttributes: ["data-galley-theme-block"]
+  }).html;
   const document = new DOMParser().parseFromString(sanitized, "text/html");
   for (const unsafe of document.querySelectorAll(
     "script,iframe,frame,frameset,object,embed,form,base"

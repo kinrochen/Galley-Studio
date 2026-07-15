@@ -453,3 +453,35 @@
     transition: none;
   }
 }
+
+.galley-theme-lab {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-rows: auto auto auto auto minmax(18rem, 1fr);
+  height: 100%;
+  padding: 1rem;
+}
+
+.galley-theme-lab__description {
+  min-height: 7rem;
+  resize: vertical;
+  width: 100%;
+}
+
+.galley-theme-lab__actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.galley-theme-lab__issues {
+  color: var(--text-error);
+  margin: 0;
+}
+
+.galley-theme-lab__preview,
+.galley-theme-lab__preview iframe {
+  border: 0;
+  height: 100%;
+  min-height: 18rem;
+  width: 100%;
+}

@@ -196,7 +196,14 @@ export const HUGERTE_VALID_ELEMENTS = [
   })
 ].join(",");
 
-export function sanitizeAuthoringDocument(html: string): SanitizedDocument {
+export interface AuthoringSanitizerOptions {
+  readonly additionalAttributes?: readonly string[];
+}
+
+export function sanitizeAuthoringDocument(
+  html: string,
+  options: AuthoringSanitizerOptions = {}
+): SanitizedDocument {
   const source = html.trim();
   locateHtmlDocument(source, {
     requireHead: false,
@@ -205,11 +212,19 @@ export function sanitizeAuthoringDocument(html: string): SanitizedDocument {
   const parsed = new DOMParser().parseFromString(source, "text/html");
   const removed: SanitizedDocument["removed"] = [];
 
-  preprocessDocument(parsed, removed);
+  const additionalAttributes = validateAdditionalAttributes(
+    options.additionalAttributes ?? []
+  );
+  preprocessDocument(parsed, removed, additionalAttributes);
 
   const canonicalInput = `<!DOCTYPE html>${parsed.documentElement.outerHTML}`;
   const purifier = createDOMPurify(window as unknown as WindowLike);
-  const clean = purifier.sanitize(canonicalInput, PURIFY_CONFIG);
+  const clean = purifier.sanitize(canonicalInput, {
+    ...PURIFY_CONFIG,
+    ...(additionalAttributes.size === 0
+      ? {}
+      : { ADD_ATTR: [...additionalAttributes] })
+  });
   recordPurifyRemovals(purifier.removed, removed);
 
   const cleanDocument = new DOMParser().parseFromString(clean, "text/html");
@@ -226,7 +241,8 @@ export function sanitizeAuthoringDocument(html: string): SanitizedDocument {
 
 function preprocessDocument(
   document: Document,
-  removed: SanitizedDocument["removed"]
+  removed: SanitizedDocument["removed"],
+  additionalAttributes: ReadonlySet<string>
 ): void {
   for (const meta of document.querySelectorAll("meta[http-equiv]")) {
     meta.remove();
@@ -237,7 +253,7 @@ function preprocessDocument(
     const tag = element.localName.toLowerCase();
     for (const attribute of [...element.attributes]) {
       const name = attribute.name.toLowerCase();
-      if (!isAllowedAttribute(tag, name)) {
+      if (!isAllowedAttribute(tag, name, additionalAttributes)) {
         element.removeAttribute(attribute.name);
         removed.push({ kind: "attribute", name });
         continue;
@@ -271,13 +287,31 @@ function preprocessDocument(
   }
 }
 
-function isAllowedAttribute(tag: string, name: string): boolean {
+function isAllowedAttribute(
+  tag: string,
+  name: string,
+  additionalAttributes: ReadonlySet<string>
+): boolean {
   return (
     GLOBAL_ATTRIBUTES.has(name) ||
     GALLEY_ATTRIBUTES.has(name) ||
+    additionalAttributes.has(name) ||
     /^aria-[a-z0-9-]+$/.test(name) ||
     Boolean(TAG_ATTRIBUTES[tag]?.has(name))
   );
+}
+
+function validateAdditionalAttributes(
+  attributes: readonly string[]
+): ReadonlySet<string> {
+  const validated = new Set<string>();
+  for (const attribute of attributes) {
+    if (!/^data-galley-[a-z0-9-]+$/u.test(attribute)) {
+      throw new Error("Additional sanitizer attributes must be Galley data attributes.");
+    }
+    validated.add(attribute);
+  }
+  return validated;
 }
 
 function secureLinkTarget(

@@ -63,6 +63,10 @@ import {
   type GalleyWorkbenchViewServices,
   type WorkbenchDocument
 } from "./workbench/GalleyWorkbenchView";
+import {
+  GALLEY_THEME_LAB_VIEW_TYPE,
+  ThemeLabView
+} from "./theme-lab/ThemeLabView";
 
 export default class GalleyPlugin extends Plugin {
   settings: GalleySettings = normalizeSettings(undefined);
@@ -102,6 +106,10 @@ export default class GalleyPlugin extends Plugin {
     this.#registerGalleyFileMenu();
     if (this.canGenerate) {
       this.registerView(
+        GALLEY_THEME_LAB_VIEW_TYPE,
+        (leaf) => this.#createThemeLabView(leaf)
+      );
+      this.registerView(
         GALLEY_WORKBENCH_VIEW_TYPE,
         (leaf) => this.#createWorkbenchView(leaf)
       );
@@ -124,6 +132,41 @@ export default class GalleyPlugin extends Plugin {
         id: "generate-current-article",
         name: "Galley: AI layout current article",
         callback: () => this.runGenerateCurrentArticle()
+      });
+      this.addCommand({
+        id: "open-theme-lab",
+        name: "Galley: Open AI Theme Lab",
+        callback: () => this.openThemeLab()
+      });
+      this.addCommand({
+        id: "theme-import-zip",
+        name: "Galley: Import custom theme ZIP",
+        callback: () => this.importCustomTheme()
+      });
+      this.addCommand({
+        id: "theme-export-zip",
+        name: "Galley: Export custom theme ZIP",
+        callback: () => this.exportCustomTheme()
+      });
+      this.addCommand({
+        id: "theme-toggle-enabled",
+        name: "Galley: Enable or disable custom theme",
+        callback: () => this.toggleCustomTheme()
+      });
+      this.addCommand({
+        id: "theme-delete",
+        name: "Galley: Delete custom theme",
+        callback: () => this.deleteCustomTheme()
+      });
+      this.addCommand({
+        id: "skill-import-zip",
+        name: "Galley: Import Skill ZIP",
+        callback: () => this.importSkillPackage()
+      });
+      this.addCommand({
+        id: "skill-activate-imported",
+        name: "Galley: Activate imported Skill",
+        callback: () => this.activateImportedSkill()
       });
     }
   }
@@ -221,6 +264,133 @@ export default class GalleyPlugin extends Plugin {
     await openGalleyPreview(workspace, path);
   }
 
+  async openThemeLab(): Promise<void> {
+    if (!this.capabilities.canGenerate) return;
+    const leaf = this.app.workspace.getLeaf("tab");
+    await leaf.setViewState({ type: GALLEY_THEME_LAB_VIEW_TYPE, active: true });
+    this.app.workspace.revealLeaf(leaf);
+  }
+
+  async importCustomTheme(): Promise<void> {
+    if (!this.capabilities.canImportSkill) return;
+    const bytes = await chooseZip();
+    if (!bytes) return;
+    try {
+      const id = await (await this.#themeRuntime()).importThemeArchive(this.app, bytes);
+      new Notice(`Imported custom theme: ${id}`);
+    } catch (error) {
+      new Notice(safeOperationMessage(error, "Theme import failed."));
+    }
+  }
+
+  async exportCustomTheme(): Promise<void> {
+    if (!this.capabilities.canImportSkill) return;
+    const id = window.prompt("Custom theme id to export:")?.trim();
+    if (!id) return;
+    try {
+      const artifact = await (await this.#themeRuntime()).exportThemeArchive(
+        this.app,
+        id
+      );
+      downloadBytes(artifact.filename, artifact.bytes);
+      new Notice(`Exported custom theme: ${id}`);
+    } catch (error) {
+      new Notice(safeOperationMessage(error, "Theme export failed."));
+    }
+  }
+
+  async toggleCustomTheme(): Promise<void> {
+    if (!this.capabilities.canImportSkill) return;
+    try {
+      const runtime = await this.#themeRuntime();
+      const themes = await runtime.listCustomThemes(this.app);
+      const id = window.prompt(
+        `Custom theme id to toggle:\n${themes
+          .map(({ id: themeId, name, enabled }) => `${themeId} — ${name} (${enabled ? "enabled" : "disabled"})`)
+          .join("\n")}`
+      )?.trim();
+      if (!id) return;
+      const theme = themes.find(({ id: themeId }) => themeId === id);
+      if (!theme) throw new Error(`Custom theme not found: ${id}`);
+      await runtime.setCustomThemeEnabled(this.app, id, !theme.enabled);
+      new Notice(`${theme.enabled ? "Disabled" : "Enabled"} custom theme: ${id}`);
+    } catch (error) {
+      new Notice(safeOperationMessage(error, "Theme update failed."));
+    }
+  }
+
+  async deleteCustomTheme(): Promise<void> {
+    if (!this.capabilities.canImportSkill) return;
+    try {
+      const runtime = await this.#themeRuntime();
+      const themes = await runtime.listCustomThemes(this.app);
+      const id = window.prompt(
+        `Custom theme id to delete:\n${themes.map(({ id: themeId, name }) => `${themeId} — ${name}`).join("\n")}`
+      )?.trim();
+      if (!id) return;
+      if (!themes.some(({ id: themeId }) => themeId === id)) {
+        throw new Error(`Custom theme not found: ${id}`);
+      }
+      if (!window.confirm(`Delete custom theme “${id}”?`)) return;
+      if (!(await runtime.deleteCustomTheme(this.app, id))) {
+        throw new Error(`Custom theme not found: ${id}`);
+      }
+      new Notice(`Deleted custom theme: ${id}`);
+    } catch (error) {
+      new Notice(safeOperationMessage(error, "Theme deletion failed."));
+    }
+  }
+
+  async importSkillPackage(): Promise<void> {
+    if (!this.capabilities.canImportSkill) return;
+    const bytes = await chooseZip();
+    if (!bytes) return;
+    try {
+      const version = await (await this.#themeRuntime()).importSkillArchive(
+        this.app,
+        bytes
+      );
+      new Notice(
+        `Imported Skill ${version}. It remains inactive until explicitly activated.`
+      );
+    } catch (error) {
+      new Notice(safeOperationMessage(error, "Skill import failed."));
+    }
+  }
+
+  async activateImportedSkill(): Promise<void> {
+    if (!this.capabilities.canImportSkill) return;
+    try {
+      const runtime = await this.#themeRuntime();
+      const versions = await runtime.listImportedSkills(this.app);
+      const version = window.prompt(
+        `Imported Skill version to activate:\n${versions.join("\n")}`
+      )?.trim();
+      if (!version) return;
+      await runtime.activateImportedSkill(
+        this.app,
+        version,
+        this.settings.activeSkillVersion,
+        async (activeSkillVersion) => {
+          const nextSettings = normalizeSettings({
+            ...this.settings,
+            activeSkillVersion
+          });
+          await this.saveData(nextSettings);
+          this.settings = nextSettings;
+        }
+      );
+      new Notice(`Activated Skill: ${version}`);
+    } catch (error) {
+      new Notice(
+        safeOperationMessage(
+          error,
+          "Skill activation failed; the previous version remains active."
+        )
+      );
+    }
+  }
+
   #createPreviewView(leaf: WorkspaceLeaf): GalleyPreviewView {
     const resourceResolver = new EditorResourceResolver((path) => {
       const file = this.app.vault.getFileByPath(path);
@@ -233,6 +403,35 @@ export default class GalleyPlugin extends Plugin {
       },
       resourceResolver
     });
+  }
+
+  #createThemeLabView(leaf: WorkspaceLeaf): ThemeLabView {
+    return new ThemeLabView(leaf, {
+      supportsVision: async () => {
+        try {
+          return (await this.#themeRuntime()).supportsThemeVision(
+            this.app,
+            this.settings
+          );
+        } catch {
+          return false;
+        }
+      },
+      generate: async (input, signal) =>
+        (await this.#themeRuntime()).generateThemeDraft(
+          this.app,
+          this.settings,
+          input,
+          signal
+        ),
+      save: async (draft) =>
+        (await this.#themeRuntime()).saveThemeDraft(this.app, draft),
+      report: (message) => new Notice(message)
+    });
+  }
+
+  #themeRuntime(): Promise<typeof import("./platform/DesktopThemeRuntime")> {
+    return import("./platform/DesktopThemeRuntime");
   }
 
   #createWorkbenchView(leaf: WorkspaceLeaf): GalleyWorkbenchView {
@@ -646,4 +845,49 @@ function diagnosticSummary(result: ConnectionDiagnosticResult): string {
     return `Galley diagnostic failed (${result.errorCode ?? "diagnostic_failed"}).`;
   }
   return `Galley diagnostic passed: Skill loaded via ${result.skillLoadMode}.`;
+}
+
+function chooseZip(): Promise<Uint8Array | null> {
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".zip,application/zip";
+    input.addEventListener(
+      "change",
+      () => {
+        const file = input.files?.[0];
+        if (!file) {
+          resolve(null);
+          return;
+        }
+        void file.arrayBuffer().then(
+          (buffer) => resolve(new Uint8Array(buffer)),
+          () => resolve(null)
+        );
+      },
+      { once: true }
+    );
+    input.click();
+  });
+}
+
+function downloadBytes(filename: string, bytes: Uint8Array): void {
+  const buffer = bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength
+  ) as ArrayBuffer;
+  const url = URL.createObjectURL(
+    new Blob([buffer], { type: "application/zip" })
+  );
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+function safeOperationMessage(error: unknown, fallback: string): string {
+  if (!(error instanceof Error)) return fallback;
+  const message = error.message.replace(/[\r\n]+/gu, " ").slice(0, 200);
+  return message || fallback;
 }

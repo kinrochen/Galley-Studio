@@ -14,6 +14,19 @@ function cloneMessage(message: ChatMessage): ChatMessage {
   if (message.role === "tool") {
     return { ...message };
   }
+  if (message.role === "user") {
+    return {
+      ...message,
+      content:
+        typeof message.content === "string"
+          ? message.content
+          : message.content.map((part) =>
+              part.type === "text"
+                ? { ...part }
+                : { ...part, image_url: { ...part.image_url } }
+            ) as unknown as typeof message.content
+    };
+  }
   return {
     ...message,
     ...(message.toolCalls === undefined
@@ -78,7 +91,15 @@ export class ScriptedChatClient implements ChatClient {
   messagesText(): string {
     return this.requests
       .flatMap((request) => request.messages)
-      .map((message) => message.content)
+      .map((message) =>
+        typeof message.content === "string"
+          ? message.content
+          : message.content
+              .map((part) =>
+                part.type === "text" ? part.text : part.image_url.url
+              )
+              .join("\n")
+      )
       .join("\n");
   }
 

@@ -1,8 +1,29 @@
+export interface ChatTextContentPart {
+  readonly type: "text";
+  readonly text: string;
+}
+
+export interface ChatImageContentPart {
+  readonly type: "image_url";
+  readonly image_url: {
+    readonly url: string;
+    readonly detail?: "auto" | "low" | "high";
+  };
+}
+
+export type ChatUserContent =
+  | string
+  | readonly [ChatTextContentPart, ChatImageContentPart];
+
 export type ChatMessage =
   | {
-      role: "system" | "user" | "assistant";
+      role: "system" | "assistant";
       content: string;
       toolCalls?: ChatToolCall[];
+    }
+  | {
+      role: "user";
+      content: ChatUserContent;
     }
   | { role: "tool"; content: string; toolCallId: string };
 

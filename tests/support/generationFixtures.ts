@@ -137,6 +137,9 @@ export function lastUserPrompt(request: ChatRequest): string {
   if (!message) {
     throw new Error("Request does not contain a user prompt");
   }
+  if (typeof message.content !== "string") {
+    throw new Error("Request contains a multimodal user prompt");
+  }
   return message.content;
 }
 
