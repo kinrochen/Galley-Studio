@@ -1,4 +1,5 @@
 import { safeCanonicalJson } from "../generation/PromptPayload";
+import { parseHtmlFragment } from "../dom/HtmlFragment";
 import { sanitizeAuthoringDocument } from "../security/AuthoringSanitizer";
 import type { SkillLoadAudit } from "../skill/SkillAudit";
 import { validateWechatHtml, type WechatValidationIssue } from "./WechatValidator";
@@ -89,16 +90,15 @@ function repairPrompt(
 
 function extractSingleSection(response: string): string | null {
   const trimmed = response.trim().replace(/^```(?:html)?\s*/iu, "").replace(/\s*```$/u, "").trim();
-  const template = document.createElement("template");
-  template.innerHTML = trimmed;
+  const fragment = parseHtmlFragment(trimmed);
   if (
-    template.content.children.length !== 1 ||
-    template.content.firstElementChild?.localName !== "section" ||
-    [...template.content.childNodes].some(
+    fragment.children.length !== 1 ||
+    fragment.firstElementChild?.localName !== "section" ||
+    [...fragment.childNodes].some(
       (node) => node.nodeType === Node.TEXT_NODE && Boolean(node.textContent?.trim())
     )
   ) return null;
-  return template.content.firstElementChild.outerHTML;
+  return fragment.firstElementChild.outerHTML;
 }
 
 function sanitizeRepairCandidate(response: string): string | null {

@@ -10,7 +10,7 @@ const requiredReleaseFiles = [
   "THIRD_PARTY_NOTICES.md"
 ] as const;
 
-describe("0.2.1 release configuration", () => {
+describe("0.2.2 release configuration", () => {
   it("exposes real acceptance, benchmark, license, and release gates", () => {
     const packageJson = JSON.parse(readFileSync(resolve("package.json"), "utf8")) as {
       scripts?: Record<string, string>;
@@ -42,7 +42,7 @@ describe("0.2.1 release configuration", () => {
     expect(notices).toContain("Mozilla Public License Version 2.0");
     expect(notices).toContain("Copyright");
     expect(JSON.parse(readFileSync(resolve("manifest.json"), "utf8"))).toMatchObject({
-      version: "0.2.1",
+      version: "0.2.2",
       id: "galley-studio",
       name: "Galley Studio",
       author: "Kinrochen",
@@ -54,7 +54,7 @@ describe("0.2.1 release configuration", () => {
   it("declares the exact release ZIP allowlist", () => {
     const builder = readFileSync(resolve("tools/build-release.mjs"), "utf8");
     for (const file of requiredReleaseFiles) expect(builder).toContain(file);
-    expect(builder).toContain("release/galley-studio-0.2.1.zip");
+    expect(builder).toContain("release/galley-studio-0.2.2.zip");
   });
 
   it("documents desktop/mobile boundaries, secrets, Skill ZIP safety, and AGPL source obligations", () => {

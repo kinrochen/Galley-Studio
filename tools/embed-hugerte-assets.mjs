@@ -14,6 +14,9 @@ const contentPath = new URL(
   import.meta.url
 );
 const outputPath = new URL("../src/generated/hugerteSkin.ts", import.meta.url);
+const stylesPath = new URL("../styles.css", import.meta.url);
+const SKIN_START = "/* BEGIN GALLEY STUDIO BUNDLED HUGERTE SKIN */";
+const SKIN_END = "/* END GALLEY STUDIO BUNDLED HUGERTE SKIN */";
 const requestedVersion = process.argv
   .find((argument) => argument.startsWith("--expected-version="))
   ?.slice("--expected-version=".length);
@@ -48,6 +51,17 @@ const generated = [
 ].join("\n");
 
 await writeFile(outputPath, generated, "utf8");
+const currentStyles = await readFile(stylesPath, "utf8");
+const skinSection = new RegExp(
+  `${escapeRegExp(SKIN_START)}[\\s\\S]*?${escapeRegExp(SKIN_END)}\\n?`,
+  "u"
+);
+const baseStyles = currentStyles.replace(skinSection, "").trimEnd();
+await writeFile(
+  stylesPath,
+  `${baseStyles}\n\n${SKIN_START}\n${skinCss}${SKIN_END}\n`,
+  "utf8"
+);
 process.stdout.write(
   `Embedded hugerte@${PINNED_VERSION} CSS from ${root} (${skinCss.length} UI bytes, ${contentCss.length} content bytes)\n`
 );
@@ -71,4 +85,8 @@ function normalizeCss(source, sourcePath) {
 
 function sha256(value) {
   return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }

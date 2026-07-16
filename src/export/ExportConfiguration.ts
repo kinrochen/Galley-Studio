@@ -45,13 +45,13 @@ export function normalizeExportConfiguration(value: unknown): ExportConfiguratio
   const input = typeof value === "object" && value !== null
     ? value as Record<string, unknown>
     : {};
-  const profile = String(input.profileId ?? "standard-web") as ExportProfileId;
+  const profile = readString(input.profileId, "standard-web") as ExportProfileId;
   const configuration = {
-    id: String(input.id ?? "").trim(),
-    name: String(input.name ?? "").trim(),
+    id: readString(input.id).trim(),
+    name: readString(input.name).trim(),
     profileId: profile,
-    outputFolder: String(input.outputFolder ?? "").trim().replace(/^\/+|\/+$/gu, ""),
-    fileNameTemplate: String(input.fileNameTemplate ?? "").trim()
+    outputFolder: readString(input.outputFolder).trim().replace(/^\/+|\/+$/gu, ""),
+    fileNameTemplate: readString(input.fileNameTemplate).trim()
   };
   if (!CONFIG_ID.test(configuration.id)) {
     throw new Error("Export configuration id must be a lowercase slug.");
@@ -74,6 +74,10 @@ export function normalizeExportConfiguration(value: unknown): ExportConfiguratio
     throw new Error("Export filename template must be a safe HTML basename containing {stem}.");
   }
   return Object.freeze(configuration);
+}
+
+function readString(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value : fallback;
 }
 
 export function normalizeExportConfigurations(value: unknown): readonly ExportConfiguration[] {

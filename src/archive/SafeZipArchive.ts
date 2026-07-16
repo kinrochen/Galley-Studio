@@ -257,6 +257,7 @@ function inflateEntry(
   let actualLength = 0;
   let crc = 0xffffffff;
   let failure: Error | null = null;
+  const currentFailure = (): Error | null => failure;
   const consume = (chunk: Uint8Array): void => {
     if (failure) throw failure;
     const nextLength = actualLength + chunk.byteLength;
@@ -276,19 +277,22 @@ function inflateEntry(
     if (entry.method === 0) {
       for (let offset = 0; offset < compressed.byteLength; offset += 64 * 1024) {
         consume(compressed.subarray(offset, Math.min(offset + 64 * 1024, compressed.byteLength)));
-        if (failure) throw failure;
+        const error = currentFailure();
+        if (error) throw new Error(error.message, { cause: error });
       }
     } else {
       const inflater = new Inflate((chunk) => consume(chunk));
       for (let offset = 0; offset < compressed.byteLength; offset += INFLATE_INPUT_CHUNK_BYTES) {
         const end = Math.min(offset + INFLATE_INPUT_CHUNK_BYTES, compressed.byteLength);
         inflater.push(compressed.subarray(offset, end), end === compressed.byteLength);
-        if (failure) throw failure;
+        const error = currentFailure();
+        if (error) throw new Error(error.message, { cause: error });
       }
       if (compressed.byteLength === 0) inflater.push(compressed, true);
     }
   } catch (error) {
-    if (failure) throw failure;
+    const current = currentFailure();
+    if (current) throw new Error(current.message, { cause: current });
     throw new Error(
       `ZIP entry could not be safely inflated: ${error instanceof Error ? error.message : "invalid stream"}`
     );

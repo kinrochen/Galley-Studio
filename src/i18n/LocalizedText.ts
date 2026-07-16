@@ -31,7 +31,7 @@ export const ENGLISH_LOCALIZED_TEXT: LocalizedText = Object.freeze({
   t: (key: MessageKey, parameters?: TranslationParameters) => {
     const template = EN[key];
     if (!parameters) return template;
-    return template.replace(/\{([A-Za-z][A-Za-z0-9_]*)\}/g, (token, name) =>
+    return template.replace(/\{([A-Za-z][A-Za-z0-9_]*)\}/g, (token: string, name: string) =>
       Object.hasOwn(parameters, name) ? String(parameters[name]) : token
     );
   },

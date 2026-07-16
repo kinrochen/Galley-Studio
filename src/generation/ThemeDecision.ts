@@ -104,7 +104,7 @@ function parseStrictStringObject(source: string): Map<string, string> {
   let offset = 0;
   const values = new Map<string, string>();
   const whitespace = (): void => {
-    while (/[\u0009\u000a\u000d\u0020]/u.test(source[offset] ?? "")) {
+    while (isJsonWhitespace(source[offset] ?? "")) {
       offset += 1;
     }
   };
@@ -173,6 +173,10 @@ function parseStrictStringObject(source: string): Map<string, string> {
     throw themeInvalid();
   }
   return values;
+}
+
+function isJsonWhitespace(value: string): boolean {
+  return value === "\t" || value === "\n" || value === "\r" || value === " ";
 }
 
 function nonEmpty(value: string | undefined): string | undefined {

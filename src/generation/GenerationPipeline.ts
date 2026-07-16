@@ -1,5 +1,9 @@
 import { AiError } from "../ai/AiError";
 import { assertShellFreeHtmlFragment } from "../documents/HtmlShellScanner";
+import {
+  parseHtmlFragment,
+  serializeHtmlFragment
+} from "../dom/HtmlFragment";
 import type { SkillLoadAudit } from "../skill/SkillAudit";
 import type { SkillSession } from "../skill/SkillSession";
 import {
@@ -369,19 +373,22 @@ function parseBatchFragment(
       parsed.body.innerHTML;
   }
 
-  const template = document.createElement("template");
-  template.innerHTML = source;
-  const rootArticle = singleElementRoot(template.content, "article");
+  let fragment = parseHtmlFragment(source);
+  const rootArticle = singleElementRoot(fragment, "article");
   if (rootArticle) {
-    template.innerHTML = rootArticle.innerHTML;
+    const unwrapped = document.createDocumentFragment();
+    unwrapped.append(
+      ...[...rootArticle.childNodes].map((node) => node.cloneNode(true))
+    );
+    fragment = unwrapped;
   }
-  if (template.content.querySelector("article")) {
+  if (fragment.querySelector("article")) {
     throw new Error("Long batch output contains a nested article root");
   }
-  assertShellFreeHtmlFragment(template.innerHTML, "body");
+  assertShellFreeHtmlFragment(serializeHtmlFragment(fragment), "body");
 
   const markerElements = [
-    ...template.content.querySelectorAll("[data-galley-source]")
+    ...fragment.querySelectorAll("[data-galley-source]")
   ];
   const actual = markerElements.map(
     (element) => element.getAttribute("data-galley-source") ?? ""
@@ -389,7 +396,7 @@ function parseBatchFragment(
   if (!sameSequence(actual, batch.blockIds)) {
     throw new Error("Long batch source markers do not match the assignment");
   }
-  return template.content.cloneNode(true) as DocumentFragment;
+  return fragment.cloneNode(true) as DocumentFragment;
 }
 
 function stripSingleHtmlFence(source: string): string {
@@ -472,12 +479,11 @@ function designEvidence(
     if (!state.candidate.sanitized || !state.fragment) {
       continue;
     }
-    const template = document.createElement("template");
-    template.innerHTML = state.fragment;
-    for (const child of template.content.children) {
+    const fragment = parseHtmlFragment(state.fragment);
+    for (const child of fragment.children) {
       incrementEvidence(directChildPatterns, elementPattern(child));
     }
-    for (const element of template.content.querySelectorAll("*")) {
+    for (const element of fragment.querySelectorAll("*")) {
       const tag = element.tagName.toLowerCase();
       incrementEvidence(elementTags, tag);
       if (/^h[1-6]$/.test(tag)) {
@@ -522,7 +528,7 @@ function safeClassNames(element: Element): string[] {
 }
 
 function safeInlineStyleDeclarations(element: Element): string[] {
-  if (!(element instanceof HTMLElement) || !element.hasAttribute("style")) {
+  if (!isHtmlElement(element) || !element.hasAttribute("style")) {
     return [];
   }
   const declarations: string[] = [];
@@ -545,6 +551,10 @@ function safeInlineStyleDeclarations(element: Element): string[] {
     }
   }
   return declarations.sort();
+}
+
+function isHtmlElement(element: Element): element is HTMLElement {
+  return element.namespaceURI === "http://www.w3.org/1999/xhtml";
 }
 
 function incrementEvidence(counts: Map<string, number>, value: string): void {
@@ -573,9 +583,8 @@ function assembleLongCandidate(
     throw new Error("Safe long-document shell is missing its article root");
   }
   for (const state of states) {
-    const template = document.createElement("template");
-    template.innerHTML = state.fragment;
-    for (const node of [...template.content.childNodes]) {
+    const fragment = parseHtmlFragment(state.fragment, article);
+    for (const node of [...fragment.childNodes]) {
       article.append(assembled.importNode(node, true));
     }
   }

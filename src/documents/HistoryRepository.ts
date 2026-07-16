@@ -108,7 +108,7 @@ export class HistoryRepository<Observation> {
       throw new Error("Galley history limit must be a positive integer.");
     }
     this.#randomUUID =
-      options.randomUUID ?? (() => globalThis.crypto.randomUUID());
+      options.randomUUID ?? (() => window.crypto.randomUUID());
   }
 
   async prepare(
@@ -138,7 +138,7 @@ export class HistoryRepository<Observation> {
       return {
         documentId: canonicalId,
         html,
-        [PREPARED]: data as PreparationData<unknown>
+        [PREPARED]: data
       };
     }
   }

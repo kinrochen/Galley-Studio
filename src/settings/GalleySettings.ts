@@ -64,9 +64,9 @@ export function normalizeSettings(value: unknown): GalleySettings {
       input.claudeCliPath,
       DEFAULT_SETTINGS.claudeCliPath
     ),
-    baseUrl: String(input.baseUrl ?? DEFAULT_SETTINGS.baseUrl).replace(/\/+$/, ""),
-    model: String(input.model ?? ""),
-    secretId: String(input.secretId ?? ""),
+    baseUrl: readString(input.baseUrl, DEFAULT_SETTINGS.baseUrl).replace(/\/+$/, ""),
+    model: readString(input.model),
+    secretId: readString(input.secretId),
     temperature: clamp(
       Number(input.temperature ?? DEFAULT_SETTINGS.temperature),
       0,
@@ -82,8 +82,8 @@ export function normalizeSettings(value: unknown): GalleySettings {
       2_000_000,
       DEFAULT_SETTINGS.contextWindow
     ),
-    outputFolder: String(input.outputFolder ?? ""),
-    activeSkillVersion: String(input.activeSkillVersion ?? "bundled"),
+    outputFolder: readString(input.outputFolder),
+    activeSkillVersion: readString(input.activeSkillVersion, "bundled"),
     exportConfigurations: normalizeExportConfigurations(input.exportConfigurations)
   };
 }
@@ -93,8 +93,12 @@ export function isGenerationAgent(value: unknown): value is GenerationAgent {
 }
 
 function normalizeExecutable(value: unknown, fallback: string): string {
-  const executable = String(value ?? fallback).trim();
+  const executable = readString(value, fallback).trim();
   return executable && !executable.includes("\0") ? executable : fallback;
+}
+
+function readString(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value : fallback;
 }
 
 const clamp = (value: number, min: number, max: number, fallback: number): number =>

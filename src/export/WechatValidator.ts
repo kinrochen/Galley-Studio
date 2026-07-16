@@ -1,4 +1,5 @@
 import { isSafeAuthoringUrl } from "../security/AuthoringSanitizer";
+import { parseHtmlFragment } from "../dom/HtmlFragment";
 
 export type WechatValidationCode =
   | "wechat_document_shell"
@@ -40,11 +41,10 @@ export function validateWechatHtml(html: string): WechatValidationResult {
     issues.push(issue("wechat_document_shell", "WeChat export must be an HTML fragment.", "(document)"));
   }
 
-  const template = document.createElement("template");
-  template.innerHTML = html;
-  const contentElements = [...template.content.children];
+  const fragment = parseHtmlFragment(html);
+  const contentElements = [...fragment.children];
   const root = contentElements[0];
-  const nonWhitespaceOutsideRoot = [...template.content.childNodes].some(
+  const nonWhitespaceOutsideRoot = [...fragment.childNodes].some(
     (node) =>
       node !== root &&
       (node.nodeType !== Node.TEXT_NODE || Boolean(node.textContent?.trim()))
@@ -57,7 +57,7 @@ export function validateWechatHtml(html: string): WechatValidationResult {
     issues.push(issue("wechat_fragment_root", "WeChat export requires exactly one top-level section.", ":root"));
   }
 
-  for (const element of template.content.querySelectorAll("*")) {
+  for (const element of fragment.querySelectorAll("*")) {
     const path = elementPath(element);
     if (FORBIDDEN_TAGS.has(element.localName)) {
       issues.push(issue("wechat_forbidden_tag", `Forbidden WeChat tag: ${element.localName}.`, path));
@@ -91,7 +91,7 @@ export function validateWechatHtml(html: string): WechatValidationResult {
     }
   }
 
-  const walker = document.createTreeWalker(template.content, NodeFilter.SHOW_TEXT);
+  const walker = document.createTreeWalker(fragment, NodeFilter.SHOW_TEXT);
   let current: Node | null;
   while ((current = walker.nextNode())) {
     if (!current.textContent?.trim()) continue;

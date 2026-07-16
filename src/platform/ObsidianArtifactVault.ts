@@ -1,4 +1,10 @@
-import type { EventRef, TAbstractFile, TFile, Vault } from "obsidian";
+import {
+  type EventRef,
+  type FileManager,
+  type TAbstractFile,
+  type TFile,
+  type Vault
+} from "obsidian";
 import type { ArtifactVault } from "../documents/ArtifactRepository";
 import { isNormalizedVaultRelativePath } from "../documents/GalleySidecar";
 
@@ -13,7 +19,10 @@ const FINAL_IDENTITY_TIMEOUT_MS = 1_000;
 export class ObsidianArtifactVault
   implements ArtifactVault<ObsidianOwnedArtifact>
 {
-  constructor(private readonly vault: Vault) {}
+  constructor(
+    private readonly vault: Vault,
+    private readonly fileManager: Pick<FileManager, "trashFile">
+  ) {}
 
   async exists(path: string): Promise<boolean> {
     return this.vault.getAbstractFileByPath(path) !== null;
@@ -81,7 +90,7 @@ export class ObsidianArtifactVault
   }
 
   async removeOwned(handle: ObsidianOwnedArtifact): Promise<void> {
-    if (await this.owns(handle)) await this.vault.delete(handle.file, true);
+    if (await this.owns(handle)) await this.fileManager.trashFile(handle.file);
   }
 }
 
@@ -184,7 +193,11 @@ async function verifiesFinalFile(
 }
 
 function asTFile(file: TAbstractFile | null): TFile | null {
-  return !file || isFolder(file) ? null : (file as TFile);
+  return file && isFile(file) ? file : null;
+}
+
+function isFile(file: TAbstractFile): file is TFile {
+  return !isFolder(file);
 }
 
 function isFolder(file: TAbstractFile): boolean {

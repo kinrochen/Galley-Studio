@@ -1,7 +1,7 @@
 export class AutosaveController {
   readonly #delayMs: number;
   readonly #save: () => Promise<void>;
-  #timer: ReturnType<typeof setTimeout> | null = null;
+  #timer: number | null = null;
   #pending = false;
   #running = false;
   #runningPromise: Promise<void> | null = null;
@@ -52,7 +52,7 @@ export class AutosaveController {
 
   #schedule(): void {
     this.#clearTimer();
-    this.#timer = setTimeout(() => {
+    this.#timer = window.setTimeout(() => {
       this.#timer = null;
       void this.#flush();
     }, this.#delayMs);
@@ -82,7 +82,7 @@ export class AutosaveController {
 
   #clearTimer(): void {
     if (this.#timer !== null) {
-      clearTimeout(this.#timer);
+      window.clearTimeout(this.#timer);
       this.#timer = null;
     }
   }

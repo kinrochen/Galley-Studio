@@ -266,7 +266,7 @@ function resolveVaultPath(
   }
 
   const vaultPath = segments.join("/");
-  const extension = vaultPath.match(/\.([^.\/]+)$/)?.[1]?.toLowerCase();
+  const extension = vaultPath.match(/\.([^./]+)$/)?.[1]?.toLowerCase();
   const mediaType = extension ? MEDIA_TYPES[extension] : undefined;
   return mediaType ? { vaultPath, mediaType } : undefined;
 }

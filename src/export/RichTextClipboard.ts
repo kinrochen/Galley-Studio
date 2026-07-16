@@ -40,8 +40,8 @@ export class RichTextClipboard {
       navigator: environment?.navigator ?? navigator,
       ClipboardItem: environment && "ClipboardItem" in environment
         ? environment.ClipboardItem
-        : globalThis.ClipboardItem,
-      Blob: environment?.Blob ?? globalThis.Blob,
+        : window.ClipboardItem,
+      Blob: environment?.Blob ?? window.Blob,
       execCommand: environment?.execCommand
     };
   }
@@ -70,8 +70,8 @@ export class RichTextClipboard {
     const host = document.createElement("div");
     host.dataset.galleyClipboardFallback = "";
     host.contentEditable = "true";
-    host.style.cssText = "position:fixed;left:-10000px;top:0;opacity:0;pointer-events:none";
-    host.innerHTML = html;
+    host.className = "galley-clipboard-fallback";
+    host.replaceChildren(parseHtmlFragment(html, host));
     document.body.append(host);
     try {
       const selection = document.getSelection();
@@ -91,9 +91,8 @@ export class RichTextClipboard {
 }
 
 function semanticPlainText(html: string, document: Document): string {
-  const template = document.createElement("template");
-  template.innerHTML = html;
-  for (const breakElement of template.content.querySelectorAll(
+  const fragment = parseHtmlFragment(html, document.body);
+  for (const breakElement of fragment.querySelectorAll(
     "br,p,h1,h2,h3,h4,h5,h6,li,blockquote,section,article,tr"
   )) {
     if (breakElement.localName === "br") {
@@ -102,8 +101,9 @@ function semanticPlainText(html: string, document: Document): string {
       breakElement.append(document.createTextNode("\n"));
     }
   }
-  return (template.content.textContent ?? "")
+  return (fragment.textContent ?? "")
     .replace(/[\t\r ]+\n/gu, "\n")
     .replace(/\n{2,}/gu, "\n")
     .trim();
 }
+import { parseHtmlFragment } from "../dom/HtmlFragment";

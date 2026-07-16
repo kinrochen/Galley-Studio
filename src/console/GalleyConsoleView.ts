@@ -4,6 +4,7 @@ import type { LocalizedText } from "../i18n/LocalizedText";
 import type { MessageKey } from "../i18n/Resources";
 import type { GenerationStage } from "../generation/GenerationProgress";
 import type { GenerationTaskController } from "../generation/GenerationTask";
+import { requestConfirmation } from "../platform/ConfirmationModal";
 import { ArticlePage, type ArticlePageState } from "./ArticlePage";
 import {
   renderConsoleHome,
@@ -28,7 +29,7 @@ export interface GalleyConsoleViewServices {
   readonly mobile: boolean;
   readonly subscribeContext?: (listener: () => void) => () => void;
   readonly subscribeArticles?: (listener: () => void) => () => void;
-  readonly confirm?: (message: string) => boolean;
+  readonly confirm?: (message: string) => boolean | Promise<boolean>;
   readonly generationTask?: GenerationTaskController;
 }
 
@@ -231,7 +232,8 @@ export class GalleyConsoleView extends ItemView {
           )
         );
       },
-      confirm: this.#services.confirm ?? ((message: string) => window.confirm(message))
+      confirm: this.#services.confirm ??
+        ((message: string) => requestConfirmation(this.app, message))
     };
     switch (this.#route) {
       case "home":
@@ -440,7 +442,7 @@ export class GalleyConsoleView extends ItemView {
 
   #allowedRoutes(): readonly ConsoleRoute[] {
     return this.#services.mobile
-      ? (MOBILE_CONSOLE_ROUTES as readonly ConsoleRoute[])
+      ? MOBILE_CONSOLE_ROUTES
       : DESKTOP_CONSOLE_ROUTES;
   }
 }

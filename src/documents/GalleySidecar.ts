@@ -77,7 +77,7 @@ const ValidationIssueSchema = z
   })
   .strict()
   .superRefine((issue, context) => {
-    const code = issue.code as PersistedValidationCode;
+    const code = issue.code;
     if (issue.message !== PERSISTED_VALIDATION_MESSAGES[code]) {
       context.addIssue({
         code: "custom",
@@ -107,7 +107,7 @@ const ValidationReportSchema = z
 export const GalleySidecarV1Schema = z
   .object({
     schemaVersion: z.literal(1),
-    documentId: z.string().uuid(),
+    documentId: z.uuid(),
     sourcePath: NormalizedVaultPathSchema,
     sourceHash: z.string().regex(LOWERCASE_SHA256),
     htmlHash: z.string().regex(LOWERCASE_SHA256),
@@ -137,7 +137,7 @@ export const GalleySidecarV1Schema = z
       .min(1)
       .refine((model) => model.trim().length > 0, "Model must not be blank."),
     promptVersion: z.literal(1),
-    generatedAt: z.string().datetime({ offset: true }),
+    generatedAt: z.iso.datetime({ offset: true }),
     validation: ValidationReportSchema,
     exports: z
       .array(GalleyExportRecordV1Schema)
@@ -298,7 +298,7 @@ function isPersistedValidationCode(
 
 export async function sha256Text(value: string): Promise<string> {
   const bytes = new TextEncoder().encode(value);
-  const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+  const digest = await window.crypto.subtle.digest("SHA-256", bytes);
   return [...new Uint8Array(digest)]
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");

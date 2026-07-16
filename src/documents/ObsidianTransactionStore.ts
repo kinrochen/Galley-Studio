@@ -228,7 +228,7 @@ interface QuarantineData {
   checksum: string;
 }
 
-interface TargetQuarantineData extends VerifiedTransactionQuarantine {}
+type TargetQuarantineData = VerifiedTransactionQuarantine;
 
 interface OwnedStoredTransactionBlob extends StoredTransactionBlob {
   readonly ownership: VaultOwnedFile;
@@ -293,7 +293,7 @@ export class ObsidianTransactionStore {
     private readonly files: ObsidianVaultFileStore,
     options: ObsidianTransactionStoreOptions = {}
   ) {
-    this.#randomUUID = options.randomUUID ?? (() => globalThis.crypto.randomUUID());
+    this.#randomUUID = options.randomUUID ?? (() => window.crypto.randomUUID());
     this.#now = options.now ?? (() => new Date());
     this.#maxPrepareAttempts = options.maxPrepareAttempts ?? 128;
     this.#maxSnapshotAttempts = options.maxSnapshotAttempts ?? DEFAULT_SNAPSHOT_ATTEMPTS;
@@ -1580,7 +1580,7 @@ function validQuarantineEvidence(
     if (state !== "present") {
       return {
         path,
-        state: state as "absent" | "unreadable"
+        state
       } satisfies TransactionQuarantineEvidence;
     }
     const sha256 = stringValue(value.sha256);

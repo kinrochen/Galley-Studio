@@ -1,7 +1,4 @@
-import type { App } from "obsidian";
-import { mkdir, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { FileSystemAdapter, Platform, type App } from "obsidian";
 
 import themeGeneratorProfile from "../../assets/profiles/theme-generator.md?raw";
 import { AiError } from "../ai/AiError";
@@ -106,7 +103,7 @@ export async function probeProductionVision(
   }
   const client = OpenAiCompatibleClient.fromSettings(
     createObsidianTransport(),
-    settings as GalleySettings,
+    settings,
     secretStore
   );
   return new VisionCapabilityProbe(client).probe(
@@ -187,30 +184,34 @@ async function generationClient(
   capabilities: ProviderCapabilities;
 }> {
   if (settings.generationAgent !== "plugin") {
-    const agent = settings.generationAgent;
-    const executable = agent === "codex-cli"
-      ? settings.codexCliPath
-      : settings.claudeCliPath;
-    return {
-      client: new LocalCliChatClient({
-        agent,
-        executable,
-        cwd: vaultWorkingDirectory(app),
-        ...(skillRoot ? { skillPath: join(skillRoot, "SKILL.md") } : {}),
-        timeoutMs: settings.timeoutMs,
-        ...(onModelEvent ? { onModelEvent } : {})
-      }),
-      target: {
-        baseUrl: `local://${agent}`,
-        model: generationModelLabel(settings)
-      },
-      capabilities: {
-        tools: false,
-        streaming: false,
-        vision: false,
-        checkedAt: new Date().toISOString()
-      }
-    };
+    if (Platform.isDesktop) {
+      const agent = settings.generationAgent;
+      const executable = agent === "codex-cli"
+        ? settings.codexCliPath
+        : settings.claudeCliPath;
+      const path = await import("node:path");
+      return {
+        client: new LocalCliChatClient({
+          agent,
+          executable,
+          cwd: vaultWorkingDirectory(app),
+          ...(skillRoot ? { skillPath: path.join(skillRoot, "SKILL.md") } : {}),
+          timeoutMs: settings.timeoutMs,
+          ...(onModelEvent ? { onModelEvent } : {})
+        }),
+        target: {
+          baseUrl: `local://${agent}`,
+          model: generationModelLabel(settings)
+        },
+        capabilities: {
+          tools: false,
+          streaming: false,
+          vision: false,
+          checkedAt: new Date().toISOString()
+        }
+      };
+    }
+    throw new AiError("cli_not_found");
   }
 
   const secretStore = new ObsidianSecretStore(app);
@@ -224,7 +225,7 @@ async function generationClient(
   }
   const client = OpenAiCompatibleClient.fromSettings(
     createObsidianTransport(),
-    settings as GalleySettings,
+    settings,
     secretStore,
     onModelEvent ? { onModelEvent } : {}
   );
@@ -245,18 +246,35 @@ async function materializeLocalCliSkill(
   skillPackage: SkillPackage,
   packageHash: string
 ): Promise<string> {
-  const root = join(tmpdir(), "galley-skills", packageHash);
-  await Promise.all([...skillPackage.files].map(async ([path, content]) => {
-    const target = join(root, path);
-    await mkdir(dirname(target), { recursive: true });
-    await writeFile(target, content, { encoding: "utf8", mode: 0o600 });
-  }));
-  return root;
+  if (Platform.isDesktop) {
+    const [filesystem, operatingSystem, pathModule] =
+      await Promise.all([
+        import("node:fs/promises"),
+        import("node:os"),
+        import("node:path")
+      ]);
+    const root = pathModule.join(
+      operatingSystem.tmpdir(),
+      "galley-skills",
+      packageHash
+    );
+    await Promise.all(
+      [...skillPackage.files].map(async ([relativePath, content]) => {
+        const target = pathModule.join(root, relativePath);
+        await filesystem.mkdir(pathModule.dirname(target), { recursive: true });
+        await filesystem.writeFile(target, content, {
+          encoding: "utf8",
+          mode: 0o600
+        });
+      })
+    );
+    return root;
+  }
+  throw new AiError("cli_not_found");
 }
 
 function vaultWorkingDirectory(app: App): string {
-  const adapter = app.vault.adapter as typeof app.vault.adapter & {
-    getBasePath?: () => string;
-  };
-  return adapter.getBasePath?.() ?? process.cwd();
+  return app.vault.adapter instanceof FileSystemAdapter
+    ? app.vault.adapter.getBasePath()
+    : "";
 }

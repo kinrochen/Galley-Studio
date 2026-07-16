@@ -2,6 +2,32 @@
 
 All notable changes to Galley Studio are documented here.
 
+## 0.2.2 — 2026-07-16
+
+### 中文
+
+- 清除 Obsidian 插件审核中的全部阻断错误，包括不安全的 `innerHTML`
+  写入、运行时 `<style>` 注入和直接静态样式赋值。
+- 将 HugeRTE UI 样式固定打包进 `styles.css`，并保留编辑器内容样式隔离。
+- 为 HTML 片段解析增加安全 DOM 构造与 head/body 上下文迁移检测。
+- 将本地 CLI 的 Node.js 模块改为 Desktop 条件动态加载，并统一窗口定时器、
+  加密和文件删除 API。
+- 用 Obsidian 确认弹窗替代浏览器 `confirm`，并按官方规范调整命令名称。
+- 接入 `eslint-plugin-obsidianmd`，将审核规则固化为 `npm run lint`。
+
+### English
+
+- Clear all blocking Obsidian review errors, including unsafe `innerHTML`
+  writes, runtime `<style>` injection, and direct static style assignment.
+- Bundle the pinned HugeRTE UI skin in `styles.css` while preserving isolated
+  editor content styling.
+- Add safe HTML fragment construction and head/body context-migration checks.
+- Guard local CLI Node.js modules behind Desktop-only dynamic imports and use
+  window-compatible timers, crypto, and file deletion APIs.
+- Replace browser `confirm` with an Obsidian modal and align command names with
+  the plugin guidelines.
+- Add `eslint-plugin-obsidianmd` as the local `npm run lint` review gate.
+
 ## 0.2.1 — 2026-07-16
 
 - Rename the plugin to **Galley Studio** with the unique Obsidian plugin ID

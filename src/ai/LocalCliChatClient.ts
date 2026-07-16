@@ -1,6 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { accessSync, constants } from "node:fs";
-import { delimiter, isAbsolute, join } from "node:path";
+import { Platform } from "obsidian";
 
 import { AiError } from "./AiError";
 import type {
@@ -21,7 +19,7 @@ export interface LocalCliChatClientOptions {
   readonly skillPath?: string;
   readonly timeoutMs: number;
   readonly maxOutputBytes?: number;
-  readonly spawnProcess?: typeof spawn;
+  readonly spawnProcess?: typeof import("node:child_process").spawn;
   readonly onModelEvent?: (event: GenerationModelEvent) => void;
 }
 
@@ -77,20 +75,41 @@ export class LocalCliChatClient implements ChatClient {
     return content.trim();
   }
 
-  #run(
+  async #run(
     args: readonly string[],
     stdin: string,
     signal: AbortSignal,
     requestId?: number
   ): Promise<string> {
     if (signal.aborted) return Promise.reject(new AiError("aborted"));
-    const spawnProcess = this.#options.spawnProcess ?? spawn;
+    let desktopModules:
+      | readonly [
+          typeof import("node:child_process"),
+          typeof import("node:fs"),
+          typeof import("node:process")
+        ]
+      | undefined;
+    if (Platform.isDesktop) {
+      desktopModules = await Promise.all([
+        import("node:child_process"),
+        import("node:fs"),
+        import("node:process")
+      ]);
+    }
+    if (!desktopModules) throw new AiError("cli_not_found");
+    const [childProcess, filesystem, processModule] = desktopModules;
+    const spawnProcess = this.#options.spawnProcess ?? childProcess.spawn;
     const maxOutputBytes = this.#options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
-    const environment = localCliEnvironment(process.env);
+    const environment = localCliEnvironment(processModule.env);
     const executable = resolveLocalCliExecutable(
       this.#options.agent,
       this.#options.executable,
-      environment
+      environment,
+      (path) => isExecutableFile(
+        path,
+        filesystem.accessSync,
+        filesystem.constants.X_OK
+      )
     );
     const startedAt = Date.now();
     if (requestId !== undefined) {
@@ -107,7 +126,7 @@ export class LocalCliChatClient implements ChatClient {
       let stdoutBytes = 0;
       let stderr = "";
       let timedOut = false;
-      let child: ChildProcessWithoutNullStreams;
+      let child: import("node:child_process").ChildProcessWithoutNullStreams;
       const parser = requestId === undefined
         ? null
         : new LocalCliStructuredOutputParser(this.#options.agent, (text) => {
@@ -133,16 +152,16 @@ export class LocalCliChatClient implements ChatClient {
       const finish = (error?: AiError): void => {
         if (settled) return;
         settled = true;
-        clearTimeout(timeout);
+        window.clearTimeout(timeout);
         signal.removeEventListener("abort", abort);
         if (error) reject(error);
         else resolve(stdout);
       };
       const terminate = (): void => {
         child.kill("SIGTERM");
-        setTimeout(() => {
+        window.setTimeout(() => {
           if (!settled) child.kill("SIGKILL");
-        }, 1_500).unref?.();
+        }, 1_500);
       };
       const abort = (): void => {
         terminate();
@@ -150,7 +169,7 @@ export class LocalCliChatClient implements ChatClient {
       };
       signal.addEventListener("abort", abort, { once: true });
 
-      const timeout = setTimeout(() => {
+      const timeout = window.setTimeout(() => {
         timedOut = true;
         terminate();
         finish(new AiError("timeout"));
@@ -158,7 +177,7 @@ export class LocalCliChatClient implements ChatClient {
 
       child.stdout.setEncoding("utf8");
       child.stdout.on("data", (chunk: string) => {
-        stdoutBytes += Buffer.byteLength(chunk);
+        stdoutBytes += new TextEncoder().encode(chunk).byteLength;
         if (stdoutBytes > maxOutputBytes) {
           terminate();
           finish(new AiError("invalid_response"));
@@ -322,8 +341,9 @@ export class LocalCliStructuredOutputParser {
 }
 
 export function localCliEnvironment(
-  environment: Readonly<NodeJS.ProcessEnv>
-): NodeJS.ProcessEnv {
+  environment: Readonly<Record<string, string | undefined>>
+): Record<string, string | undefined> {
+  const delimiter = Platform.isWin ? ";" : ":";
   const home = environment.HOME?.trim();
   const candidates = [
     environment.PATH,
@@ -350,9 +370,10 @@ export function localCliEnvironment(
 export function resolveLocalCliExecutable(
   agent: LocalCliAgent,
   configured: string,
-  environment: Readonly<NodeJS.ProcessEnv> = process.env,
-  canExecute: (path: string) => boolean = isExecutableFile
+  environment: Readonly<Record<string, string | undefined>> = {},
+  canExecute: (path: string) => boolean = () => false
 ): string {
+  const delimiter = Platform.isWin ? ";" : ":";
   const fallback = agent === "codex-cli" ? "codex" : "claude";
   for (const candidate of localCliApplicationCandidates(
     agent,
@@ -365,12 +386,12 @@ export function resolveLocalCliExecutable(
   const searchPaths = localCliEnvironment(environment).PATH?.split(delimiter) ?? [];
 
   for (const command of commands) {
-    if (isAbsolute(command) || command.includes("/") || command.includes("\\")) {
+    if (isAbsolutePath(command) || command.includes("/") || command.includes("\\")) {
       if (canExecute(command)) return command;
       continue;
     }
     for (const directory of searchPaths) {
-      const candidate = join(directory, command);
+      const candidate = joinExecutablePath(directory, command);
       if (canExecute(candidate)) return candidate;
     }
   }
@@ -395,13 +416,25 @@ export function localCliApplicationCandidates(
   ];
 }
 
-function isExecutableFile(path: string): boolean {
+function isExecutableFile(
+  path: string,
+  access: (path: string, mode?: number) => void,
+  executableMode: number
+): boolean {
   try {
-    accessSync(path, constants.X_OK);
+    access(path, executableMode);
     return true;
   } catch {
     return false;
   }
+}
+
+function isAbsolutePath(path: string): boolean {
+  return path.startsWith("/") || /^[a-z]:[\\/]/iu.test(path);
+}
+
+function joinExecutablePath(directory: string, command: string): string {
+  return `${directory.replace(/[\\/]+$/u, "")}/${command}`;
 }
 
 function cliSpawnError(error: Error): AiError {

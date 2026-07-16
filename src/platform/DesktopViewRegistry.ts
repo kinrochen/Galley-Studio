@@ -20,6 +20,7 @@ import {
   type GalleyWorkbenchViewServices,
   type WorkbenchDocument
 } from "../workbench/GalleyWorkbenchView";
+import { requestConfirmation } from "./ConfirmationModal";
 import type { PlatformCapabilities } from "./PlatformCapabilities";
 
 export interface DesktopViewHost {
@@ -52,13 +53,13 @@ export async function openWorkbench(app: App, path: string): Promise<void> {
     state: { path },
     active: true
   });
-  app.workspace.revealLeaf(leaf);
+  await app.workspace.revealLeaf(leaf);
 }
 
 export async function openThemeLab(app: App): Promise<void> {
   const leaf = app.workspace.getLeaf("tab");
   await leaf.setViewState({ type: GALLEY_THEME_LAB_VIEW_TYPE, active: true });
-  app.workspace.revealLeaf(leaf);
+  await app.workspace.revealLeaf(leaf);
 }
 
 export function createThemeLabView(
@@ -115,7 +116,7 @@ export function createWorkbenchView(
     createVisualEditor: () => editorFactory.createVisual(host.capabilities),
     createSourceEditor: () => editorFactory.createSource(host.capabilities),
     openCopy: (path) => openWorkbench(host.app, path),
-    confirm: async (message) => window.confirm(message),
+    confirm: (message) => requestConfirmation(host.app, message),
     resourceResolver,
     documentBaseUrl: () => "app://vault/",
     copyHtml: (html) => navigator.clipboard.writeText(html),

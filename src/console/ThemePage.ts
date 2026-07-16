@@ -8,7 +8,7 @@ export async function renderThemePage(
   options: {
     actions: GalleyActions;
     text: ConsolePageText;
-    confirm: (message: string) => boolean;
+    confirm: (message: string) => boolean | Promise<boolean>;
     run: (operation: string, action: (signal: AbortSignal) => Promise<unknown>) => Promise<void>;
   }
 ): Promise<void> {
@@ -78,8 +78,16 @@ export async function renderThemePage(
       );
       const remove = button(options.text.t("common.action.delete"), "theme-delete");
       remove.addEventListener("click", () => {
-        if (!options.confirm(options.text.t("common.confirm.delete", { target: theme.id }))) return;
-        void options.run("theme-delete", async () => runtime.deleteTheme?.(theme.id));
+        void (async () => {
+          const confirmed = await options.confirm(
+            options.text.t("common.confirm.delete", { target: theme.id })
+          );
+          if (!confirmed) return;
+          await options.run(
+            "theme-delete",
+            async () => runtime.deleteTheme?.(theme.id)
+          );
+        })();
       });
       actions.append(toggle, exportTheme, remove);
       row.append(actions);

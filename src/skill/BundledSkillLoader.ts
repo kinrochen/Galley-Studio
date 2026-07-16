@@ -29,7 +29,7 @@ function decodeBase64(value: string): Uint8Array<ArrayBuffer> {
 }
 
 async function sha256(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
-  const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+  const digest = await window.crypto.subtle.digest("SHA-256", bytes);
   return [...new Uint8Array(digest)]
     .map((value) => value.toString(16).padStart(2, "0"))
     .join("");

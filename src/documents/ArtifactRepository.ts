@@ -81,7 +81,7 @@ export class ArtifactRepository<Handle> {
     );
     this.#now = options.now ?? (() => new Date());
     this.#randomUUID =
-      options.randomUUID ?? (() => globalThis.crypto.randomUUID());
+      options.randomUUID ?? (() => window.crypto.randomUUID());
     this.#serialize =
       options.serialize ?? ((value) => `${JSON.stringify(value, null, 2)}\n`);
   }

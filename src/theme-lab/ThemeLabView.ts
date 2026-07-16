@@ -42,7 +42,7 @@ export class ThemeLabView extends ItemView {
   #controller: AbortController | null = null;
   #draft: ThemeDraft | null = null;
   #savedDraft: ThemeDraft | null = null;
-  #progressTimer: ReturnType<typeof setInterval> | null = null;
+  #progressTimer: number | null = null;
   #closed = false;
   readonly #text: LocalizedText;
   #unsubscribeLocale: (() => void) | null = null;
@@ -196,14 +196,14 @@ export class ThemeLabView extends ItemView {
       generateButton.disabled = true;
       saveButton.disabled = true;
       cancelButton.hidden = false;
-      this.#progressTimer = setInterval(renderProgress, 1_000);
+      this.#progressTimer = window.setInterval(renderProgress, 1_000);
       renderProgress();
     };
     const finishOperation = (controller: AbortController): void => {
       if (this.#controller !== controller) return;
       this.#controller = null;
       progressStage = null;
-      if (this.#progressTimer) clearInterval(this.#progressTimer);
+      if (this.#progressTimer) window.clearInterval(this.#progressTimer);
       this.#progressTimer = null;
       generateButton.disabled = false;
       cancelButton.hidden = true;
@@ -413,7 +413,7 @@ export class ThemeLabView extends ItemView {
     this.#closed = true;
     this.#controller?.abort();
     this.#controller = null;
-    if (this.#progressTimer) clearInterval(this.#progressTimer);
+    if (this.#progressTimer) window.clearInterval(this.#progressTimer);
     this.#progressTimer = null;
     this.#unsubscribeLocale?.();
     this.#unsubscribeLocale = null;

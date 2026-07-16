@@ -11,6 +11,8 @@
  * are outside the subset.
  */
 
+import { hasAsciiControl } from "../security/ControlCharacters";
+
 export interface HtmlDocumentRange {
   start: number;
   end: number;
@@ -77,9 +79,6 @@ const RAW_TEXT_NAMES = new Set([
   "textarea",
   "xmp"
 ]);
-const FORBIDDEN_CONTROL_PATTERN =
-  /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/;
-
 export function locateHtmlDocument(
   source: string,
   options: HtmlShellOptions
@@ -180,7 +179,7 @@ export function assertShellFreeHtmlFragment(
 }
 
 function scanHtml(source: string): HtmlToken[] {
-  if (FORBIDDEN_CONTROL_PATTERN.test(source)) {
+  if (hasAsciiControl(source, true)) {
     throw new Error("HTML contains a forbidden control character");
   }
 

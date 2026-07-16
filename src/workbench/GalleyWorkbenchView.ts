@@ -7,6 +7,7 @@ import {
 import type { ArtifactPaths } from "../documents/GalleyDocumentRepository";
 import { isNormalizedVaultRelativePath } from "../documents/GalleySidecar";
 import { GalleyDocumentCodec } from "../documents/GalleyDocumentCodec";
+import { parseHtmlFragment } from "../dom/HtmlFragment";
 import type { DocumentSessionState, SaveReason } from "../documents/DocumentSession";
 import type { DocumentRecoveryState } from "../documents/DocumentSessionOpener";
 import type { HistorySnapshot } from "../documents/HistoryRepository";
@@ -861,9 +862,10 @@ export class GalleyWorkbenchView extends ItemView {
     if (command.type === "role") {
       if (!command.value) return;
       const transformed = transformSelectedBlock(selected, command.value, this.#catalog);
-      const template = selected.ownerDocument.createElement("template");
-      template.innerHTML = transformed;
-      const replacement = template.content.firstElementChild;
+      const replacement = parseHtmlFragment(
+        transformed,
+        selected
+      ).firstElementChild;
       if (
         !replacement ||
         replacement.namespaceURI !== "http://www.w3.org/1999/xhtml"

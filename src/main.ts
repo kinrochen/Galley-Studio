@@ -1,4 +1,5 @@
 import {
+  Notice,
   Platform,
   Plugin,
   type Menu,
@@ -156,7 +157,7 @@ export default class GalleyPlugin extends Plugin {
       };
       if (route === "home") await view.resetHome?.();
       else await view.navigate?.(route);
-      workspace.revealLeaf(managed);
+      await workspace.revealLeaf(managed);
       return;
     }
 
@@ -174,7 +175,7 @@ export default class GalleyPlugin extends Plugin {
         };
         if (route === "home") await view.resetHome?.();
         else await view.navigate?.(route);
-        workspace.revealLeaf(existing);
+        await workspace.revealLeaf(existing);
         return;
       }
     }
@@ -186,7 +187,7 @@ export default class GalleyPlugin extends Plugin {
       active: true
     });
     this.#consoleLeaf = leaf;
-    workspace.revealLeaf(leaf);
+    await workspace.revealLeaf(leaf);
   }
 
   async checkGenerationAgentAvailability(): Promise<void> {
@@ -242,17 +243,17 @@ export default class GalleyPlugin extends Plugin {
   #registerCommands(): void {
     this.addCommand({
       id: "open-galley-console",
-      name: "Galley Studio: Open console / 打开控制台",
+      name: "Open console / 打开控制台",
       callback: () => this.openGalleyConsole()
     });
     this.addCommand({
       id: "show-capabilities",
-      name: "Galley Studio: Show capabilities / 显示能力",
-      callback: () => console.info("Galley Studio capabilities", this.capabilities)
+      name: "Show capabilities / 显示能力",
+      callback: () => new Notice(JSON.stringify(this.capabilities, null, 2))
     });
     this.addCommand({
       id: "open-current-galley-preview",
-      name: "Galley Studio: Preview current document / 预览当前文档",
+      name: "Preview current document / 预览当前文档",
       checkCallback: (checking) => {
         const path = this.#activeGalleyPath();
         if (!path) return false;
@@ -263,7 +264,7 @@ export default class GalleyPlugin extends Plugin {
     if (!this.canGenerate) return;
     this.addCommand({
       id: "open-current-galley-in-workbench",
-      name: "Galley Studio: Open current document in workbench / 在工作台打开当前文档",
+      name: "Open current document in workbench / 在工作台打开当前文档",
       checkCallback: (checking) => {
         const path = this.#activeGalleyPath();
         if (!path) return false;
@@ -273,17 +274,17 @@ export default class GalleyPlugin extends Plugin {
     });
     this.addCommand({
       id: "check-generation-agent-availability",
-      name: "Galley Studio: Check Agent availability / 检查 Agent 可用性",
+      name: "Check agent availability / 检查 agent 可用性",
       callback: () => this.checkGenerationAgentAvailability()
     });
     this.addCommand({
       id: "generate-current-article",
-      name: "Galley Studio: Generate current article / 生成当前文章",
+      name: "Generate current article / 生成当前文章",
       callback: () => this.runGenerateCurrentArticle()
     });
     this.addCommand({
       id: "open-theme-lab",
-      name: "Galley Studio: Open Theme Lab / 打开主题实验室",
+      name: "Open theme lab / 打开主题实验室",
       callback: () => this.openThemeLab()
     });
     for (const [id, name, route] of [

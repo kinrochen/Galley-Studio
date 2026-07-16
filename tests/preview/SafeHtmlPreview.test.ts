@@ -17,7 +17,7 @@ describe("createSafePreviewFrame", () => {
     expect(frame.srcdoc).not.toContain("onclick");
     expect(frame.srcdoc).toContain("Content-Security-Policy");
     expect(frame.srcdoc).toContain("Safe");
-    expect(frame.srcdoc).toContain("html,body{min-height:100%;background:#fff}");
+    expect(frame.srcdoc).not.toContain("<style");
   });
 
   it("replaces existing preview children and never keeps a second live frame", () => {

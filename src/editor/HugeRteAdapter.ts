@@ -1,6 +1,5 @@
 import {
-  HUGERTE_CONTENT_CSS,
-  HUGERTE_INLINE_SKIN_CSS
+  HUGERTE_CONTENT_CSS
 } from "../generated/hugerteSkin";
 import { HUGERTE_VALID_ELEMENTS } from "../security/AuthoringSanitizer";
 import {
@@ -121,12 +120,6 @@ interface EditorBinding {
   selectionDetached: boolean;
 }
 
-interface SharedSkin {
-  count: number;
-  style: HTMLStyleElement;
-}
-
-const sharedSkins = new WeakMap<Document, SharedSkin>();
 let bundledRuntimePromise: Promise<HugeRteRuntime> | undefined;
 
 export class HugeRteAdapter implements HtmlEditorAdapter {
@@ -135,7 +128,6 @@ export class HugeRteAdapter implements HtmlEditorAdapter {
   private target: HTMLTextAreaElement | undefined;
   private editor: HugeRteEditor | undefined;
   private mountToken: MountToken | undefined;
-  private releaseSkin: (() => void) | undefined;
   private suppressChanges = true;
   private pendingHtmlWrite = false;
   private readonly editorBindings = new Map<HugeRteEditor, EditorBinding>();
@@ -167,8 +159,6 @@ export class HugeRteAdapter implements HtmlEditorAdapter {
     target.value = bodyHtml;
     container.append(target);
     this.target = target;
-    this.releaseSkin = acquireSharedSkin(container.ownerDocument);
-
     let initResult: unknown;
     try {
       const runtime = await this.runtimeLoader();
@@ -418,15 +408,6 @@ export class HugeRteAdapter implements HtmlEditorAdapter {
     this.editor = undefined;
     this.pendingHtmlWrite = false;
     this.mountToken = undefined;
-    const releaseSkin = this.releaseSkin;
-    if (releaseSkin) {
-      try {
-        releaseSkin();
-        if (this.releaseSkin === releaseSkin) this.releaseSkin = undefined;
-      } catch {
-        // Keep the release callback so a later destroy can retry it.
-      }
-    }
   }
 
   private throwIfCancelled(token: MountToken): void {
@@ -528,39 +509,6 @@ function isHugeRteEditor(value: unknown): value is HugeRteEditor {
   );
 }
 
-function acquireSharedSkin(document: Document): () => void {
-  let shared = sharedSkins.get(document);
-  if (!shared) {
-    const style = document.createElement("style");
-    style.setAttribute("data-galley-hugerte-skin", "");
-    style.textContent = HUGERTE_INLINE_SKIN_CSS;
-    document.head.append(style);
-    shared = { count: 0, style };
-    sharedSkins.set(document, shared);
-  } else if (!shared.style.isConnected) {
-    document.head.append(shared.style);
-  }
-  shared.count += 1;
-  let released = false;
-  return () => {
-    if (released) return;
-    const current = sharedSkins.get(document);
-    if (current !== shared) {
-      released = true;
-      return;
-    }
-    if (current.count > 1) {
-      current.count -= 1;
-      released = true;
-      return;
-    }
-    current.style.remove();
-    current.count = 0;
-    sharedSkins.delete(document);
-    released = true;
-  };
-}
-
 function loadBundledRuntime(): Promise<HugeRteRuntime> {
   if (!bundledRuntimePromise) {
     const pending = importBundledRuntime();
@@ -600,7 +548,7 @@ async function importBundledRuntime(): Promise<HugeRteRuntime> {
       // @ts-expect-error HugeRTE side-effect entry points do not publish declarations.
       import("hugerte/plugins/charmap")
     ]);
-    return core.default as unknown as HugeRteRuntime;
+    return core.default;
   } finally {
     restoreProperty(globalWindow, "hugerte", hugerteGlobal);
     restoreProperty(globalWindow, "hugeRTE", hugeRteGlobal);

@@ -1,4 +1,3 @@
-import type { EventRef } from "obsidian";
 import { GalleyDocumentCodec } from "../documents/GalleyDocumentCodec";
 import {
   GalleySidecarV1Schema,
@@ -27,15 +26,15 @@ export interface ArticleCatalogVault {
   on(
     event: "create" | "modify" | "rename" | "delete",
     callback: (...args: unknown[]) => unknown
-  ): EventRef | unknown;
-  offref?(ref: EventRef | unknown): void;
+  ): object;
+  offref?(ref: object): void;
 }
 
 const HTML_SUFFIX = ".galley.html";
 const SIDECAR_SUFFIX = ".galley.json";
 
 export class ArticleCatalog {
-  readonly #eventRefs: unknown[];
+  readonly #eventRefs: object[];
   readonly #listeners = new Set<() => void>();
   #cached: Promise<ArticleCatalogSnapshot> | null = null;
   #disposed = false;

@@ -1,3 +1,5 @@
+import { hasAsciiControl } from "../security/ControlCharacters";
+
 export type ElementPropertyCommand =
   | { type: "alignment"; value: "left" | "center" | "right" | "justify" }
   | { type: "text-color" | "background-color"; value: string }
@@ -279,7 +281,7 @@ function safeColor(value: string): string {
 
 function safeLink(value: string): string {
   const normalized = value.trim();
-  if (!normalized || /[\u0000-\u001f\u007f]/u.test(normalized)) {
+  if (!normalized || hasAsciiControl(normalized)) {
     throw new Error("Link URL is invalid.");
   }
   const scheme = /^([a-z][a-z0-9+.-]*):/iu.exec(normalized)?.[1]?.toLowerCase();
@@ -289,6 +291,7 @@ function safeLink(value: string): string {
   if (normalized.startsWith("//")) throw new Error("Protocol-relative links are unsupported.");
   return normalized;
 }
+
 
 function imageElement(element: HTMLElement): HTMLImageElement {
   const image = element.localName === "img"

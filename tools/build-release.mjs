@@ -1,8 +1,8 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { strToU8, unzipSync, zipSync } from "fflate";
 
-const VERSION = "0.2.1";
-const OUTPUT_PATH = "release/galley-studio-0.2.1.zip";
+const VERSION = "0.2.2";
+const OUTPUT_PATH = "release/galley-studio-0.2.2.zip";
 const RELEASE_FILES = Object.freeze([
   "main.js",
   "manifest.json",

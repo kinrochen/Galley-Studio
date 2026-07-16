@@ -2,6 +2,7 @@ import {
   assertShellFreeHtmlFragment,
   locateHtmlDocument
 } from "./HtmlShellScanner";
+import { replaceChildrenWithHtml } from "../dom/HtmlFragment";
 
 export interface GalleyDocument {
   doctype: "<!DOCTYPE html>";
@@ -53,8 +54,8 @@ export class GalleyDocumentCodec {
       "<!DOCTYPE html><html><head></head><body></body></html>",
       "text/html"
     );
-    parsed.head.innerHTML = document.headHtml;
-    parsed.body.innerHTML = document.bodyHtml;
+    replaceChildrenWithHtml(parsed.head, document.headHtml);
+    replaceChildrenWithHtml(parsed.body, document.bodyHtml);
     if (document.lang) {
       parsed.documentElement.setAttribute("lang", document.lang);
     }

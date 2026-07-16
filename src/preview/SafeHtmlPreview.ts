@@ -30,10 +30,7 @@ export function safePreviewHtml(html: string): string {
   const referrer = document.createElement("meta");
   referrer.setAttribute("name", "referrer");
   referrer.setAttribute("content", "no-referrer");
-  const defaults = document.createElement("style");
-  defaults.textContent =
-    ":root{color-scheme:light;background:#fff}html,body{min-height:100%;background:#fff}body{margin:0}";
-  document.head.prepend(csp, referrer, defaults);
+  document.head.prepend(csp, referrer);
   return `<!DOCTYPE html>${document.documentElement.outerHTML}`;
 }
 

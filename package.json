@@ -1,6 +1,6 @@
 {
   "name": "galley-studio-obsidian",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "AI-driven Markdown-to-HTML publishing studio for Obsidian.",
   "author": "Kinrochen",
   "license": "AGPL-3.0-or-later",
@@ -19,6 +19,7 @@
     "build": "npm run embed:hugerte && tsc --noEmit && node esbuild.config.mjs production && node tools/generate-third-party-notices.mjs",
     "embed:hugerte": "node tools/embed-hugerte-assets.mjs",
     "embed:gzh-skill": "node tools/embed-gzh-skill.mjs",
+    "lint": "eslint src",
     "test": "vitest run",
     "test:acceptance": "vitest run tests/acceptance",
     "test:watch": "vitest",
@@ -50,9 +51,13 @@
   "devDependencies": {
     "@types/node": "24.10.0",
     "esbuild": "0.25.12",
+    "eslint": "9.39.5",
+    "eslint-plugin-obsidianmd": "0.4.1",
+    "globals": "16.4.0",
     "jsdom": "26.1.0",
     "obsidian": "1.11.4",
     "typescript": "5.9.3",
+    "typescript-eslint": "8.64.0",
     "vitest": "3.2.7"
   }
 }

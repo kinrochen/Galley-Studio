@@ -1,4 +1,6 @@
 import { isNormalizedVaultRelativePath } from "../documents/GalleySidecar";
+import { parseHtmlFragment } from "../dom/HtmlFragment";
+import { hasAsciiControl } from "../security/ControlCharacters";
 
 export type VaultResourceUrl = (vaultPath: string) => string;
 
@@ -109,7 +111,8 @@ function isAllowedAuthoringUrl(
   if (
     value !== value.trim() ||
     !value ||
-    /[\\\u0000-\u001f\u007f-\u009f]/u.test(value) ||
+    value.includes("\\") ||
+    hasAsciiControl(value) ||
     value.startsWith("//") ||
     isSystemOrRuntimeUrl(value)
   ) {
@@ -141,9 +144,7 @@ function isCanonicalVaultReference(value: string): boolean {
 }
 
 function parseFragment(html: string): DocumentFragment {
-  const template = document.createElement("template");
-  template.innerHTML = html;
-  return template.content;
+  return parseHtmlFragment(html);
 }
 
 function serializeFragment(fragment: DocumentFragment): string {

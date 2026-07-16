@@ -1,4 +1,5 @@
 import {
+  FileSystemAdapter,
   Modal,
   Notice,
   type App
@@ -31,7 +32,6 @@ import {
   generationModelLabel,
   loadActiveSkillPackage
 } from "./ProductionSkillContext";
-import { ObsidianArtifactVault } from "./ObsidianArtifactVault";
 import * as themeRuntime from "./DesktopThemeRuntime";
 import {
   createProductionGeneration
@@ -307,8 +307,7 @@ function diagnosticSummary(
 }
 
 function vaultWorkingDirectory(app: App): string {
-  const adapter = app.vault.adapter as typeof app.vault.adapter & {
-    getBasePath?: () => string;
-  };
-  return adapter.getBasePath?.() ?? process.cwd();
+  return app.vault.adapter instanceof FileSystemAdapter
+    ? app.vault.adapter.getBasePath()
+    : "";
 }

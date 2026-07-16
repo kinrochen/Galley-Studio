@@ -56,7 +56,7 @@ export interface ObsidianPairOwnership extends ObsidianFileEvidence {
   readonly member: "html" | "sidecar";
 }
 
-export interface ObsidianHistoryObservation extends ObsidianFileEvidence {}
+export type ObsidianHistoryObservation = ObsidianFileEvidence;
 
 export type ObsidianWorkbenchCrashPoint =
   | "after-intent"
@@ -3501,30 +3501,6 @@ export class ObsidianWorkbenchVault
       observed: observed.sort((left, right) => compareText(left.path, right.path)),
       removals: removalData.sort((left, right) => compareText(left.path, right.path))
     });
-  }
-
-  async #historyPlanCurrent(
-    plan: HistoryPlanData,
-    signal?: AbortSignal
-  ): Promise<"current" | "lost" | "collision" | "conflict"> {
-    const currentProvisional = await this.#files.readTextStable(plan.provisional.path, signal);
-    if (!currentProvisional) return "lost";
-    if (!sameExact(currentProvisional, plan.provisional)) return "lost";
-    if (await this.#files.readTextStable(plan.finalPath, signal)) return "collision";
-    const entries = await this.#files.list(folderOf(plan.finalPath), signal);
-    if (entries.some(({ kind }) => kind !== "file")) return "conflict";
-    const visible = new Map<string, VaultFileObservation>();
-    for (const entry of entries) {
-      const observed = await this.#files.readTextStable(entry.path, signal);
-      if (observed) visible.set(entry.path, observed);
-    }
-    if (
-      visible.size !== plan.observed.length ||
-      plan.observed.some((item) => !sameExact(visible.get(item.path) ?? null, item))
-    ) {
-      return "conflict";
-    }
-    return "current";
   }
 
   async #historyHandlesCurrent(

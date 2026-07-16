@@ -88,7 +88,7 @@ describe("plugin console registration", () => {
       expect.arrayContaining([
         expect.objectContaining({
           id: "generate-current-article",
-          name: "Galley Studio: Generate current article / 生成当前文章"
+          name: "Generate current article / 生成当前文章"
         }),
       ])
     );

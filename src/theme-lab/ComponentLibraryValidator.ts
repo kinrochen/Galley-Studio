@@ -85,9 +85,8 @@ export class ComponentLibraryValidator {
     issues: ThemeValidationIssue[],
     requireLeaf: boolean
   ): void {
-    const template = document.createElement("template");
-    template.innerHTML = html;
-    for (const element of template.content.querySelectorAll("*")) {
+    const fragment = parseHtmlFragment(html);
+    for (const element of fragment.querySelectorAll("*")) {
       const tag = element.localName.toLowerCase();
       if (FORBIDDEN_ELEMENTS.has(tag)) {
         issues.push(error(`component_${tag}`, `Component HTML contains forbidden <${tag}>.`));
@@ -121,7 +120,7 @@ export class ComponentLibraryValidator {
 
     if (requireLeaf) {
       const walker = document.createTreeWalker(
-        template.content,
+        fragment,
         NodeFilter.SHOW_TEXT
       );
       let node = walker.nextNode();
@@ -149,3 +148,4 @@ export function report(issues: readonly ThemeValidationIssue[]): ThemeValidation
     issues: Object.freeze([...issues])
   };
 }
+import { parseHtmlFragment } from "../dom/HtmlFragment";

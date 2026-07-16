@@ -502,7 +502,7 @@ describe("plugin command registration", () => {
     expect(commandIds(desktop)).toContain("generate-current-article");
     expect(commandIds(desktop)).toContain("open-current-galley-in-workbench");
     expect(commandNames(desktop)).toContain(
-      "Galley Studio: Generate current article / 生成当前文章"
+      "Generate current article / 生成当前文章"
     );
     expect((desktop as unknown as { views: Map<string, unknown> }).views.has("galley-studio-workbench"))
       .toBe(true);
@@ -619,7 +619,10 @@ describe("plugin command registration", () => {
     const harness = makeProductionPluginApp("", {
       coordinateCopiesTo: "shared.galley.html"
     });
-    const artifacts = new ObsidianArtifactVault(harness.app.vault);
+    const artifacts = new ObsidianArtifactVault(
+      harness.app.vault,
+      harness.app.fileManager
+    );
     const first = await artifacts.createOwned(".first.tmp", "first exact bytes\n");
     const second = await artifacts.createOwned(".second.tmp", "second exact bytes\r\n");
 
@@ -660,7 +663,10 @@ describe("plugin command registration", () => {
     const harness = makeProductionPluginApp("", {
       suppressCopyIndexFor: "unindexed.galley.html"
     });
-    const artifacts = new ObsidianArtifactVault(harness.app.vault);
+    const artifacts = new ObsidianArtifactVault(
+      harness.app.vault,
+      harness.app.fileManager
+    );
     const temp = await artifacts.createOwned(".unindexed.tmp", "orphan bytes");
 
     const commit = artifacts
@@ -683,7 +689,10 @@ describe("plugin command registration", () => {
     const harness = makeProductionPluginApp("", {
       delayCopyIndexFor: "delayed.galley.html"
     });
-    const artifacts = new ObsidianArtifactVault(harness.app.vault);
+    const artifacts = new ObsidianArtifactVault(
+      harness.app.vault,
+      harness.app.fileManager
+    );
     const temp = await artifacts.createOwned(".delayed.tmp", "delayed bytes\r\n");
 
     const commit = artifacts.commitOwned(temp, "delayed.galley.html");
@@ -713,7 +722,7 @@ describe("plugin command registration", () => {
       replacementBytes: "external replacement bytes"
     });
     const repository = new ArtifactRepository(
-      new ObsidianArtifactVault(harness.app.vault),
+      new ObsidianArtifactVault(harness.app.vault, harness.app.fileManager),
       {
         now: () => new Date("2026-07-14T00:00:00.000Z"),
         randomUUID: () => UUID
@@ -759,7 +768,10 @@ describe("plugin command registration", () => {
       swapDuringReadFor: "swapped.galley.html",
       replacementBytes: "replacement during read"
     });
-    const artifacts = new ObsidianArtifactVault(harness.app.vault);
+    const artifacts = new ObsidianArtifactVault(
+      harness.app.vault,
+      harness.app.fileManager
+    );
     const temp = await artifacts.createOwned(".swapped.tmp", "expected bytes");
     const commit = artifacts
       .commitOwned(temp, "swapped.galley.html")
@@ -786,7 +798,10 @@ describe("plugin command registration", () => {
     const harness = makeProductionPluginApp("", {
       suppressCopyIndexFor: "aborted.galley.html"
     });
-    const artifacts = new ObsidianArtifactVault(harness.app.vault);
+    const artifacts = new ObsidianArtifactVault(
+      harness.app.vault,
+      harness.app.fileManager
+    );
     const temp = await artifacts.createOwned(".aborted.tmp", "aborted bytes");
     const controller = new AbortController();
     const commit = artifacts
@@ -1102,6 +1117,13 @@ function makeProductionPluginApp(
     }
   };
   const app = {
+    fileManager: {
+      trashFile: async (file: MemoryObsidianFile) => {
+        deleteCalls.push(file.path);
+        files.delete(file.path);
+        contents.delete(file.path);
+      }
+    },
     secretStorage: {
       getSecret: (id: string) => (id === "secret-id" ? "secret" : null),
       listSecrets: () => ["secret-id"],

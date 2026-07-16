@@ -78,8 +78,8 @@ export class GenerationTaskStore implements GenerationTaskController {
     turns: []
   };
   #controller: AbortController | null = null;
-  #heartbeat: ReturnType<typeof setInterval> | null = null;
-  #pendingNotification: ReturnType<typeof setTimeout> | null = null;
+  #heartbeat: number | null = null;
+  #pendingNotification: number | null = null;
 
   constructor(options: GenerationTaskStoreOptions) {
     this.#options = options;
@@ -262,19 +262,21 @@ export class GenerationTaskStore implements GenerationTaskController {
 
   #startHeartbeat(): void {
     this.#stopTimers();
-    this.#heartbeat = setInterval(() => this.#notify(), 1_000);
+    this.#heartbeat = window.setInterval(() => this.#notify(), 1_000);
   }
 
   #stopTimers(): void {
-    if (this.#heartbeat !== null) clearInterval(this.#heartbeat);
-    if (this.#pendingNotification !== null) clearTimeout(this.#pendingNotification);
+    if (this.#heartbeat !== null) window.clearInterval(this.#heartbeat);
+    if (this.#pendingNotification !== null) {
+      window.clearTimeout(this.#pendingNotification);
+    }
     this.#heartbeat = null;
     this.#pendingNotification = null;
   }
 
   #notifyOutput(): void {
     if (this.#pendingNotification !== null) return;
-    this.#pendingNotification = setTimeout(() => {
+    this.#pendingNotification = window.setTimeout(() => {
       this.#pendingNotification = null;
       this.#notify();
     }, OUTPUT_NOTIFICATION_DELAY_MS);

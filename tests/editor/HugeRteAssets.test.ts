@@ -14,6 +14,7 @@ import {
 const execFileAsync = promisify(execFile);
 const generatedPath = resolve(process.cwd(), "src/generated/hugerteSkin.ts");
 const generatorPath = resolve(process.cwd(), "tools/embed-hugerte-assets.mjs");
+const stylesPath = resolve(process.cwd(), "styles.css");
 
 describe("embedded HugeRTE assets", () => {
   it("exports non-empty, pinned, hashed CSS with the approved font stack and no remote loads", () => {
@@ -28,6 +29,13 @@ describe("embedded HugeRTE assets", () => {
       .not.toMatch(/@import\s+[^;]*(?:https?:)?\/\//iu);
     expect(`${HUGERTE_INLINE_SKIN_CSS}\n${HUGERTE_CONTENT_CSS}`)
       .not.toMatch(/url\(\s*["']?(?:https?:)?\/\//iu);
+  });
+
+  it("embeds the pinned UI skin in the plugin stylesheet", async () => {
+    const styles = await readFile(stylesPath, "utf8");
+    expect(styles).toContain("BEGIN GALLEY STUDIO BUNDLED HUGERTE SKIN");
+    expect(styles).toContain(HUGERTE_INLINE_SKIN_CSS.slice(0, 200));
+    expect(styles).toContain("END GALLEY STUDIO BUNDLED HUGERTE SKIN");
   });
 
   it("generates byte-identical output on repeated runs", async () => {

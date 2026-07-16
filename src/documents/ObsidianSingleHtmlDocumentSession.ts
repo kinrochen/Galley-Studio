@@ -10,6 +10,7 @@ import type {
   OpenedGalleyDocumentSession
 } from "./DocumentSessionOpener";
 import type { GalleyExportRecordV1 } from "../export/ExportRecord";
+import { replaceChildrenWithHtml } from "../dom/HtmlFragment";
 
 export class ObsidianSingleHtmlDocumentSessionOpener {
   constructor(private readonly vault: Vault) {}
@@ -166,7 +167,7 @@ function parseShell(html: string): HtmlShell {
 function serializeShell(shell: HtmlShell, bodyHtml: string): string {
   if (shell.kind === "fragment") return bodyHtml.trim();
   const parsed = new DOMParser().parseFromString(shell.original, "text/html");
-  parsed.body.innerHTML = bodyHtml;
+  replaceChildrenWithHtml(parsed.body, bodyHtml);
   return `<!DOCTYPE html>${parsed.documentElement.outerHTML}`;
 }
 

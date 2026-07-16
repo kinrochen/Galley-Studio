@@ -26,8 +26,8 @@ export const ThemeManifestV1Schema = z
         (value) => /isjiamu\/gzh-design-skill/iu.test(value),
         "The upstream gzh-design attribution is required."
       ),
-    createdAt: z.string().datetime({ offset: true }),
-    updatedAt: z.string().datetime({ offset: true })
+    createdAt: z.iso.datetime({ offset: true }),
+    updatedAt: z.iso.datetime({ offset: true })
   })
   .strict()
   .superRefine((value, context) => {

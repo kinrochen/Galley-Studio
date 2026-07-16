@@ -30,7 +30,7 @@ function inspect(path, text) {
 }
 
 await walk(process.cwd());
-for (const required of ["main.js", "release/galley-studio-0.2.1.zip"]) {
+for (const required of ["main.js", "release/galley-studio-0.2.2.zip"]) {
   try {
     const info = await stat(required);
     if (!info.isFile() || info.size === 0) failures.push(`${required}: missing or empty required artifact`);
@@ -40,12 +40,12 @@ for (const required of ["main.js", "release/galley-studio-0.2.1.zip"]) {
   }
 }
 try {
-  const archive = unzipSync(new Uint8Array(await readFile("release/galley-studio-0.2.1.zip")));
+  const archive = unzipSync(new Uint8Array(await readFile("release/galley-studio-0.2.2.zip")));
   for (const [path, bytes] of Object.entries(archive)) {
     inspect(`release:${path}`, new TextDecoder().decode(bytes));
   }
 } catch (error) {
-  if (error?.code !== "ENOENT") failures.push(`release/galley-studio-0.2.1.zip: invalid ZIP (${error instanceof Error ? error.message : String(error)})`);
+  if (error?.code !== "ENOENT") failures.push(`release/galley-studio-0.2.2.zip: invalid ZIP (${error instanceof Error ? error.message : String(error)})`);
 }
 if (failures.length > 0) throw new Error(`Secret audit failed:\n${failures.join("\n")}`);
 console.log("Secret audit passed: no API-key-shaped value is present in source, fixtures, docs, or release.");

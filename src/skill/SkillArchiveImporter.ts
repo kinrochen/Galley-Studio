@@ -53,7 +53,7 @@ async function sha256(bytes: Uint8Array): Promise<string> {
     bytes.byteOffset,
     bytes.byteOffset + bytes.byteLength
   ) as ArrayBuffer;
-  const digest = await globalThis.crypto.subtle.digest("SHA-256", buffer);
+  const digest = await window.crypto.subtle.digest("SHA-256", buffer);
   return [...new Uint8Array(digest)]
     .map((value) => value.toString(16).padStart(2, "0"))
     .join("");

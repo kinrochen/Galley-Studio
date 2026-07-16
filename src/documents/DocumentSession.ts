@@ -139,7 +139,6 @@ export class DocumentSession<
   #savedDocument: GalleyDocument;
   #currentHtml: string;
   #currentDocument: GalleyDocument;
-  #revision = 0;
   #dirty = false;
   #saving = false;
   #conflict = false;
@@ -163,7 +162,7 @@ export class DocumentSession<
     };
     this.#now = dependencies.now ?? (() => new Date());
     this.#randomUUID =
-      dependencies.randomUUID ?? (() => globalThis.crypto.randomUUID());
+      dependencies.randomUUID ?? (() => window.crypto.randomUUID());
     this.#observation = loaded.snapshot.observation;
     this.#sidecar = loaded.sidecar;
     this.#savedHtml = loaded.snapshot.html;
@@ -228,7 +227,6 @@ export class DocumentSession<
 
     if (sanitizedDocument.bodyHtml === this.#currentDocument.bodyHtml) return;
 
-    this.#revision += 1;
     if (sanitizedDocument.bodyHtml === this.#savedDocument.bodyHtml) {
       this.#currentHtml = this.#savedHtml;
       this.#currentDocument = this.#savedDocument;
@@ -309,7 +307,7 @@ export class DocumentSession<
           this.#conflict = true;
           throw error;
         }
-        if (error instanceof DocumentSavePostCommitError) {
+        if (isDocumentSavePostCommitError<Observation>(error)) {
           await this.#finishPostCommitFailure(
             error,
             preparedHistory,
@@ -321,7 +319,7 @@ export class DocumentSession<
           );
           throw postCommitCause(error);
         }
-        if (error instanceof DocumentPostCommitError) {
+        if (isDocumentPostCommitError<Observation>(error)) {
           this.#dirty = true;
           this.#conflict = true;
           throw error;
@@ -376,7 +374,6 @@ export class DocumentSession<
     this.#currentDocument = loaded.document;
     this.#htmlHash = loaded.snapshot.htmlHash;
     this.#sourceChanged = loaded.sourceChanged;
-    this.#revision += 1;
     this.#dirty = false;
     this.#conflict = false;
   }
@@ -453,7 +450,7 @@ export class DocumentSession<
         }
       } catch (error) {
         if (hasRecordOutcome(error)) throw error;
-        if (error instanceof DocumentPostCommitError && error.snapshot) {
+        if (isDocumentPostCommitError<Observation>(error) && error.snapshot) {
           try {
             verifyCommittedSnapshot(error.snapshot, nextSidecar);
             this.#applyExportCommit(error.snapshot, nextSidecar);
@@ -648,6 +645,18 @@ function parseSidecar(value: string): GalleySidecarV1 {
 
 function serializeSidecar(sidecar: GalleySidecarV1): string {
   return `${JSON.stringify(sidecar, null, 2)}\n`;
+}
+
+function isDocumentPostCommitError<Observation>(
+  error: unknown
+): error is DocumentPostCommitError<Observation> {
+  return error instanceof DocumentPostCommitError;
+}
+
+function isDocumentSavePostCommitError<Observation>(
+  error: unknown
+): error is DocumentSavePostCommitError<Observation> {
+  return error instanceof DocumentSavePostCommitError;
 }
 
 function verifyCommittedSnapshot(

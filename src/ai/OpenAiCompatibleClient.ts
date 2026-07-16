@@ -174,7 +174,7 @@ export class OpenAiCompatibleClient {
     signal: AbortSignal,
     requestId: number
   ): Promise<ChatTurnResult> {
-    const stream = this.transport.stream;
+    const stream = this.transport.stream?.bind(this.transport);
     if (!stream) {
       throw new AiError("invalid_response");
     }
@@ -212,13 +212,7 @@ export class OpenAiCompatibleClient {
     };
 
     try {
-      for await (const chunk of stream.call(
-        this.transport,
-        url,
-        headers,
-        body,
-        signal
-      )) {
+      for await (const chunk of stream(url, headers, body, signal)) {
         consume(decoder.push(chunk));
       }
       consume(decoder.finish());
@@ -268,7 +262,7 @@ export class OpenAiCompatibleClient {
       rejectCancellation(new AiError("aborted"));
     };
     callerSignal.addEventListener("abort", forwardAbort, { once: true });
-    const timeout = setTimeout(() => {
+    const timeout = window.setTimeout(() => {
       attemptController.abort();
       rejectCancellation(new AiError("timeout", { retryable: false }));
     }, this.timeoutMs);
@@ -279,7 +273,7 @@ export class OpenAiCompatibleClient {
         cancellation
       ]);
     } finally {
-      clearTimeout(timeout);
+      window.clearTimeout(timeout);
       callerSignal.removeEventListener("abort", forwardAbort);
     }
   }
@@ -523,10 +517,10 @@ function abortableDelay(
       return;
     }
     const onAbort = (): void => {
-      clearTimeout(timeout);
+      window.clearTimeout(timeout);
       reject(new AiError("aborted"));
     };
-    const timeout = setTimeout(() => {
+    const timeout = window.setTimeout(() => {
       signal.removeEventListener("abort", onAbort);
       resolve();
     }, milliseconds);

@@ -9,10 +9,7 @@ import {
 } from "../../src/editor/HugeRteAdapter";
 import { HUGERTE_VALID_ELEMENTS } from "../../src/security/AuthoringSanitizer";
 import { EditorResourceResolver } from "../../src/editor/EditorResourceResolver";
-import {
-  HUGERTE_CONTENT_CSS,
-  HUGERTE_INLINE_SKIN_CSS
-} from "../../src/generated/hugerteSkin";
+import { HUGERTE_CONTENT_CSS } from "../../src/generated/hugerteSkin";
 
 type Listener = () => void;
 
@@ -221,11 +218,10 @@ function mountOptions(overrides: Partial<{ onChange(html: string): void; onSelec
 afterEach(() => {
   vi.unstubAllGlobals();
   document.body.replaceChildren();
-  document.head.querySelectorAll("style[data-galley-hugerte-skin]").forEach((node) => node.remove());
 });
 
 describe("HugeRteAdapter configuration", () => {
-  it("uses only bundled modules, inline styles, the shared policy, and the supplied base URL", async () => {
+  it("uses bundled modules, the static UI skin, the shared policy, and the supplied base URL", async () => {
     const runtime = new FakeRuntime();
     const host = document.createElement("div");
     const adapter = makeAdapter(runtime);
@@ -260,8 +256,7 @@ describe("HugeRteAdapter configuration", () => {
     expect(runtime.options).not.toHaveProperty("images_upload_url");
     expect(runtime.options).not.toHaveProperty("api_key");
     expect(runtime.editors[0]?.html).toBe("<article><p>Initial</p></article>");
-    expect(document.head.querySelector("style[data-galley-hugerte-skin]")?.textContent)
-      .toBe(HUGERTE_INLINE_SKIN_CSS);
+    expect(document.head.querySelector("style[data-galley-hugerte-skin]")).toBeNull();
     adapter.destroy();
   });
 
@@ -693,32 +688,24 @@ describe("HugeRteAdapter lifecycle", () => {
     expect(runtime.editors[0]!.removeCount).toBe(1);
   });
 
-  it("isolates target and skin release errors and retries the failed owned step", async () => {
-    for (const failingStep of ["target", "skin"] as const) {
-      const runtime = new FakeRuntime();
-      const host = document.createElement("div");
-      const adapter = makeAdapter(runtime);
-      await adapter.mount(host, "<p>one</p>", mountOptions());
-      const target = host.querySelector("textarea")!;
-      const skin = document.head.querySelector<HTMLStyleElement>(
-        "style[data-galley-hugerte-skin]"
-      )!;
-      const failedNode = failingStep === "target" ? target : skin;
-      vi.spyOn(failedNode, "remove").mockImplementationOnce(() => {
-        throw new Error(`${failingStep} remove failed`);
-      });
+  it("isolates target release errors and retries the failed owned step", async () => {
+    const runtime = new FakeRuntime();
+    const host = document.createElement("div");
+    const adapter = makeAdapter(runtime);
+    await adapter.mount(host, "<p>one</p>", mountOptions());
+    const target = host.querySelector("textarea")!;
+    vi.spyOn(target, "remove").mockImplementationOnce(() => {
+      throw new Error("target remove failed");
+    });
 
-      expect(() => adapter.destroy()).not.toThrow();
-      expect(runtime.editors[0]!.listenerCount()).toBe(0);
-      expect(runtime.editors[0]!.removeCount).toBe(1);
-      expect(host.contains(target)).toBe(failingStep === "target");
-      expect(skin.isConnected).toBe(failingStep === "skin");
+    expect(() => adapter.destroy()).not.toThrow();
+    expect(runtime.editors[0]!.listenerCount()).toBe(0);
+    expect(runtime.editors[0]!.removeCount).toBe(1);
+    expect(host.contains(target)).toBe(true);
 
-      adapter.destroy();
-      expect(host.contains(target)).toBe(false);
-      expect(skin.isConnected).toBe(false);
-      expect(runtime.editors[0]!.removeCount).toBe(1);
-    }
+    adapter.destroy();
+    expect(host.contains(target)).toBe(false);
+    expect(runtime.editors[0]!.removeCount).toBe(1);
   });
 
   it("preserves cancellation while teardown errors remain retryable", async () => {
@@ -813,7 +800,7 @@ describe("HugeRteAdapter lifecycle", () => {
     ).toBe(true);
   });
 
-  it("reference-counts the shared UI skin across simultaneous adapters", async () => {
+  it("never injects a dynamic UI skin across simultaneous adapters", async () => {
     const firstRuntime = new FakeRuntime();
     const secondRuntime = new FakeRuntime();
     const first = makeAdapter(firstRuntime);
@@ -821,10 +808,10 @@ describe("HugeRteAdapter lifecycle", () => {
 
     await first.mount(document.createElement("div"), "<p>one</p>", mountOptions());
     await second.mount(document.createElement("div"), "<p>two</p>", mountOptions());
-    expect(document.head.querySelectorAll("style[data-galley-hugerte-skin]")).toHaveLength(1);
+    expect(document.head.querySelectorAll("style[data-galley-hugerte-skin]")).toHaveLength(0);
 
     first.destroy();
-    expect(document.head.querySelectorAll("style[data-galley-hugerte-skin]")).toHaveLength(1);
+    expect(document.head.querySelectorAll("style[data-galley-hugerte-skin]")).toHaveLength(0);
     second.destroy();
     expect(document.head.querySelectorAll("style[data-galley-hugerte-skin]")).toHaveLength(0);
   });

@@ -1,3 +1,8 @@
+import {
+  hasAsciiControl,
+  hasBidiControl
+} from "./ControlCharacters";
+
 export interface SanitizedInlineStyle {
   style: string;
   removed: string[];
@@ -170,8 +175,6 @@ const ALLOWED_FUNCTIONS = new Set([
 const DISPLAY_VALUES = new Set(["block", "inline", "inline-block", "flex"]);
 const SAFE_POSITION_VALUES = new Set(["relative", "static"]);
 const PROPERTY_PATTERN = /^-?[a-z][a-z0-9-]*$/i;
-const UNSAFE_CONTROL_PATTERN =
-  /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/;
 const UNSAFE_VALUE_PATTERN =
   /(?:url|expression|var|env|image-set|-webkit-image-set|cross-fade|element|paint)\s*\(|@import\b|behavior\b|-moz-binding\b/i;
 
@@ -341,7 +344,8 @@ function hasUnsafeSyntax(value: string): boolean {
     value.includes("\\") ||
     value.includes("/*") ||
     value.includes("*/") ||
-    UNSAFE_CONTROL_PATTERN.test(value) ||
+    hasAsciiControl(value, true) ||
+    hasBidiControl(value) ||
     UNSAFE_VALUE_PATTERN.test(value)
   );
 }

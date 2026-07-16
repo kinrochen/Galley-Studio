@@ -17,7 +17,7 @@ export async function renderExportConfigurationPage(
     actions: GalleyActions;
     text: ConsolePageText;
     state: ExportConfigurationFormState;
-    confirm: (message: string) => boolean;
+    confirm: (message: string) => boolean | Promise<boolean>;
     run: (operation: string, action: (signal: AbortSignal) => Promise<unknown>) => Promise<void>;
   }
 ): Promise<void> {
@@ -85,8 +85,18 @@ export async function renderExportConfigurationPage(
     });
     const remove = button(options.text.t("common.action.delete"), "export-config-delete");
     remove.addEventListener("click", () => {
-      if (!options.confirm(options.text.t("common.confirm.delete", { target: configuration.name }))) return;
-      void options.run("export-config-delete", async () => runtime.deleteExportConfiguration?.(configuration.id));
+      void (async () => {
+        const confirmed = await options.confirm(
+          options.text.t("common.confirm.delete", {
+            target: configuration.name
+          })
+        );
+        if (!confirmed) return;
+        await options.run(
+          "export-config-delete",
+          async () => runtime.deleteExportConfiguration?.(configuration.id)
+        );
+      })();
     });
     row.append(edit, duplicate, remove);
     container.append(row);

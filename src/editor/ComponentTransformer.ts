@@ -1,4 +1,8 @@
 import { ThemeComponentCatalog } from "./ThemeComponentCatalog";
+import {
+  parseHtmlFragment,
+  replaceChildrenWithClones
+} from "../dom/HtmlFragment";
 
 export type ComponentTransformErrorCode =
   | "component_role_unavailable"
@@ -30,7 +34,7 @@ export function transformSelectedBlock(
   }
 
   const contentSlot = slots[0] ?? target;
-  contentSlot.innerHTML = selectedElement.innerHTML;
+  replaceChildrenWithClones(contentSlot, selectedElement);
   target.removeAttribute("data-galley-source");
   const sourceId = selectedElement.getAttribute("data-galley-source");
   if (sourceId) target.setAttribute("data-galley-source", sourceId);
@@ -46,10 +50,9 @@ function selectionElement(source: string | Element): HTMLElement {
     return source.cloneNode(true) as HTMLElement;
   }
 
-  const template = document.createElement("template");
-  template.innerHTML = source;
-  const elements = [...template.content.children];
-  const hasOtherContent = [...template.content.childNodes].some(
+  const fragment = parseHtmlFragment(source);
+  const elements = [...fragment.children];
+  const hasOtherContent = [...fragment.childNodes].some(
     (node) => node.nodeType !== Node.ELEMENT_NODE && node.textContent?.trim()
   );
   if (

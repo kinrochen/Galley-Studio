@@ -52,7 +52,7 @@ export class LocaleStore implements LocalizedText {
     const localized = this.#resources?.[this.locale()]?.[key];
     const template = localized ?? EN[key];
     if (!parameters) return template;
-    return template.replace(/\{([A-Za-z][A-Za-z0-9_]*)\}/g, (token, name) =>
+    return template.replace(/\{([A-Za-z][A-Za-z0-9_]*)\}/g, (token: string, name: string) =>
       Object.hasOwn(parameters, name) ? String(parameters[name]) : token
     );
   }

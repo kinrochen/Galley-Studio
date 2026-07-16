@@ -60,7 +60,7 @@ export class SourceBodyEditor implements HtmlEditorAdapter {
     this.hasMounted = true;
     this.html = bodyHtml;
     this.edited = false;
-    this.onChange = options.onChange;
+    this.onChange = (nextHtml) => options.onChange(nextHtml);
     const formatted = await formatSourceHtml(bodyHtml);
     const document = container.ownerDocument;
     const shell = document.createElement("section");

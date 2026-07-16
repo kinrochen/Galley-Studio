@@ -1,10 +1,13 @@
 import createDOMPurify, {
   type Config,
   type RemovedAttribute,
-  type RemovedElement,
-  type WindowLike
+  type RemovedElement
 } from "dompurify";
 import { locateHtmlDocument } from "../documents/HtmlShellScanner";
+import {
+  hasAsciiControl,
+  stripAsciiControlAndSpace
+} from "./ControlCharacters";
 import { sanitizeInlineStyle } from "./InlineStyleSanitizer";
 
 export interface SanitizedDocument {
@@ -218,7 +221,7 @@ export function sanitizeAuthoringDocument(
   preprocessDocument(parsed, removed, additionalAttributes);
 
   const canonicalInput = `<!DOCTYPE html>${parsed.documentElement.outerHTML}`;
-  const purifier = createDOMPurify(window as unknown as WindowLike);
+  const purifier = createDOMPurify(window);
   const clean = purifier.sanitize(canonicalInput, {
     ...PURIFY_CONFIG,
     ...(additionalAttributes.size === 0
@@ -396,12 +399,13 @@ function isSafeUrlView(
   if (
     !value ||
     value !== value.trim() ||
-    /[\\\u0000-\u001f\u007f-\u009f]/.test(value)
+    value.includes("\\") ||
+    hasAsciiControl(value)
   ) {
     return false;
   }
 
-  const compact = value.replace(/[\u0000-\u0020\u007f-\u009f]/g, "");
+  const compact = stripAsciiControlAndSpace(value);
   if (compact.startsWith("//")) {
     return false;
   }

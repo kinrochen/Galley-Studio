@@ -11,11 +11,11 @@ const NORMALIZED_SKILL_PATH = z.string().min(1).refine(
 );
 
 export const GalleyExportRecordV1Schema = z.object({
-  id: z.string().uuid(),
+  id: z.uuid(),
   configurationId: z.string().min(1).max(64),
   profileId: z.enum(["standard-web", "portable-inline", "wechat"]),
   path: NORMALIZED_PATH,
-  exportedAt: z.string().datetime({ offset: true }),
+  exportedAt: z.iso.datetime({ offset: true }),
   sourceHtmlHash: z.string().regex(SHA256),
   outputHash: z.string().regex(SHA256),
   repairRounds: z.number().int().min(0).max(2),

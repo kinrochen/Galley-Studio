@@ -1,4 +1,5 @@
 import { sha256Text } from "../documents/GalleySidecar";
+import { parseHtmlFragment } from "../dom/HtmlFragment";
 import type { ExportConfiguration } from "./ExportConfiguration";
 import {
   GalleyExportRecordV1Schema,
@@ -91,7 +92,7 @@ export class ExportService {
     this.#recorder = options.recorder;
     this.#repairer = options.repairer;
     this.#now = options.now ?? (() => new Date());
-    this.#randomUUID = options.randomUUID ?? (() => globalThis.crypto.randomUUID());
+    this.#randomUUID = options.randomUUID ?? (() => window.crypto.randomUUID());
   }
 
   async export(
@@ -199,9 +200,8 @@ function stampProvenance(
   sourceHtmlHash: string
 ): string {
   if (profileId === "wechat") {
-    const template = document.createElement("template");
-    template.innerHTML = html;
-    const root = template.content.firstElementChild;
+    const fragment = parseHtmlFragment(html);
+    const root = fragment.firstElementChild;
     if (!root) return html;
     root.setAttribute("data-galley-document-id", documentId);
     root.setAttribute("data-galley-profile", profileId);

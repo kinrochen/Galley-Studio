@@ -1,3 +1,5 @@
+import { parseHtmlFragment } from "../dom/HtmlFragment";
+
 const ROLE = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u;
 const FORBIDDEN_TEMPLATE_ELEMENTS =
   "script,style,iframe,object,embed,form,input,button,textarea,select,svg,math";
@@ -45,9 +47,7 @@ export class ThemeComponentCatalog {
 
 function componentRoot(source: string | Document | Element): ParentNode {
   if (typeof source !== "string") return source;
-  const template = document.createElement("template");
-  template.innerHTML = source;
-  return template.content;
+  return parseHtmlFragment(source);
 }
 
 function sanitizeTemplate(source: HTMLElement): HTMLElement | null {
