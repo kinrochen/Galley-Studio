@@ -1,6 +1,6 @@
 {
   "name": "galley-studio-obsidian",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "AI-driven Markdown-to-HTML publishing studio for Obsidian.",
   "author": "Kinrochen",
   "license": "AGPL-3.0-or-later",
@@ -27,10 +27,11 @@
     "benchmark:long": "node tools/benchmark-long.mjs",
     "audit:licenses": "node tools/audit-licenses.mjs",
     "audit:package": "node tools/audit-package.mjs",
+    "audit:code": "node tools/audit-code-safety.mjs",
     "audit:secrets": "node tools/audit-secrets.mjs",
     "audit:mobile": "node tools/audit-mobile-boundary.mjs",
     "audit:static": "npm run audit:secrets && npm run audit:mobile",
-    "release": "npm run build && npm run audit:licenses && npm run audit:package && npm run audit:mobile && node tools/build-release.mjs && npm run audit:secrets"
+    "release": "npm run build && npm run audit:code && npm run audit:licenses && npm run audit:package && npm run audit:mobile && node tools/build-release.mjs && npm run audit:secrets"
   },
   "dependencies": {
     "@codemirror/commands": "6.10.4",

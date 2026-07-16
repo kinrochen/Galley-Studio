@@ -2,6 +2,14 @@
 
 All notable changes to Galley Studio are documented here.
 
+## 0.2.3 — 2026-07-16
+
+- Remove HugeRTE's unused runtime script loader from the production bundle.
+- Statically bundle every enabled HugeRTE core module, theme, icon set, and
+  plugin without creating `<script>` elements.
+- Add a release audit that fails if dynamic script element creation reappears
+  in `main.js`.
+
 ## 0.2.2 — 2026-07-16
 
 ### 中文

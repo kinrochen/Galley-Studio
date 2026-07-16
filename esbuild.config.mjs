@@ -15,6 +15,42 @@ const deferredEditorBoundary = {
     }));
   }
 };
+const staticHugeRteBoundary = {
+  name: "galley-static-hugerte-boundary",
+  setup(build) {
+    build.onLoad(
+      { filter: /node_modules[\\/]hugerte[\\/]hugerte\.js$/ },
+      async ({ path }) => {
+        const source = await readFile(path, "utf8");
+        const methodStart = "      loadScript(url) {";
+        const nextMethod = "      isDone(url) {";
+        const start = source.indexOf(methodStart);
+        const end = source.indexOf(nextMethod, start);
+        if (
+          start < 0 ||
+          end < 0 ||
+          source.indexOf(methodStart, start + methodStart.length) >= 0
+        ) {
+          throw new Error(
+            "Unable to disable HugeRTE dynamic script loading safely."
+          );
+        }
+        const replacement = [
+          "      loadScript(url) {",
+          "        return Promise.reject(",
+          "          new Error('Dynamic HugeRTE script loading is disabled: ' + url)",
+          "        );",
+          "      }",
+          ""
+        ].join("\n");
+        return {
+          contents: `${source.slice(0, start)}${replacement}${source.slice(end)}`,
+          loader: "js"
+        };
+      }
+    );
+  }
+};
 
 const context = await esbuild.context({
   entryPoints: ["src/main.ts"],
@@ -24,7 +60,7 @@ const context = await esbuild.context({
   target: "es2022",
   platform: "browser",
   loader: { ".md": "text" },
-  plugins: [deferredEditorBoundary],
+  plugins: [deferredEditorBoundary, staticHugeRteBoundary],
   sourcemap: production ? false : "inline",
   minify: production,
   metafile: production,
