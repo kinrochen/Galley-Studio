@@ -237,7 +237,7 @@ describe("production services behind typed console actions", () => {
       listArticles: () => catalog.snapshot(),
       openPreview: async (path) => {
         const leaf = app.workspace.getLeaf("tab");
-        await leaf.setViewState({ type: "galley-preview", state: { path }, active: true });
+        await leaf.setViewState({ type: "galley-studio-preview", state: { path }, active: true });
       },
       saveLanguage: async (language) => {
         host.replaceSettings(normalizeSettings({ ...host.getSettings(), language }));
@@ -262,7 +262,7 @@ describe("production services behind typed console actions", () => {
     edit?.click();
     await vi.waitFor(() =>
       expect(leafState(leaves.at(-1))).toMatchObject({
-        type: "galley-workbench",
+        type: "galley-studio-workbench",
         state: { path: "Galley/console.galley.html" }
       })
     );
@@ -358,7 +358,7 @@ describe("production services behind typed console actions", () => {
       .querySelector<HTMLButtonElement>('[data-action="theme-lab"]')
       ?.click();
     await vi.waitFor(() =>
-      expect(leafState(leaves.at(-1))).toMatchObject({ type: "galley-theme-lab" })
+      expect(leafState(leaves.at(-1))).toMatchObject({ type: "galley-studio-theme-lab" })
     );
     let themeSaveError: unknown;
     const themeLab = new ThemeLabView(leaves.at(-1)!, {

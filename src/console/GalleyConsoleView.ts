@@ -20,7 +20,7 @@ import {
   type OperationState
 } from "./ConsoleTypes";
 
-export const GALLEY_CONSOLE_VIEW_TYPE = "galley-console";
+export const GALLEY_CONSOLE_VIEW_TYPE = "galley-studio-console";
 
 export interface GalleyConsoleViewServices {
   readonly actions: GalleyActions;

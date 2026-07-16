@@ -25,7 +25,7 @@ describe("Galley plugin workbench registration", () => {
     await vi.waitFor(() => expect(
       (harness.leaf as unknown as { state: unknown }).state
     ).toMatchObject({
-      type: "galley-workbench",
+      type: "galley-studio-workbench",
       state: { path: "notes/a.galley.html" },
       active: true
     }));
@@ -44,15 +44,15 @@ describe("Galley plugin workbench registration", () => {
     const galleyMenu = new Menu();
     listener(galleyMenu, { path: "notes/a.galley.html", name: "a.galley.html" });
     expect(menuItems(galleyMenu).map(({ title }) => title)).toEqual([
-      "Open in Galley workbench",
-      "Open Galley preview"
+      "Open in Galley Studio workbench",
+      "Open Galley Studio preview"
     ]);
 
     const normalMenu = new Menu();
     listener(normalMenu, { path: "notes/a.html", name: "a.html" });
     expect(menuItems(normalMenu).map(({ title }) => title)).toEqual([
-      "Open in Galley workbench",
-      "Open Galley preview"
+      "Open in Galley Studio workbench",
+      "Open Galley Studio preview"
     ]);
 
     const folderMenu = new Menu();

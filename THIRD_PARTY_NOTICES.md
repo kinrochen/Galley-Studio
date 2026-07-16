@@ -3,9 +3,9 @@
 This file is generated from the production esbuild dependency graph. It contains
 the complete license/notice files distributed by every bundled runtime package.
 
-## Galley corresponding source
+## Galley Studio corresponding source
 
-- Source: https://github.com/kinrochen/Galley
+- Source: https://github.com/kinrochen/Galley-Studio
 - Project license: GNU Affero General Public License v3.0 (AGPL-3.0)
 
 ## gzh-design-skill
@@ -14,7 +14,7 @@ the complete license/notice files distributed by every bundled runtime package.
 - Pinned commit: `ba1f4175519b481cb3566616c9e5178705067904`
 - License: GNU Affero General Public License v3.0 (AGPL-3.0)
 
-Galley embeds the regular files from that pinned clean checkout. Bundled scripts
+Galley Studio embeds the regular files from that pinned clean checkout. Bundled scripts
 are exposed to the Skill runtime as read-only text and are never executed.
 
 ### gzh-design-skill/LICENSE

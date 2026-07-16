@@ -1,8 +1,8 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { strToU8, unzipSync, zipSync } from "fflate";
 
-const VERSION = "0.2.0";
-const OUTPUT_PATH = "release/galley-0.2.0.zip";
+const VERSION = "0.2.1";
+const OUTPUT_PATH = "release/galley-studio-0.2.1.zip";
 const RELEASE_FILES = Object.freeze([
   "main.js",
   "manifest.json",
@@ -13,6 +13,9 @@ const RELEASE_FILES = Object.freeze([
 const STABLE_MTIME = new Date("1980-01-01T00:00:00.000Z");
 const manifest = JSON.parse(await readFile("manifest.json", "utf8"));
 if (manifest.version !== VERSION) throw new Error("Release manifest version mismatch.");
+if (manifest.id !== "galley-studio" || manifest.name !== "Galley Studio") {
+  throw new Error("Release manifest identity mismatch.");
+}
 if (manifest.isDesktopOnly !== false || manifest.minAppVersion !== "1.11.4") {
   throw new Error("Release manifest platform contract mismatch.");
 }
@@ -44,7 +47,7 @@ for (const path of RELEASE_FILES) {
 }
 const notices = new TextDecoder().decode(unpacked["THIRD_PARTY_NOTICES.md"]);
 for (const required of [
-  "https://github.com/kinrochen/Galley",
+  "https://github.com/kinrochen/Galley-Studio",
   "ba1f4175519b481cb3566616c9e5178705067904",
   "Permission is hereby granted, free of charge",
   "Apache License",

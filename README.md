@@ -1,4 +1,4 @@
-# Galley
+# Galley Studio
 
 [中文](#中文) · [English](#english)
 
@@ -6,17 +6,17 @@
 
 ## 中文
 
-Galley 是一个面向 Obsidian 的 AI 文章排版与 HTML 编辑插件。它可以将
+Galley Studio 是一个面向 Obsidian 的 AI 文章排版与 HTML 编辑插件。它可以将
 Markdown 文章交给 OpenAI-compatible 模型、Codex CLI 或 Claude CLI，
 结合内置排版 Skill 生成适合微信公众号等场景的 HTML，并在 Obsidian
 中完成预览、可视化编辑、源码编辑和复制导出。
 
 - 作者：**Kinrochen**
-- 当前版本：**0.2.0**
+- 当前版本：**0.2.1**
 - 最低 Obsidian 版本：**1.11.4**
 - 许可证：**AGPL-3.0-or-later**
-- 项目地址：<https://github.com/kinrochen/Galley>
-- 宣传文章：[Galley：把 Obsidian 里的 Markdown，变成真正可编辑的公众号 HTML](docs/blog/galley-obsidian-ai-publishing-studio.md)
+- 项目地址：<https://github.com/kinrochen/Galley-Studio>
+- 宣传文章：[Galley Studio：把 Obsidian 里的 Markdown，变成真正可编辑的公众号 HTML](docs/blog/galley-studio-obsidian-ai-publishing-studio.md)
 - 支持项目：<https://ifdian.net/a/kinrochen>
 
 ### 功能
@@ -35,7 +35,7 @@ Markdown 文章交给 OpenAI-compatible 模型、Codex CLI 或 Claude CLI，
 #### HTML 工作台
 
 - 安装插件后，`.html` 文件会显示在 Obsidian 文件管理器中。
-- Desktop 端单击 HTML 文件直接进入 Galley 工作台。
+- Desktop 端单击 HTML 文件直接进入 Galley Studio 工作台。
 - 在同一个页面切换：
   - **预览**：沙箱化、安全渲染最终 HTML。
   - **编辑**：使用可视化富文本编辑器修改文章。
@@ -59,7 +59,7 @@ Markdown 文章交给 OpenAI-compatible 模型、Codex CLI 或 Claude CLI，
 1. 在 Obsidian 仓库中创建目录：
 
    ```text
-   .obsidian/plugins/galley/
+   .obsidian/plugins/galley-studio/
    ```
 
 2. 将以下文件复制到该目录：
@@ -71,7 +71,7 @@ Markdown 文章交给 OpenAI-compatible 模型、Codex CLI 或 Claude CLI，
    ```
 
 3. 重新加载 Obsidian。
-4. 在“设置 → 第三方插件”中启用 **Galley**。
+4. 在“设置 → 第三方插件”中启用 **Galley Studio**。
 
 #### 从源码构建
 
@@ -83,18 +83,18 @@ npm run build
 ```
 
 构建完成后，将根目录中的 `main.js`、`manifest.json` 和 `styles.css`
-复制到 `.obsidian/plugins/galley/`。
+复制到 `.obsidian/plugins/galley-studio/`。
 
 ### 配置生成方式
 
-打开“Galley 设置”并选择生成 Agent。
+打开“Galley Studio 设置”并选择生成 Agent。
 
 #### 插件内模型
 
 1. 选择 `Plugin`。
 2. 填写 OpenAI-compatible Base URL 和模型名称。
 3. 在 Obsidian SecretStorage 中保存 API Key。
-4. 在 Galley 中选择对应的 Secret ID。
+4. 在 Galley Studio 中选择对应的 Secret ID。
 
 插件设置只保存 Secret ID，不会把 API Key 写入普通配置文件。
 
@@ -113,7 +113,7 @@ Desktop 端可以选择：
 2. 点击侧边栏报纸图标，或运行命令：
 
    ```text
-   Galley: Open console / 打开控制台
+   Galley Studio: Open console / 打开控制台
    ```
 
 3. 选择主题并开始生成。
@@ -128,7 +128,7 @@ assets/          内置生成与导出配置
 docs/            设计说明和实施记录
 src/
   ai/            模型和本地 CLI 客户端
-  console/       Galley 控制台
+  console/       Galley Studio 控制台
   generation/    生成任务、Skill 驱动流程和 HTML 提取
   documents/     HTML 文档会话、保存和恢复
   editor/        可视化编辑器与源码编辑器
@@ -165,13 +165,13 @@ npm run release
 
 ### 支持项目
 
-如果 Galley 对你有帮助，可以通过爱发电支持后续开发：
+如果 Galley Studio 对你有帮助，可以通过爱发电支持后续开发：
 
 **<https://ifdian.net/a/kinrochen>**
 
 ### 许可证与第三方组件
 
-Galley 使用 **GNU Affero General Public License v3.0 or later**。
+Galley Studio 使用 **GNU Affero General Public License v3.0 or later**。
 完整许可证见 [LICENSE](LICENSE)，第三方依赖与内置 Skill 的来源和许可证
 见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
@@ -179,7 +179,7 @@ Galley 使用 **GNU Affero General Public License v3.0 or later**。
 
 ## English
 
-Galley is an AI-assisted article formatting and HTML editing plugin for
+Galley Studio is an AI-assisted article formatting and HTML editing plugin for
 Obsidian. It sends Markdown articles to an OpenAI-compatible model, Codex CLI,
 or Claude CLI, applies the bundled publishing Skill, and produces editable HTML
 for WeChat Official Accounts and other publishing workflows. The resulting
@@ -187,11 +187,11 @@ document can be previewed, visually edited, source-edited, saved, and copied
 without leaving Obsidian.
 
 - Author: **Kinrochen**
-- Current version: **0.2.0**
+- Current version: **0.2.1**
 - Minimum Obsidian version: **1.11.4**
 - License: **AGPL-3.0-or-later**
-- Repository: <https://github.com/kinrochen/Galley>
-- Launch article (Chinese): [Galley: turn Obsidian Markdown into editable publishing HTML](docs/blog/galley-obsidian-ai-publishing-studio.md)
+- Repository: <https://github.com/kinrochen/Galley-Studio>
+- Launch article (Chinese): [Galley Studio: turn Obsidian Markdown into editable publishing HTML](docs/blog/galley-studio-obsidian-ai-publishing-studio.md)
 - Support the project: <https://ifdian.net/a/kinrochen>
 
 ### Features
@@ -212,7 +212,7 @@ without leaving Obsidian.
 #### HTML workbench
 
 - Show `.html` files directly in the Obsidian file explorer after installation.
-- Open HTML files in the Galley workbench with a normal file click on Desktop.
+- Open HTML files in the Galley Studio workbench with a normal file click on Desktop.
 - Switch between three modes in the same view:
   - **Preview** renders sanitized HTML in a restricted sandbox.
   - **Edit** provides a visual rich-text editing experience.
@@ -237,7 +237,7 @@ without leaving Obsidian.
 1. Create the following directory inside your Obsidian vault:
 
    ```text
-   .obsidian/plugins/galley/
+   .obsidian/plugins/galley-studio/
    ```
 
 2. Copy these files into the directory:
@@ -249,7 +249,7 @@ without leaving Obsidian.
    ```
 
 3. Reload Obsidian.
-4. Enable **Galley** under **Settings → Community plugins**.
+4. Enable **Galley Studio** under **Settings → Community plugins**.
 
 #### Build from source
 
@@ -261,20 +261,20 @@ npm run build
 ```
 
 After the build finishes, copy `main.js`, `manifest.json`, and `styles.css`
-from the project root into `.obsidian/plugins/galley/`.
+from the project root into `.obsidian/plugins/galley-studio/`.
 
 ### Configure a generation agent
 
-Open Galley settings and select a generation agent.
+Open Galley Studio settings and select a generation agent.
 
 #### In-plugin provider
 
 1. Select `Plugin`.
 2. Enter an OpenAI-compatible Base URL and model name.
 3. Store the API key in Obsidian SecretStorage.
-4. Select the corresponding Secret ID in Galley.
+4. Select the corresponding Secret ID in Galley Studio.
 
-Galley persists only the Secret ID. It does not write the raw API key to its
+Galley Studio persists only the Secret ID. It does not write the raw API key to its
 ordinary settings data.
 
 #### Local CLI
@@ -293,7 +293,7 @@ an explicit executable path when automatic discovery is not sufficient.
 2. Select the newspaper ribbon icon or run:
 
    ```text
-   Galley: Open console / 打开控制台
+   Galley Studio: Open console / 打开控制台
    ```
 
 3. Select a theme and start generation.
@@ -308,7 +308,7 @@ assets/          Bundled generation and export profiles
 docs/            Design notes and implementation records
 src/
   ai/            Provider and local CLI clients
-  console/       Galley console
+  console/       Galley Studio console
   generation/    Tasks, Skill-driven generation, and HTML extraction
   documents/     HTML sessions, persistence, and recovery
   editor/        Visual and source editors
@@ -348,14 +348,14 @@ metadata, Mobile boundaries, licenses, and secret scanning.
 
 ### Support
 
-If Galley is useful to you, you can support continued development through
+If Galley Studio is useful to you, you can support continued development through
 Afdian:
 
 **<https://ifdian.net/a/kinrochen>**
 
 ### License and third-party components
 
-Galley is licensed under the **GNU Affero General Public License v3.0 or
+Galley Studio is licensed under the **GNU Affero General Public License v3.0 or
 later**. See [LICENSE](LICENSE) for the complete license and
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for bundled dependency and
 Skill attribution.

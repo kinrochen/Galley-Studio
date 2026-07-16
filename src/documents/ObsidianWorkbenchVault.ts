@@ -92,7 +92,7 @@ export class ObsidianWorkbenchSimulatedCrashError extends Error {
   readonly code = "workbench_simulated_crash";
 
   constructor(readonly point: ObsidianWorkbenchCrashPoint) {
-    super(`Simulated Galley workbench crash at ${point}.`);
+    super(`Simulated Galley Studio workbench crash at ${point}.`);
     this.name = "ObsidianWorkbenchSimulatedCrashError";
   }
 }
@@ -101,7 +101,7 @@ export class ObsidianWorkbenchHandleUntrustedError extends Error {
   readonly code = "workbench_handle_untrusted";
 
   constructor() {
-    super("Galley workbench handle belongs to another adapter or operation.");
+    super("Galley Studio workbench handle belongs to another adapter or operation.");
     this.name = "ObsidianWorkbenchHandleUntrustedError";
   }
 }
@@ -110,7 +110,7 @@ export class ObsidianWorkbenchRecoveryConflictError extends Error {
   readonly code = "transaction_recovery_conflict";
 
   constructor(readonly transactionId: string) {
-    super("Galley workbench recovery is quarantined for this exact scope.");
+    super("Galley Studio workbench recovery is quarantined for this exact scope.");
     this.name = "ObsidianWorkbenchRecoveryConflictError";
   }
 }
@@ -122,7 +122,7 @@ export class ObsidianWorkbenchAmbiguousError extends Error {
     readonly transactionId: string,
     readonly operationError?: unknown
   ) {
-    super("Galley could not prove the workbench transaction outcome.");
+    super("Galley Studio could not prove the workbench transaction outcome.");
     this.name = "ObsidianWorkbenchAmbiguousError";
   }
 }
@@ -4085,7 +4085,7 @@ function validPairPaths(paths: ArtifactPaths): ArtifactPaths {
     html.slice(0, -".galley.html".length) !==
       sidecar.slice(0, -".galley.json".length)
   ) {
-    throw new Error("Galley workbench paths must identify one canonical pair.");
+    throw new Error("Galley Studio workbench paths must identify one canonical pair.");
   }
   return { html, sidecar };
 }
@@ -4106,7 +4106,7 @@ function historyFolder(path: string): { folder: string; documentId: string } {
   const folder = canonicalVaultPath(path);
   const prefix = `${HISTORY_ROOT}/`;
   if (!folder.startsWith(prefix) || folder.slice(prefix.length).includes("/")) {
-    throw new Error("Galley history folder is outside the canonical history root.");
+    throw new Error("Galley Studio history folder is outside the canonical history root.");
   }
   const documentId = canonicalDocumentId(folder.slice(prefix.length));
   return { folder: `${HISTORY_ROOT}/${documentId}`, documentId };
@@ -4121,7 +4121,7 @@ function historyPath(
   const scope = historyFolder(folder);
   const parsed = historyName(baseName(checked));
   if (!parsed || parsed.extension !== extension) {
-    throw new Error("Galley history filename is invalid.");
+    throw new Error("Galley Studio history filename is invalid.");
   }
   return { path: checked, ...scope };
 }
@@ -4140,12 +4140,12 @@ function historyName(name: string): { extension: "html" | "pending" } | null {
 function canonicalDocumentId(value: string): string {
   const canonical = value.toLowerCase();
   if (!UUID.test(canonical)) {
-    throw new Error("Galley history document ID must be a canonical UUID.");
+    throw new Error("Galley Studio history document ID must be a canonical UUID.");
   }
   try {
     GalleySidecarV1Schema.shape.documentId.parse(canonical);
   } catch {
-    throw new Error("Galley history document ID must be sidecar-valid.");
+    throw new Error("Galley Studio history document ID must be sidecar-valid.");
   }
   return canonical;
 }

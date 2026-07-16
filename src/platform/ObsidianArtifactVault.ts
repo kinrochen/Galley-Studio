@@ -28,7 +28,7 @@ export class ObsidianArtifactVault
         if (isFolder(existing)) {
           continue;
         }
-        throw new Error("Configured Galley output folder conflicts with a file.");
+        throw new Error("Configured Galley Studio output folder conflicts with a file.");
       }
       await this.vault.createFolder(folder);
     }
@@ -48,10 +48,10 @@ export class ObsidianArtifactVault
     | { status: "collision" }
   > {
     if (!(await this.owns(handle))) {
-      throw new Error("Galley temporary artifact ownership was lost.");
+      throw new Error("Galley Studio temporary artifact ownership was lost.");
     }
     if (!isNormalizedVaultRelativePath(finalPath)) {
-      throw new Error("Galley final artifact path is not normalized.");
+      throw new Error("Galley Studio final artifact path is not normalized.");
     }
     if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
     if (await this.vault.adapter.exists(finalPath)) return { status: "collision" };
@@ -122,7 +122,7 @@ function observeFinalFile(
         const onAbort = (): void =>
           finish(() => reject(new DOMException("Aborted", "AbortError")));
         const timeout = window.setTimeout(() => {
-          finish(() => reject(new Error("Galley final artifact identity was not observed.")));
+          finish(() => reject(new Error("Galley Studio final artifact identity was not observed.")));
         }, FINAL_IDENTITY_TIMEOUT_MS);
         const verifyCandidates = async (): Promise<void> => {
           if (verifying || settled) return;

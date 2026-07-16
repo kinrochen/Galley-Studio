@@ -47,7 +47,7 @@ import { GalleySettingTab } from "./settings/GalleySettingTab";
 
 export { ObsidianArtifactVault } from "./platform/ObsidianArtifactVault";
 
-const GALLEY_DESKTOP_HTML_VIEW_TYPE = "galley-workbench";
+const GALLEY_DESKTOP_HTML_VIEW_TYPE = "galley-studio-workbench";
 
 export default class GalleyPlugin extends Plugin {
   settings: GalleySettings = normalizeSettings(undefined);
@@ -242,17 +242,17 @@ export default class GalleyPlugin extends Plugin {
   #registerCommands(): void {
     this.addCommand({
       id: "open-galley-console",
-      name: "Galley: Open console / 打开控制台",
+      name: "Galley Studio: Open console / 打开控制台",
       callback: () => this.openGalleyConsole()
     });
     this.addCommand({
       id: "show-capabilities",
-      name: "Galley: Show capabilities / 显示能力",
-      callback: () => console.info("Galley capabilities", this.capabilities)
+      name: "Galley Studio: Show capabilities / 显示能力",
+      callback: () => console.info("Galley Studio capabilities", this.capabilities)
     });
     this.addCommand({
       id: "open-current-galley-preview",
-      name: "Galley: Preview current document / 预览当前文档",
+      name: "Galley Studio: Preview current document / 预览当前文档",
       checkCallback: (checking) => {
         const path = this.#activeGalleyPath();
         if (!path) return false;
@@ -263,7 +263,7 @@ export default class GalleyPlugin extends Plugin {
     if (!this.canGenerate) return;
     this.addCommand({
       id: "open-current-galley-in-workbench",
-      name: "Galley: Open current document in workbench / 在工作台打开当前文档",
+      name: "Galley Studio: Open current document in workbench / 在工作台打开当前文档",
       checkCallback: (checking) => {
         const path = this.#activeGalleyPath();
         if (!path) return false;
@@ -273,23 +273,23 @@ export default class GalleyPlugin extends Plugin {
     });
     this.addCommand({
       id: "check-generation-agent-availability",
-      name: "Galley: Check Agent availability / 检查 Agent 可用性",
+      name: "Galley Studio: Check Agent availability / 检查 Agent 可用性",
       callback: () => this.checkGenerationAgentAvailability()
     });
     this.addCommand({
       id: "generate-current-article",
-      name: "Galley: Generate current article / 生成当前文章",
+      name: "Galley Studio: Generate current article / 生成当前文章",
       callback: () => this.runGenerateCurrentArticle()
     });
     this.addCommand({
       id: "open-theme-lab",
-      name: "Galley: Open Theme Lab / 打开主题实验室",
+      name: "Galley Studio: Open Theme Lab / 打开主题实验室",
       callback: () => this.openThemeLab()
     });
     for (const [id, name, route] of [
-      ["theme-export-zip", "Galley: Export theme / 导出主题", "themes"],
-      ["theme-toggle-enabled", "Galley: Enable or disable theme / 启用或停用主题", "themes"],
-      ["theme-delete", "Galley: Delete theme / 删除主题", "themes"]
+      ["theme-export-zip", "Galley Studio: Export theme / 导出主题", "themes"],
+      ["theme-toggle-enabled", "Galley Studio: Enable or disable theme / 启用或停用主题", "themes"],
+      ["theme-delete", "Galley Studio: Delete theme / 删除主题", "themes"]
     ] as const) {
       this.addCommand({
         id,
@@ -387,7 +387,7 @@ export default class GalleyPlugin extends Plugin {
 
   #createConsoleView(leaf: WorkspaceLeaf): GalleyConsoleView {
     if (!this.#actions || !this.#locale) {
-      throw new Error("Galley console services are not initialized.");
+      throw new Error("Galley Studio console services are not initialized.");
     }
     return new GalleyConsoleView(leaf, {
       actions: this.#actions,

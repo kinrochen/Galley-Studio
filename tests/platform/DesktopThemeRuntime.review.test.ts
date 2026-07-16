@@ -21,7 +21,7 @@ it("binds theme save collision checks to the complete active imported Skill name
   const imported = await new ImportedSkillRepository(
     new ObsidianImportedSkillStore(
       adapter,
-      ".obsidian/plugins/galley/skills",
+      ".obsidian/plugins/galley-studio/skills",
       () => "skill-stage"
     ),
     new SkillArchiveImporter()

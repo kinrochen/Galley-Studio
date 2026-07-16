@@ -30,7 +30,7 @@ export function renderWorkbenchToolbar(
   const fragment = document.createDocumentFragment();
   const identity = document.createElement("div");
   identity.className = "galley-document-identity";
-  identity.textContent = state.documentPath ?? "Galley";
+  identity.textContent = state.documentPath ?? "Galley Studio";
   fragment.append(identity);
 
   const modes = document.createElement("div");

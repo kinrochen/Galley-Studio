@@ -223,7 +223,7 @@ describe("GalleyConsoleView", () => {
       view.contentEl.querySelector<HTMLInputElement>('[name="themeId"]')?.checked
     ).toBe(true);
     expect(view.contentEl.querySelector('[role="alert"]')?.textContent).toBe(
-      "Galley: Configure an API key before generating."
+      "Galley Studio: Configure an API key before generating."
     );
     expect(view.contentEl.textContent).not.toContain("missing_secret");
   });

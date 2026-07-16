@@ -5,8 +5,8 @@ import {
 } from "obsidian";
 import type { LocalizedText } from "../i18n/LocalizedText";
 
-export const LAZY_WORKBENCH_VIEW_TYPE = "galley-workbench";
-export const LAZY_THEME_LAB_VIEW_TYPE = "galley-theme-lab";
+export const LAZY_WORKBENCH_VIEW_TYPE = "galley-studio-workbench";
+export const LAZY_THEME_LAB_VIEW_TYPE = "galley-studio-theme-lab";
 
 export type LazyDesktopViewKind = "workbench" | "theme-lab";
 

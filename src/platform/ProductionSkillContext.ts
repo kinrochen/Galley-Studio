@@ -125,7 +125,7 @@ export function importedSkillRepository(app: App): ImportedSkillRepository {
   return new ImportedSkillRepository(
     new ObsidianImportedSkillStore(
       app.vault.adapter,
-      `${app.vault.configDir}/plugins/galley/skills`
+      `${app.vault.configDir}/plugins/galley-studio/skills`
     ),
     new SkillArchiveImporter()
   );

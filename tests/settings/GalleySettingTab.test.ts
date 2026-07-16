@@ -166,7 +166,7 @@ it("registers the Agent availability check only on desktop", async () => {
   expect(desktopHarness.commands).toContainEqual(
     expect.objectContaining({
       id: "check-generation-agent-availability",
-      name: "Galley: Check Agent availability / 检查 Agent 可用性"
+      name: "Galley Studio: Check Agent availability / 检查 Agent 可用性"
     })
   );
   expect(

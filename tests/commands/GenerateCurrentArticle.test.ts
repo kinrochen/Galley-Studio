@@ -113,11 +113,11 @@ describe("generateCurrentArticle", () => {
       expect.any(AbortSignal)
     );
     expect(noticesSeen).toEqual([
-      "Galley: Reading current Markdown.",
-      "Galley: Loading generation dependencies.",
-      "Galley: Generating article.",
-      "Galley: Saving the final HTML file.",
-      "Galley: Generated generated/note.galley.html."
+      "Galley Studio: Reading current Markdown.",
+      "Galley Studio: Loading generation dependencies.",
+      "Galley Studio: Generating article.",
+      "Galley Studio: Saving the final HTML file.",
+      "Galley Studio: Generated generated/note.galley.html."
     ]);
   });
 
@@ -140,7 +140,7 @@ describe("generateCurrentArticle", () => {
 
     await generateCurrentArticle(context, new AbortController().signal);
 
-    expect(noticesSeen.at(-1)).toBe("Galley: Generated note.unverified.galley.html.");
+    expect(noticesSeen.at(-1)).toBe("Galley Studio: Generated note.unverified.galley.html.");
   });
 
   it("opens the generated Galley HTML after the independent pair is committed", async () => {
@@ -168,7 +168,7 @@ describe("generateCurrentArticle", () => {
       generateCurrentArticle(context, new AbortController().signal)
     ).resolves.toMatchObject({ html: "notes/note.galley.html" });
     expect(noticesSeen.at(-1)).toBe(
-      "Galley: The article was generated, but the workbench could not open it."
+      "Galley Studio: The article was generated, but the workbench could not open it."
     );
   });
 
@@ -186,12 +186,12 @@ describe("generateCurrentArticle", () => {
     );
 
     expect(noticesSeen).toEqual([
-      "Galley：正在读取当前 Markdown。",
-      "Galley：正在加载生成依赖。",
-      "Galley：正在生成文章。",
-      "Galley：正在保存最终 HTML 文件。",
-      "Galley：已生成 notes/note.galley.html。",
-      "Galley：文章已生成，但无法打开工作台。"
+      "Galley Studio：正在读取当前 Markdown。",
+      "Galley Studio：正在加载生成依赖。",
+      "Galley Studio：正在生成文章。",
+      "Galley Studio：正在保存最终 HTML 文件。",
+      "Galley Studio：已生成 notes/note.galley.html。",
+      "Galley Studio：文章已生成，但无法打开工作台。"
     ]);
     expect(noticesSeen.join("\n")).not.toMatch(
       /Reading|Loading|Generating|Validating|Saving|Generated|workbench could not/iu
@@ -263,10 +263,10 @@ describe("generateCurrentArticle", () => {
   });
 
   it.each([
-    [null, "Galley: Open one Markdown file before generating."],
+    [null, "Galley Studio: Open one Markdown file before generating."],
     [
       { path: "notes/not-markdown.txt", extension: "txt" },
-      "Galley: Open one Markdown file before generating."
+      "Galley Studio: Open one Markdown file before generating."
     ]
   ])("requires exactly one active Markdown file", async (activeFile, message) => {
     const read = vi.fn();
@@ -298,7 +298,7 @@ describe("generateCurrentArticle", () => {
 
     expect(read).not.toHaveBeenCalled();
     expect(notice).toHaveBeenCalledWith(
-      "Galley: Configure a model before generating."
+      "Galley Studio: Configure a model before generating."
     );
   });
 
@@ -345,7 +345,7 @@ describe("generateCurrentArticle", () => {
 
     expect(read).not.toHaveBeenCalled();
     expect(notice).toHaveBeenCalledWith(
-      "Galley: Configure a valid vault-relative output folder."
+      "Galley Studio: Configure a valid vault-relative output folder."
     );
   });
 
@@ -375,27 +375,27 @@ describe("generateCurrentArticle", () => {
     ).rejects.toMatchObject({ code: "aborted" });
 
     expect(writeNew).not.toHaveBeenCalled();
-    expect(notice).toHaveBeenLastCalledWith("Galley: Generation cancelled.");
+    expect(notice).toHaveBeenLastCalledWith("Galley Studio: Generation cancelled.");
   });
 
   it.each([
-    [new AiError("missing_secret"), "Galley: Configure an API key before generating."],
-    [new AiError("cli_not_found"), "Galley: The selected local CLI was not found."],
-    [new AiError("cli_failed"), "Galley: The local CLI exited with an error."],
-    [new AiError("invalid_base_url"), "Galley: Check the configured provider Base URL."],
+    [new AiError("missing_secret"), "Galley Studio: Configure an API key before generating."],
+    [new AiError("cli_not_found"), "Galley Studio: The selected local CLI was not found."],
+    [new AiError("cli_failed"), "Galley Studio: The local CLI exited with an error."],
+    [new AiError("invalid_base_url"), "Galley Studio: Check the configured provider Base URL."],
     [
       new AiError("timeout"),
-      "Galley: The model did not finish within 30 minutes. Retry or use a faster model."
+      "Galley Studio: The model did not finish within 30 minutes. Retry or use a faster model."
     ],
-    [new AiError("http_error", { status: 401 }), "Galley: The provider rejected the API key or permissions."],
-    [new AiError("http_error", { status: 429 }), "Galley: The provider is temporarily unavailable; try again."],
-    [new AiError("http_error", { status: 400 }), "Galley: The provider rejected this OpenAI-compatible request."],
-    [new AiError("network_error"), "Galley: Could not reach the model provider."],
-    [new AiError("invalid_response"), "Galley: The model returned an unreadable response."],
-    [new AiError("tool_round_limit"), "Galley: The model did not finish loading the Skill files."],
-    [new GenerationPipelineError("theme_invalid", "unsafe provider detail"), "Galley: The model could not choose a valid theme."],
-    [new GenerationPipelineError("generation_empty", "unsafe provider detail"), "Galley: The Agent returned no usable article body after repair, so no blank HTML file was saved."],
-    [new Error("Authorization: Bearer top-secret; markdown and <html>raw</html>"), "Galley: Generation failed. Check settings and try again."]
+    [new AiError("http_error", { status: 401 }), "Galley Studio: The provider rejected the API key or permissions."],
+    [new AiError("http_error", { status: 429 }), "Galley Studio: The provider is temporarily unavailable; try again."],
+    [new AiError("http_error", { status: 400 }), "Galley Studio: The provider rejected this OpenAI-compatible request."],
+    [new AiError("network_error"), "Galley Studio: Could not reach the model provider."],
+    [new AiError("invalid_response"), "Galley Studio: The model returned an unreadable response."],
+    [new AiError("tool_round_limit"), "Galley Studio: The model did not finish loading the Skill files."],
+    [new GenerationPipelineError("theme_invalid", "unsafe provider detail"), "Galley Studio: The model could not choose a valid theme."],
+    [new GenerationPipelineError("generation_empty", "unsafe provider detail"), "Galley Studio: The Agent returned no usable article body after repair, so no blank HTML file was saved."],
+    [new Error("Authorization: Bearer top-secret; markdown and <html>raw</html>"), "Galley Studio: Generation failed. Check settings and try again."]
   ])("shows only an allowlisted error for %s", async (failure, safeMessage) => {
     const notice = vi.fn();
     const context = makeContext({
@@ -490,7 +490,7 @@ describe("generateCurrentArticle", () => {
       message: "A generated source marker is invalid."
     });
     expect(noticesSeen.at(-1)).toBe(
-      "Galley: Generated folder/source.unverified.galley.html."
+      "Galley Studio: Generated folder/source.unverified.galley.html."
     );
   });
 });
@@ -502,9 +502,9 @@ describe("plugin command registration", () => {
     expect(commandIds(desktop)).toContain("generate-current-article");
     expect(commandIds(desktop)).toContain("open-current-galley-in-workbench");
     expect(commandNames(desktop)).toContain(
-      "Galley: Generate current article / 生成当前文章"
+      "Galley Studio: Generate current article / 生成当前文章"
     );
-    expect((desktop as unknown as { views: Map<string, unknown> }).views.has("galley-workbench"))
+    expect((desktop as unknown as { views: Map<string, unknown> }).views.has("galley-studio-workbench"))
       .toBe(true);
 
     Platform.isMobileApp = true;
@@ -512,7 +512,7 @@ describe("plugin command registration", () => {
     await mobile.onload();
     expect(commandIds(mobile)).not.toContain("generate-current-article");
     expect(commandIds(mobile)).not.toContain("open-current-galley-in-workbench");
-    expect((mobile as unknown as { views: Map<string, unknown> }).views.has("galley-workbench"))
+    expect((mobile as unknown as { views: Map<string, unknown> }).views.has("galley-studio-workbench"))
       .toBe(false);
   });
 
@@ -531,7 +531,7 @@ describe("plugin command registration", () => {
     plugin.onunload();
     await invocation;
 
-    expect(notices).toContain("Galley: Generation cancelled.");
+    expect(notices).toContain("Galley Studio: Generation cancelled.");
   });
 
   it("runs one Skill generation turn and saves only the final HTML file", async () => {
@@ -570,7 +570,7 @@ describe("plugin command registration", () => {
       "note.html"
     ]);
     expect(notices.at(-1)).toBe(
-      "Galley: Generated note.html."
+      "Galley Studio: Generated note.html."
     );
     expect(harness.renameCalls.count).toBe(0);
     expect(harness.createCalls).toEqual(["note.html"]);
@@ -670,7 +670,7 @@ describe("plugin command registration", () => {
 
     expect(await commit).toEqual(
       expect.objectContaining({
-        message: "Galley final artifact identity was not observed."
+        message: "Galley Studio final artifact identity was not observed."
       })
     );
     expect(harness.contents.get("unindexed.galley.html")).toBe("orphan bytes");
@@ -739,7 +739,7 @@ describe("plugin command registration", () => {
     expect(outcome.paths).toBeNull();
     expect(outcome.error).toEqual(
       expect.objectContaining({
-        message: "Galley final artifact identity was not observed."
+        message: "Galley Studio final artifact identity was not observed."
       })
     );
     expect(harness.contents.get("note.galley.html")).toBe(
@@ -771,7 +771,7 @@ describe("plugin command registration", () => {
 
     expect(await commit).toEqual(
       expect.objectContaining({
-        message: "Galley final artifact identity was not observed."
+        message: "Galley Studio final artifact identity was not observed."
       })
     );
     expect(harness.adapterReadCalls).toContain("swapped.galley.html");

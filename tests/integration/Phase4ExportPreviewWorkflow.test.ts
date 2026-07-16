@@ -137,7 +137,7 @@ describe("Phase 4 generated artifact workflow", () => {
       views: Map<string, (leaf: WorkspaceLeaf) => GalleyPreviewView>;
     };
     expect([...exposed.views.keys()]).toEqual([
-      "galley-console",
+      "galley-studio-console",
       GALLEY_PREVIEW_VIEW_TYPE
     ]);
     expect(exposed.commands.map(({ id }) => id)).not.toContain(

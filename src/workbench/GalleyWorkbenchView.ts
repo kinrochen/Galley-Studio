@@ -51,7 +51,7 @@ import {
   type ExportPanelState
 } from "./ExportPanel";
 
-export const GALLEY_WORKBENCH_VIEW_TYPE = "galley-workbench";
+export const GALLEY_WORKBENCH_VIEW_TYPE = "galley-studio-workbench";
 
 export interface WorkbenchSession {
   state(): DocumentSessionState;
@@ -118,7 +118,7 @@ export class GalleyPathInvalidError extends Error {
   readonly code = "galley_path_invalid" as const;
 
   constructor() {
-    super("Galley workbench accepts only vault-relative HTML files.");
+    super("Galley Studio workbench accepts only vault-relative HTML files.");
     this.name = "GalleyPathInvalidError";
   }
 }
@@ -182,7 +182,7 @@ export class GalleyWorkbenchView extends ItemView {
 
   getDisplayText(): string {
     const path = this.#state.documentPath;
-    return path ? path.split("/").at(-1) ?? "Galley" : this.#text.t("workbench.title");
+    return path ? path.split("/").at(-1) ?? "Galley Studio" : this.#text.t("workbench.title");
   }
 
   getState(): Record<string, unknown> {
@@ -331,7 +331,7 @@ export class GalleyWorkbenchView extends ItemView {
     const session = this.#document?.session;
     const copy = this.#services.copyHtml;
     if (!session || !copy) {
-      throw new Error("Galley HTML copy is unavailable.");
+      throw new Error("Galley Studio HTML copy is unavailable.");
     }
     this.#captureAdapterBody();
     try {
@@ -355,14 +355,14 @@ export class GalleyWorkbenchView extends ItemView {
   }
 
   async #performExport(configurationId: string, copy: boolean): Promise<void> {
-    if (this.#closed) throw new Error("Galley export is unavailable.");
+    if (this.#closed) throw new Error("Galley Studio export is unavailable.");
     const exportDocument = this.#services.exportDocument;
     const document = this.#document;
     const configuration = this.#exportConfigurations.find(
       ({ id }) => id === configurationId
     );
     if (!exportDocument || !document || !configuration) {
-      throw new Error("Galley export is unavailable.");
+      throw new Error("Galley Studio export is unavailable.");
     }
     const controller = new AbortController();
     this.#exportController?.abort();
@@ -406,7 +406,7 @@ export class GalleyWorkbenchView extends ItemView {
       }
       if (copy) {
         const copyHtml = this.#services.copyExportHtml;
-        if (!copyHtml) throw new Error("Galley rich-text copy is unavailable.");
+        if (!copyHtml) throw new Error("Galley Studio rich-text copy is unavailable.");
         await copyHtml(result.html);
         if (!isCurrent()) return;
       }
@@ -715,15 +715,15 @@ export class GalleyWorkbenchView extends ItemView {
         this.#text.t("workbench.error.openQuarantined"),
       "The last transaction outcome is ambiguous. Saving is paused until recovery completes.":
         this.#text.t("workbench.error.recoveryAmbiguous"),
-      "Galley could not initialize this editor mode.":
+      "Galley Studio could not initialize this editor mode.":
         this.#text.t("workbench.error.editorInit"),
-      "Galley rejected an unsafe or invalid body edit.":
+      "Galley Studio rejected an unsafe or invalid body edit.":
         this.#text.t("workbench.error.invalidEdit"),
       "Recovery is quarantined for this document. No file was overwritten.":
         this.#text.t("workbench.error.saveQuarantined"),
-      "Galley could not prove the save outcome. Recovery must complete before another save.":
+      "Galley Studio could not prove the save outcome. Recovery must complete before another save.":
         this.#text.t("workbench.error.saveAmbiguous"),
-      "Galley could not save this article.":
+      "Galley Studio could not save this article.":
         this.#text.t("workbench.error.saveFailed")
     };
     return messages[message] ?? message;

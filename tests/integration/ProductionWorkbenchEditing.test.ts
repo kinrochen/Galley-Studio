@@ -18,7 +18,7 @@ import {
   makeObsidianDocumentSessionFixture
 } from "../support/obsidianDocumentSessionFixtures";
 
-describe("production Galley workbench editing", () => {
+describe("production Galley Studio workbench editing", () => {
   it("opens, edits, restores resource paths, saves, and reopens with production history", async () => {
     const fixture = await makeObsidianDocumentSessionFixture(
       'original <img src="images/cover.png" alt="cover">'

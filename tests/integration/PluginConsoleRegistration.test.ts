@@ -25,7 +25,7 @@ describe("plugin console registration", () => {
       expect(exposed.ribbonIcons).toHaveLength(1);
       expect(exposed.ribbonIcons[0]).toMatchObject({
         icon: "newspaper",
-        title: "Open Galley console"
+        title: "Open Galley Studio console"
       });
     }
   );
@@ -88,7 +88,7 @@ describe("plugin console registration", () => {
       expect.arrayContaining([
         expect.objectContaining({
           id: "generate-current-article",
-          name: "Galley: Generate current article / 生成当前文章"
+          name: "Galley Studio: Generate current article / 生成当前文章"
         }),
       ])
     );

@@ -19,7 +19,7 @@ import {
 } from "../i18n/LocalizedText";
 import type { MessageKey } from "../i18n/Resources";
 
-export const GALLEY_THEME_LAB_VIEW_TYPE = "galley-theme-lab";
+export const GALLEY_THEME_LAB_VIEW_TYPE = "galley-studio-theme-lab";
 
 export interface ThemeLabViewServices {
   supportsVision(): Promise<boolean>;

@@ -26,7 +26,7 @@ describe("GalleyPreviewView", () => {
 
     expect(view.contentEl.querySelector("iframe")).toBe(frame);
     expect(frame.srcdoc).toBe(srcdoc);
-    expect(frame.title).toBe("Galley 文章预览");
+    expect(frame.title).toBe("Galley Studio 文章预览");
   });
 
   it("opens the final HTML file in an empty-sandbox, no-referrer iframe", async () => {
@@ -57,7 +57,7 @@ describe("GalleyPreviewView", () => {
     expect(view.contentEl.querySelector("iframe")).not.toBeNull();
   });
 
-  it("opens an html file in a Galley preview leaf", async () => {
+  it("opens an html file in a Galley Studio preview leaf", async () => {
     const leaf = new WorkspaceLeaf();
     const workspace = {
       getLeaf: vi.fn(() => leaf),

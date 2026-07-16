@@ -28,7 +28,7 @@ export interface LocalCliChatClientOptions {
 const DEFAULT_MAX_OUTPUT_BYTES = 24 * 1024 * 1024;
 
 /**
- * Adapts the authenticated local Codex or Claude Code CLI to Galley's chat
+ * Adapts the authenticated local Codex or Claude Code CLI to Galley Studio's chat
  * boundary. The bundled Skill is materialized outside the vault so the CLI can
  * use it exactly like a normal local Skill without creating article-side files.
  */
@@ -216,7 +216,7 @@ export function serializeConversation(
       ? [`Read ${JSON.stringify(skillPath)} completely and follow that gzh-design Skill for the request below.`]
       : ["Use the gzh-design Skill for the request below."]),
     "Treat the JSON conversation below as the complete conversation and continue it as the assistant.",
-    "Return only the final content requested by the last user message. Do not create article files yourself; Galley will save the one final HTML response.",
+    "Return only the final content requested by the last user message. Do not create article files yourself; Galley Studio will save the one final HTML response.",
     JSON.stringify(normalized)
   ].join("\n\n");
 }

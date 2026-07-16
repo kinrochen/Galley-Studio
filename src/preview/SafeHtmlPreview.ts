@@ -40,7 +40,7 @@ export function safePreviewHtml(html: string): string {
 export function createSafePreviewFrame(
   host: HTMLElement,
   html: string,
-  title = "Galley article preview"
+  title = "Galley Studio article preview"
 ): HTMLIFrameElement {
   const frame = host.ownerDocument.createElement("iframe");
   frame.className = "galley-safe-preview";

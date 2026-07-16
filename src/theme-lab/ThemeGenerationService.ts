@@ -690,7 +690,7 @@ function composeDraftPrompt(
   hasReferenceImage: boolean
 ): string {
   return [
-    "This is Galley's internal Theme Lab, not an article-formatting request.",
+    "This is Galley Studio's internal Theme Lab, not an article-formatting request.",
     "The user phrase is already the complete visual-direction input. Do not ask for article content, files, or confirmation.",
     "Create a fast visual concept preview for a reusable gzh-design article theme.",
     "Return only one script-free full HTML5 document. Do not return JSON, Markdown fences, explanations, or componentLibrary.",
@@ -708,7 +708,7 @@ function composeDraftPrompt(
 function composeFinalPrompt(draft: ThemeDraft): string {
   return [
     "Follow the loaded gzh-design theme rules to finalize the approved visual concept.",
-    "Galley already owns the approved manifest and preview. Generate only the complete reusable component-library Markdown.",
+    "Galley Studio already owns the approved manifest and preview. Generate only the complete reusable component-library Markdown.",
     "Return one JSON object with exactly one string field: componentLibrary.",
     "componentLibrary must contain all five required theme-library sections, complete inline-styled HTML component fences, the article template skeleton, article-type recipes, and Markdown mapping.",
     "Every component text node must use approved <span leaf=\"\"> wrappers. Do not return manifest, previewHtml, explanations, or extra keys.",

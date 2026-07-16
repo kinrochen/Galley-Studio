@@ -9,7 +9,7 @@ import {
   type LocalizedText
 } from "../i18n/LocalizedText";
 
-export const GALLEY_PREVIEW_VIEW_TYPE = "galley-preview";
+export const GALLEY_PREVIEW_VIEW_TYPE = "galley-studio-preview";
 
 export interface GalleyPreviewViewServices {
   readonly openDocument: (path: string) => Promise<{ readonly html: string }>;
@@ -21,7 +21,7 @@ export class GalleyPreviewPathError extends Error {
   readonly code = "galley_preview_path_invalid" as const;
 
   constructor() {
-    super("Galley preview accepts only vault-relative HTML files.");
+    super("Galley Studio preview accepts only vault-relative HTML files.");
     this.name = "GalleyPreviewPathError";
   }
 }

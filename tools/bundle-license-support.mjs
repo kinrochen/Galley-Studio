@@ -3,7 +3,7 @@ import { dirname, resolve, sep } from "node:path";
 import { unzipSync } from "fflate";
 
 export const BUNDLE_META_PATH = "release/.galley-esbuild-meta.json";
-export const GALLEY_SOURCE_URL = "https://github.com/kinrochen/Galley";
+export const GALLEY_SOURCE_URL = "https://github.com/kinrochen/Galley-Studio";
 export const UPSTREAM_SOURCE_URL = "https://github.com/isjiamu/gzh-design-skill";
 export const UPSTREAM_COMMIT = "ba1f4175519b481cb3566616c9e5178705067904";
 
@@ -54,7 +54,7 @@ export async function renderThirdPartyNotices() {
     "This file is generated from the production esbuild dependency graph. It contains",
     "the complete license/notice files distributed by every bundled runtime package.",
     "",
-    "## Galley corresponding source",
+    "## Galley Studio corresponding source",
     "",
     `- Source: ${GALLEY_SOURCE_URL}`,
     "- Project license: GNU Affero General Public License v3.0 (AGPL-3.0)",
@@ -65,7 +65,7 @@ export async function renderThirdPartyNotices() {
     `- Pinned commit: \`${UPSTREAM_COMMIT}\``,
     "- License: GNU Affero General Public License v3.0 (AGPL-3.0)",
     "",
-    "Galley embeds the regular files from that pinned clean checkout. Bundled scripts",
+    "Galley Studio embeds the regular files from that pinned clean checkout. Bundled scripts",
     "are exposed to the Skill runtime as read-only text and are never executed.",
     "",
     "### gzh-design-skill/LICENSE",

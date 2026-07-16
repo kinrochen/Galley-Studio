@@ -4,8 +4,19 @@ const packageJson = JSON.parse(await readFile("package.json", "utf8"));
 const lock = JSON.parse(await readFile("package-lock.json", "utf8"));
 const manifest = JSON.parse(await readFile("manifest.json", "utf8"));
 const failures = [];
-if (packageJson.version !== "0.2.0" || lock.version !== "0.2.0" || manifest.version !== "0.2.0") {
-  failures.push("package, lockfile, and manifest versions must all be 0.2.0");
+if (packageJson.version !== "0.2.1" || lock.version !== "0.2.1" || manifest.version !== "0.2.1") {
+  failures.push("package, lockfile, and manifest versions must all be 0.2.1");
+}
+if (
+  packageJson.name !== "galley-studio-obsidian" ||
+  lock.name !== "galley-studio-obsidian" ||
+  manifest.id !== "galley-studio" ||
+  manifest.name !== "Galley Studio"
+) {
+  failures.push("package and manifest identities must match Galley Studio");
+}
+if (packageJson.repository?.url !== "https://github.com/kinrochen/Galley-Studio.git") {
+  failures.push("package repository must point to kinrochen/Galley-Studio");
 }
 if (manifest.minAppVersion !== "1.11.4" || manifest.isDesktopOnly !== false) {
   failures.push("manifest platform contract changed");
