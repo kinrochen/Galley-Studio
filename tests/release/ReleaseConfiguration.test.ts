@@ -10,7 +10,7 @@ const requiredReleaseFiles = [
   "THIRD_PARTY_NOTICES.md"
 ] as const;
 
-describe("0.1.0 release configuration", () => {
+describe("0.2.0 release configuration", () => {
   it("exposes real acceptance, benchmark, license, and release gates", () => {
     const packageJson = JSON.parse(readFileSync(resolve("package.json"), "utf8")) as {
       scripts?: Record<string, string>;
@@ -36,13 +36,13 @@ describe("0.1.0 release configuration", () => {
       "ba1f4175519b481cb3566616c9e5178705067904"
     );
     const notices = readFileSync(resolve("THIRD_PARTY_NOTICES.md"), "utf8");
-    expect(notices).toContain("https://github.com/isjiamu/Galley");
+    expect(notices).toContain("https://github.com/kinrochen/Galley");
     expect(notices).toContain("Permission is hereby granted, free of charge");
     expect(notices).toContain("Apache License");
     expect(notices).toContain("Mozilla Public License Version 2.0");
     expect(notices).toContain("Copyright");
     expect(JSON.parse(readFileSync(resolve("manifest.json"), "utf8"))).toMatchObject({
-      version: "0.1.0",
+      version: "0.2.0",
       author: "Kinrochen",
       fundingUrl: "https://ifdian.net/a/kinrochen",
       isDesktopOnly: false
@@ -52,7 +52,7 @@ describe("0.1.0 release configuration", () => {
   it("declares the exact release ZIP allowlist", () => {
     const builder = readFileSync(resolve("tools/build-release.mjs"), "utf8");
     for (const file of requiredReleaseFiles) expect(builder).toContain(file);
-    expect(builder).toContain("release/galley-0.1.0.zip");
+    expect(builder).toContain("release/galley-0.2.0.zip");
   });
 
   it("documents desktop/mobile boundaries, secrets, Skill ZIP safety, and AGPL source obligations", () => {

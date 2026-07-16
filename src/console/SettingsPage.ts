@@ -135,9 +135,6 @@ export async function renderSettingsPage(
     warning.className = "galley-console__inline-error";
   }
   secret.value = options.state.secretId ?? "";
-  secret.addEventListener("change", () => {
-    options.state.secretId = secret.value;
-  });
   secretLabel.append(secret);
   providerSection.fields.append(secretLabel);
 
@@ -146,13 +143,43 @@ export async function renderSettingsPage(
     providerSection.section.hidden = selected !== "plugin";
     discovery.hidden = selected === "plugin";
   };
-  agent.addEventListener("change", () => {
+  const syncStateFromFields = (): void => {
+    for (const [key, input] of inputs) update(options.state, key, input.value);
     const selected = agent.value;
     if (selected === "plugin" || selected === "codex-cli" || selected === "claude-cli") {
       options.state.generationAgent = selected;
     }
+    options.state.secretId = secret.value;
+  };
+  const persistCurrentSettings = (): void => {
+    syncStateFromFields();
+    const payload = editablePayload(options.state);
+    void options.run("settings-save", async () => {
+      try {
+        const saved = await runtime.saveSettings?.(payload);
+        if (saved) {
+          copyEditable(options.state, saved);
+          options.state.language = saved.language;
+        }
+      } catch (error) {
+        const durable = await runtime.readSettings?.();
+        if (durable) {
+          copyEditable(options.state, durable);
+          options.state.language = durable.language;
+        }
+        throw error;
+      }
+    });
+  };
+  agent.addEventListener("change", () => {
+    syncStateFromFields();
     updateAgentVisibility();
+    persistCurrentSettings();
   });
+  secret.addEventListener("change", persistCurrentSettings);
+  for (const input of inputs.values()) {
+    input.addEventListener("change", persistCurrentSettings);
+  }
   updateAgentVisibility();
   const save = button(options.text.t("common.action.save"), "settings-save");
   save.classList.add("mod-cta");
@@ -163,20 +190,7 @@ export async function renderSettingsPage(
   form.append(agentSection.section, providerSection.section, saveRow);
   form.addEventListener("submit", (event) => {
     event.preventDefault();
-    for (const [key, input] of inputs) update(options.state, key, input.value);
-    const selected = agent.value;
-    if (selected === "plugin" || selected === "codex-cli" || selected === "claude-cli") {
-      options.state.generationAgent = selected;
-    }
-    options.state.secretId = secret.value;
-    const payload = editablePayload(options.state);
-    void options.run("settings-save", async () => {
-      const saved = await runtime.saveSettings?.(payload);
-      if (saved) {
-        copyEditable(options.state, saved);
-        options.state.language = saved.language;
-      }
-    });
+    persistCurrentSettings();
   });
 
   const diagnosticSection = document.createElement("section");

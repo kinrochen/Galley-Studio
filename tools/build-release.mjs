@@ -1,8 +1,8 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { strToU8, unzipSync, zipSync } from "fflate";
 
-const VERSION = "0.1.0";
-const OUTPUT_PATH = "release/galley-0.1.0.zip";
+const VERSION = "0.2.0";
+const OUTPUT_PATH = "release/galley-0.2.0.zip";
 const RELEASE_FILES = Object.freeze([
   "main.js",
   "manifest.json",
@@ -44,7 +44,7 @@ for (const path of RELEASE_FILES) {
 }
 const notices = new TextDecoder().decode(unpacked["THIRD_PARTY_NOTICES.md"]);
 for (const required of [
-  "https://github.com/isjiamu/Galley",
+  "https://github.com/kinrochen/Galley",
   "ba1f4175519b481cb3566616c9e5178705067904",
   "Permission is hereby granted, free of charge",
   "Apache License",

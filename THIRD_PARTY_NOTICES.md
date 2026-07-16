@@ -5,7 +5,7 @@ the complete license/notice files distributed by every bundled runtime package.
 
 ## Galley corresponding source
 
-- Source: https://github.com/isjiamu/Galley
+- Source: https://github.com/kinrochen/Galley
 - Project license: GNU Affero General Public License v3.0 (AGPL-3.0)
 
 ## gzh-design-skill

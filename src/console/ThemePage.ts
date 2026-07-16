@@ -1,4 +1,3 @@
-import { MAX_THEME_ARCHIVE_BYTES } from "../archive/ArchiveLimits";
 import type { GalleyActions } from "./GalleyActions";
 import type { ConsolePageText } from "./ConsoleHome";
 import { appendText, button } from "./ConsoleHome";
@@ -24,27 +23,7 @@ export async function renderThemePage(
   themeLab.addEventListener("click", () =>
     void options.run("theme-lab", async () => runtime.openThemeLab?.())
   );
-  const upload = document.createElement("input");
-  upload.type = "file";
-  upload.accept = ".zip,application/zip";
-  upload.className = "galley-console__file-input";
-  upload.setAttribute("aria-label", options.text.t("console.themes.import"));
-  upload.dataset.action = "theme-import";
-  upload.addEventListener("change", () => {
-    const file = upload.files?.[0];
-    if (!file) return;
-    void options.run("theme-import", async () => {
-      if (file.size > MAX_THEME_ARCHIVE_BYTES) {
-        throw new Error("theme_archive_too_large");
-      }
-      await runtime.importTheme?.(new Uint8Array(await file.arrayBuffer()));
-    });
-  });
-  const uploadTrigger = document.createElement("label");
-  uploadTrigger.className = "galley-console__file-trigger";
-  uploadTrigger.textContent = options.text.t("console.themes.import");
-  uploadTrigger.append(upload);
-  controls.append(themeLab, uploadTrigger);
+  controls.append(themeLab);
   container.append(controls);
   const themes = (await runtime.listThemes?.()) ?? [];
   if (!themes.length) {

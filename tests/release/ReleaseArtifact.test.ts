@@ -3,8 +3,8 @@ import { resolve } from "node:path";
 import { unzipSync } from "fflate";
 import { expect, it } from "vitest";
 
-it("contains exactly the five 0.1.0 release files when the release gate has run", () => {
-  const path = resolve("release/galley-0.1.0.zip");
+it("contains exactly the five 0.2.0 release files when the release gate has run", () => {
+  const path = resolve("release/galley-0.2.0.zip");
   if (!existsSync(path)) {
     // `npm test` intentionally runs before the release gate in CI. The final
     // `npm test -- tests/release` run exercises the archive branch below.
@@ -24,7 +24,7 @@ it("contains exactly the five 0.1.0 release files when the release gate has run"
     author?: string;
     fundingUrl?: string;
   };
-  expect(manifest.version).toBe("0.1.0");
+  expect(manifest.version).toBe("0.2.0");
   expect(manifest.author).toBe("Kinrochen");
   expect(manifest.fundingUrl).toBe("https://ifdian.net/a/kinrochen");
   expect(new TextDecoder().decode(entries.LICENSE)).toContain(
@@ -34,7 +34,7 @@ it("contains exactly the five 0.1.0 release files when the release gate has run"
     "ba1f4175519b481cb3566616c9e5178705067904"
   );
   const notices = new TextDecoder().decode(entries["THIRD_PARTY_NOTICES.md"]);
-  expect(notices).toContain("https://github.com/isjiamu/Galley");
+  expect(notices).toContain("https://github.com/kinrochen/Galley");
   expect(notices).toContain("Permission is hereby granted, free of charge");
   expect(notices).toContain("Mozilla Public License Version 2.0");
   expect(notices).toContain("Apache License");

@@ -1,12 +1,10 @@
 import {
   Platform,
   Plugin,
-  Notice,
   type Menu,
   type TAbstractFile,
   type WorkspaceLeaf
 } from "obsidian";
-import { MAX_SKILL_ARCHIVE_BYTES } from "./archive/ArchiveLimits";
 import { generationFailureMessage } from "./commands/GenerateCurrentArticle";
 import { ArticleCatalog, type ArticleCatalogVault } from "./console/ArticleCatalog";
 import {
@@ -62,6 +60,7 @@ export default class GalleyPlugin extends Plugin {
   #unsubscribeRibbonLocale: (() => void) | null = null;
   #articleCatalog: ArticleCatalog | null = null;
   #actions: GalleyActions | null = null;
+  #consoleLeaf: WorkspaceLeaf | null = null;
 
   get canGenerate(): boolean {
     return this.capabilities.canGenerate;
@@ -130,6 +129,7 @@ export default class GalleyPlugin extends Plugin {
     this.#generationTask = null;
     this.#articleCatalog?.dispose();
     this.#articleCatalog = null;
+    this.#consoleLeaf = null;
   }
 
   async saveSettings(): Promise<void> {
@@ -145,23 +145,47 @@ export default class GalleyPlugin extends Plugin {
 
   async openGalleyConsole(route: ConsoleRoute = "home"): Promise<void> {
     const workspace = this.app.workspace;
-    const existing = workspace.getLeavesOfType?.(GALLEY_CONSOLE_VIEW_TYPE)[0];
-    if (existing) {
-      const view = existing.view as unknown as {
+    const leaves = workspace.getLeavesOfType?.(GALLEY_CONSOLE_VIEW_TYPE) ?? [];
+    const managed = this.#consoleLeaf && leaves.includes(this.#consoleLeaf)
+      ? this.#consoleLeaf
+      : null;
+    if (managed) {
+      const view = managed.view as unknown as {
         resetHome?: () => Promise<void> | void;
         navigate?: (next: ConsoleRoute) => Promise<void> | void;
       };
       if (route === "home") await view.resetHome?.();
       else await view.navigate?.(route);
-      workspace.revealLeaf(existing);
+      workspace.revealLeaf(managed);
       return;
     }
-    const leaf = workspace.getLeaf("tab");
+
+    const supportsRightSidebar = typeof workspace.getRightLeaf === "function";
+    if (supportsRightSidebar) {
+      workspace.detachLeavesOfType?.(GALLEY_CONSOLE_VIEW_TYPE);
+    }
+    const rightLeaf = workspace.getRightLeaf?.(false) ?? null;
+    if (!supportsRightSidebar && !rightLeaf) {
+      const existing = leaves[0];
+      if (existing) {
+        const view = existing.view as unknown as {
+          resetHome?: () => Promise<void> | void;
+          navigate?: (next: ConsoleRoute) => Promise<void> | void;
+        };
+        if (route === "home") await view.resetHome?.();
+        else await view.navigate?.(route);
+        workspace.revealLeaf(existing);
+        return;
+      }
+    }
+
+    const leaf = rightLeaf ?? workspace.getLeaf("tab");
     await leaf.setViewState({
       type: GALLEY_CONSOLE_VIEW_TYPE,
       state: { route },
       active: true
     });
+    this.#consoleLeaf = leaf;
     workspace.revealLeaf(leaf);
   }
 
@@ -203,10 +227,6 @@ export default class GalleyPlugin extends Plugin {
     await (await this.#desktopViewRegistry()).openThemeLab(this.app);
   }
 
-  async importCustomTheme(): Promise<void> {
-    await this.openGalleyConsole("themes");
-  }
-
   async exportCustomTheme(): Promise<void> {
     await this.openGalleyConsole("themes");
   }
@@ -217,34 +237,6 @@ export default class GalleyPlugin extends Plugin {
 
   async deleteCustomTheme(): Promise<void> {
     await this.openGalleyConsole("themes");
-  }
-
-  async importSkillPackage(): Promise<void> {
-    if (!this.capabilities.canImportSkill) return;
-    try {
-      const bytes = await chooseZip(
-        MAX_SKILL_ARCHIVE_BYTES,
-        this.localizedText.t("console.skills.tooLarge"),
-        this.localizedText.t("console.file.readFailed")
-      );
-      if (!bytes) return;
-      const version = await this.#lazyDesktopActions().importSkill?.(bytes);
-      if (version) {
-        new Notice(
-          this.localizedText.t("console.skills.importedInactive", { version })
-        );
-      }
-    } catch (error) {
-      new Notice(
-        error instanceof Error && error.message
-          ? error.message
-          : this.localizedText.t("common.error.safe")
-      );
-    }
-  }
-
-  async activateImportedSkill(): Promise<void> {
-    await this.openGalleyConsole("skills");
   }
 
   #registerCommands(): void {
@@ -295,12 +287,9 @@ export default class GalleyPlugin extends Plugin {
       callback: () => this.openThemeLab()
     });
     for (const [id, name, route] of [
-      ["theme-import-zip", "Galley: Themes / 主题管理", "themes"],
       ["theme-export-zip", "Galley: Export theme / 导出主题", "themes"],
       ["theme-toggle-enabled", "Galley: Enable or disable theme / 启用或停用主题", "themes"],
-      ["theme-delete", "Galley: Delete theme / 删除主题", "themes"],
-      ["skill-import-zip", "Galley: Skill / 技能管理", "skills"],
-      ["skill-activate-imported", "Galley: Activate Skill / 激活技能", "skills"]
+      ["theme-delete", "Galley: Delete theme / 删除主题", "themes"]
     ] as const) {
       this.addCommand({
         id,
@@ -360,11 +349,6 @@ export default class GalleyPlugin extends Plugin {
       openWorkbench: (path) => this.openGalleyDocument(path),
       openThemeLab: () => this.openThemeLab(),
       listThemes: async () => (await actions()).listThemes?.() ?? [],
-      importTheme: async (bytes) => {
-        const result = await (await actions()).importTheme?.(bytes);
-        if (!result) throw new Error("Theme import did not return an id.");
-        return result;
-      },
       exportTheme: async (id) => {
         const result = await (await actions()).exportTheme?.(id);
         if (!result) throw new Error("Theme export did not return an artifact.");
@@ -373,18 +357,6 @@ export default class GalleyPlugin extends Plugin {
       setThemeEnabled: async (id, enabled) =>
         (await actions()).setThemeEnabled?.(id, enabled),
       deleteTheme: async (id) => (await actions()).deleteTheme?.(id) ?? false,
-      listSkills: async () => (await actions()).listSkills?.() ?? [],
-      readActiveSkill: async () => {
-        const result = await (await actions()).readActiveSkill?.();
-        if (!result) throw new Error("Active Skill details are unavailable.");
-        return result;
-      },
-      importSkill: async (bytes) => {
-        const result = await (await actions()).importSkill?.(bytes);
-        if (!result) throw new Error("Skill import did not return a version.");
-        return result;
-      },
-      activateSkill: async (version) => (await actions()).activateSkill?.(version),
       listExportConfigurations: async () =>
         (await actions()).listExportConfigurations?.() ?? [],
       saveExportConfiguration: async (value) => {
@@ -530,30 +502,4 @@ function isGalleyHtmlPath(path: string): boolean {
 
 function isFolder(file: TAbstractFile): boolean {
   return "children" in file;
-}
-
-function chooseZip(
-  maxBytes: number,
-  tooLargeMessage: string,
-  readFailedMessage: string
-): Promise<Uint8Array | null> {
-  return new Promise((resolve, reject) => {
-    const input = document.createElement("input");
-    input.type = "file";
-    input.accept = ".zip,application/zip";
-    input.addEventListener(
-      "change",
-      () => {
-        const file = input.files?.[0];
-        if (!file) return resolve(null);
-        if (file.size > maxBytes) return reject(new Error(tooLargeMessage));
-        void file.arrayBuffer().then(
-          (buffer) => resolve(new Uint8Array(buffer)),
-          () => reject(new Error(readFailedMessage))
-        );
-      },
-      { once: true }
-    );
-    input.click();
-  });
 }

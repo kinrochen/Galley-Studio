@@ -123,14 +123,13 @@ export class SkillSession {
     let toolRounds = 0;
     while (true) {
       missing = required.filter((path) => !this.#loadedFiles.has(path));
-      if (missing.length > 0) {
-        this.#appendLoadMessage({
-          role: "system",
-          content:
-            "Before replying, call read_skill_file once for every missing required Skill path: " +
-            JSON.stringify(missing)
-        });
-      }
+      if (missing.length === 0) return;
+      this.#appendLoadMessage({
+        role: "system",
+        content:
+          "Before replying, call read_skill_file once for every missing required Skill path: " +
+          JSON.stringify(missing)
+      });
 
       let result: ChatTurnResult;
       try {
@@ -144,12 +143,9 @@ export class SkillSession {
         return;
       }
 
-      this.#appendAssistant(result, [this.#messages, this.#loadMessages]);
+      this.#appendAssistant(result);
       if (result.toolCalls.length === 0) {
         this.#acceptFinalContent(result);
-        if (missing.length === 0) {
-          return;
-        }
         ignoredRounds += 1;
         if (ignoredRounds >= 2) {
           this.#injectFiles(
@@ -165,10 +161,8 @@ export class SkillSession {
         throw new AiError("tool_round_limit");
       }
       const missingBeforeRound = new Set(missing);
-      const reads = this.#processToolCalls(result.toolCalls, [
-        this.#messages,
-        this.#loadMessages
-      ]);
+      const reads = this.#processToolCalls(result.toolCalls);
+      this.#persistReads(reads);
       if (reads.some((read) => missingBeforeRound.has(read.path))) {
         ignoredRounds = 0;
       } else if (missing.length > 0) {
@@ -229,6 +223,14 @@ export class SkillSession {
     return this.#completeScopedContent(prompt, signal);
   }
 
+  async completeScopedWithRequiredFiles(
+    prompt: string,
+    requiredPaths: readonly string[],
+    signal: AbortSignal
+  ): Promise<string> {
+    return this.#completeScopedContent(prompt, signal, requiredPaths, false);
+  }
+
   async completeScopedWithImage(
     prompt: string,
     imageDataUrl: string,
@@ -248,16 +250,17 @@ export class SkillSession {
 
   async #completeScopedContent(
     content: ChatUserContent,
-    signal: AbortSignal
+    signal: AbortSignal,
+    requiredPaths: readonly string[] = [],
+    allowTools = true
   ): Promise<string> {
-    await this.bootstrap(signal);
-    await this.ensureFiles([...this.#requiredFiles], signal);
+    this.#prepareScopedRequirements(requiredPaths);
     this.#throwIfAborted(signal);
 
     let messages = this.#cloneMessages(this.#loadMessages);
     messages.push({ role: "user", content });
     const seenToolCallIds = this.#toolCallIds(messages);
-    if (!this.#capabilities.tools) {
+    if (!allowTools || !this.#capabilities.tools) {
       const result = await this.#request(false, signal, messages);
       this.#appendAssistant(result, [messages]);
       return this.#acceptFinalContent(result);
@@ -324,6 +327,23 @@ export class SkillSession {
       unique.add(normalized);
     }
     return [...unique];
+  }
+
+  #prepareScopedRequirements(requiredPaths: readonly string[]): void {
+    const required = this.#validateRequiredPaths([
+      ...BOOTSTRAP_FILES,
+      ...this.#requiredFiles,
+      ...requiredPaths
+    ]);
+    for (const path of required) {
+      this.#requiredFiles.add(path);
+    }
+    const missing = required.filter((path) => !this.#loadedFiles.has(path));
+    if (this.#nativeSkillAccess) {
+      for (const path of missing) this.#recordLoad(path, "filesystem");
+      return;
+    }
+    this.#injectFiles(missing);
   }
 
   #processToolCalls(
@@ -430,9 +450,11 @@ export class SkillSession {
         content: `<skill-file path="${escapeAttribute(path)}">\n${content}\n</skill-file>`
       } as const;
       this.#messages.push(message);
-      this.#loadMessages.push({ ...message });
+      if (!this.#baselineFiles.has(path)) {
+        this.#loadMessages.push({ ...message });
+        this.#baselineFiles.add(path);
+      }
       this.#recordLoad(path, "injected");
-      this.#baselineFiles.add(path);
     }
   }
 
@@ -490,8 +512,6 @@ export class SkillSession {
 
   #appendLoadMessage(message: ChatRequest["messages"][number]): void {
     this.#messages.push(message);
-    const clone = this.#cloneMessages([message])[0];
-    if (clone) this.#loadMessages.push(clone);
   }
 
   #persistReads(

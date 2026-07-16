@@ -9,7 +9,6 @@ export type ConsoleRoute =
   | "generation"
   | "articles"
   | "themes"
-  | "skills"
   | "settings";
 
 export type MobileConsoleRoute = "home" | "articles";
@@ -95,7 +94,6 @@ export interface ConsoleNavigationItem {
     | "console.nav.home"
     | "console.nav.articles"
     | "console.nav.themes"
-    | "console.nav.skills"
     | "console.nav.settings";
 }
 
@@ -108,7 +106,6 @@ export const DESKTOP_CONSOLE_ROUTES: readonly ConsoleRoute[] = Object.freeze([
   "generation",
   "articles",
   "themes",
-  "skills",
   "settings"
 ]);
 

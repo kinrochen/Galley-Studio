@@ -3,7 +3,7 @@ import { dirname, resolve, sep } from "node:path";
 import { unzipSync } from "fflate";
 
 export const BUNDLE_META_PATH = "release/.galley-esbuild-meta.json";
-export const GALLEY_SOURCE_URL = "https://github.com/isjiamu/Galley";
+export const GALLEY_SOURCE_URL = "https://github.com/kinrochen/Galley";
 export const UPSTREAM_SOURCE_URL = "https://github.com/isjiamu/gzh-design-skill";
 export const UPSTREAM_COMMIT = "ba1f4175519b481cb3566616c9e5178705067904";
 

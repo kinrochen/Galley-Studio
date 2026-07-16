@@ -1,12 +1,12 @@
 {
   "name": "galley-obsidian",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "AI-driven Markdown-to-HTML publishing studio for Obsidian.",
   "author": "Kinrochen",
   "license": "AGPL-3.0-or-later",
   "repository": {
     "type": "git",
-    "url": "https://github.com/isjiamu/Galley.git"
+    "url": "https://github.com/kinrochen/Galley.git"
   },
   "funding": {
     "type": "individual",

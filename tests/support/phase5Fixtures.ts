@@ -61,6 +61,31 @@ export function validThemePreview(label = "Ocean"): string {
   return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${label}</title></head><body><article>${blocks}</article></body></html>`;
 }
 
+export function validThemeConceptPreview(label = "Ocean"): string {
+  const blocks = Array.from(
+    { length: 10 },
+    (_, index) =>
+      `<section data-galley-theme-block="${index + 1}" style="padding:8px"><span>${label} concept ${index + 1}</span></section>`
+  ).join("");
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${label} concept</title></head><body><article>${blocks}</article></body></html>`;
+}
+
+export function themeConceptResponse(
+  overrides: Record<string, unknown> = {}
+): string {
+  return JSON.stringify({
+    manifest: {
+      id: CUSTOM_THEME_ID,
+      name: "Ocean Notes",
+      primaryColor: "#075985",
+      useCases: "research notes and technical essays",
+      underlineCss: "border-bottom:2px solid #075985;"
+    },
+    previewHtml: validThemeConceptPreview(),
+    ...overrides
+  });
+}
+
 export function themeModelResponse(
   overrides: Record<string, unknown> = {}
 ): string {
@@ -76,6 +101,12 @@ export function themeModelResponse(
     previewHtml: validThemePreview(),
     ...overrides
   });
+}
+
+export function themeComponentLibraryResponse(
+  componentLibrary = validComponentLibrary()
+): string {
+  return JSON.stringify({ componentLibrary });
 }
 
 export function themeIndexMarkdown(

@@ -22,11 +22,11 @@ describe("SkillDrivenGenerationPipeline", () => {
       "```",
       "Finished."
     ].join("\n");
-    const completeScoped = vi.fn(async () => response);
+    const completeScopedWithRequiredFiles = vi.fn(async () => response);
     const onModelEvent = vi.fn();
     const pipeline = new SkillDrivenGenerationPipeline({
       session: {
-        completeScoped,
+        completeScopedWithRequiredFiles,
         audit: () => ({
           skillId: "gzh-design",
           skillVersion: "test",
@@ -38,7 +38,7 @@ describe("SkillDrivenGenerationPipeline", () => {
       themes: {
         get: (id: string) => id === THEME.id ? THEME : undefined,
         list: () => [THEME]
-      } as BuiltInThemeRepository,
+      } as unknown as BuiltInThemeRepository,
       onModelEvent
     });
 
@@ -63,8 +63,14 @@ describe("SkillDrivenGenerationPipeline", () => {
         text: expect.stringContaining("Markdown source:")
       })
     );
-    expect(completeScoped).toHaveBeenCalledWith(
+    expect(completeScopedWithRequiredFiles).toHaveBeenCalledWith(
       expect.stringContaining("Markdown source:"),
+      ["references/common-components.md", THEME.file],
+      expect.any(AbortSignal)
+    );
+    expect(completeScopedWithRequiredFiles).toHaveBeenCalledWith(
+      expect.stringContaining("Do not ask the user to provide article text"),
+      ["references/common-components.md", THEME.file],
       expect.any(AbortSignal)
     );
   });
@@ -72,13 +78,14 @@ describe("SkillDrivenGenerationPipeline", () => {
   it("rejects a response that contains no usable article HTML", async () => {
     const pipeline = new SkillDrivenGenerationPipeline({
       session: {
-        completeScoped: async () => "I need more context before I can continue.",
+        completeScopedWithRequiredFiles: async () =>
+          "I need more context before I can continue.",
         audit: vi.fn()
       } as unknown as SkillSession,
       themes: {
         get: () => THEME,
         list: () => [THEME]
-      } as BuiltInThemeRepository
+      } as unknown as BuiltInThemeRepository
     });
 
     await expect(

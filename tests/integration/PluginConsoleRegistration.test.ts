@@ -49,7 +49,31 @@ describe("plugin console registration", () => {
     expect(harness.leaves).toHaveLength(1);
     expect(existingView.resetHome).toHaveBeenCalledTimes(1);
     expect(harness.revealLeaf).toHaveBeenCalledTimes(2);
+    expect(harness.getRightLeaf).toHaveBeenCalledTimes(1);
+    expect(harness.getRightLeaf).toHaveBeenCalledWith(false);
+    expect(harness.getLeaf).not.toHaveBeenCalled();
+    expect(harness.detachLeavesOfType).toHaveBeenCalledTimes(1);
     expect(harness.executeCommandById).not.toHaveBeenCalled();
+  });
+
+  it("migrates an existing central console leaf into the right sidebar", async () => {
+    const harness = makeApp();
+    const central = harness.getLeaf("tab");
+    await central.setViewState({
+      type: GALLEY_CONSOLE_VIEW_TYPE,
+      state: { route: "home" },
+      active: true
+    });
+    const plugin = new GalleyPlugin(harness.app, {} as PluginManifest);
+    await plugin.onload();
+
+    await plugin.openGalleyConsole();
+
+    expect(harness.detachLeavesOfType)
+      .toHaveBeenCalledWith(GALLEY_CONSOLE_VIEW_TYPE);
+    expect(harness.getRightLeaf).toHaveBeenCalledWith(false);
+    expect(harness.leaves).toHaveLength(1);
+    expect(harness.leaves[0]).not.toBe(central);
   });
 
   it("keeps compatibility command ids with permanent bilingual names", async () => {
@@ -66,16 +90,10 @@ describe("plugin console registration", () => {
           id: "generate-current-article",
           name: "Galley: Generate current article / 生成当前文章"
         }),
-        expect.objectContaining({
-          id: "theme-import-zip",
-          name: "Galley: Themes / 主题管理"
-        }),
-        expect.objectContaining({
-          id: "skill-import-zip",
-          name: "Galley: Skill / 技能管理"
-        })
       ])
     );
+    expect(commands.some(({ id }) => id === "theme-import-zip")).toBe(false);
+    expect(commands.some(({ id }) => id.startsWith("skill-"))).toBe(false);
   });
 });
 
@@ -83,6 +101,27 @@ function makeApp() {
   const leaves: Array<WorkspaceLeaf & { view: unknown }> = [];
   const revealLeaf = vi.fn();
   const executeCommandById = vi.fn();
+  const createLeaf = () => {
+    const leaf = new WorkspaceLeaf() as WorkspaceLeaf & { view: unknown };
+    const original = leaf.setViewState.bind(leaf);
+    leaf.setViewState = async (state) => {
+      await original(state);
+    };
+    leaves.push(leaf);
+    return leaf;
+  };
+  const getLeaf = vi.fn((_kind?: string) => createLeaf());
+  const getRightLeaf = vi.fn(() => createLeaf());
+  const detachLeavesOfType = vi.fn((type: string) => {
+    for (let index = leaves.length - 1; index >= 0; index -= 1) {
+      const leaf = leaves[index];
+      if (
+        (leaf as unknown as { state?: { type?: string } }).state?.type === type
+      ) {
+        leaves.splice(index, 1);
+      }
+    }
+  });
   const workspace = {
     getActiveFile: () => null,
     getLeavesOfType: (type: string) =>
@@ -90,15 +129,9 @@ function makeApp() {
         (leaf) =>
           (leaf as unknown as { state?: { type?: string } }).state?.type === type
       ),
-    getLeaf: () => {
-      const leaf = new WorkspaceLeaf() as WorkspaceLeaf & { view: unknown };
-      const original = leaf.setViewState.bind(leaf);
-      leaf.setViewState = async (state) => {
-        await original(state);
-      };
-      leaves.push(leaf);
-      return leaf;
-    },
+    getLeaf,
+    getRightLeaf,
+    detachLeavesOfType,
     revealLeaf,
     on: vi.fn(() => ({}))
   };
@@ -116,5 +149,13 @@ function makeApp() {
       setSecret: () => undefined
     }
   } as unknown as App;
-  return { app, leaves, revealLeaf, executeCommandById };
+  return {
+    app,
+    leaves,
+    revealLeaf,
+    executeCommandById,
+    getLeaf,
+    getRightLeaf,
+    detachLeavesOfType
+  };
 }

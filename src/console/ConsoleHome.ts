@@ -1,7 +1,6 @@
 import type {
   GalleyActions,
   SettingsSnapshot,
-  SkillSummary,
   ThemeSummary
 } from "./GalleyActions";
 import type {
@@ -41,7 +40,6 @@ export interface ConsoleHomeEnvironment {
 interface HomeManagementSnapshot {
   readonly settings?: SettingsSnapshot;
   readonly themes: readonly ThemeSummary[];
-  readonly skills: readonly SkillSummary[];
   readonly secretAvailable: boolean;
 }
 
@@ -81,8 +79,7 @@ export async function renderConsoleHome(
     section.append(source);
 
     const enabledThemes = management.themes.filter(({ enabled }) => enabled);
-    const activeSkill = management.skills.find(({ active }) => active)?.version
-      ?? management.settings?.activeSkillVersion;
+    const activeSkill = management.settings?.activeSkillVersion;
     const readiness = document.createElement("div");
     readiness.className = "galley-console__readiness";
     const generationAgent = management.settings?.generationAgent ?? "plugin";
@@ -244,17 +241,13 @@ export async function renderConsoleHome(
       })).className = "galley-console__article-meta";
       const rowActions = document.createElement("div");
       rowActions.className = "galley-console__row-actions";
-      const preview = button(text.t("common.action.preview"), "preview");
-      preview.addEventListener("click", () =>
-        void environment.run("preview", () => actions.openPreview(article.htmlPath))
-      );
-      const edit = button(text.t("common.action.continue"), "continue-edit");
+      const edit = button(text.t("common.action.edit"), "edit");
       edit.addEventListener("click", () =>
-        void environment.run("continue-edit", () =>
+        void environment.run("edit", () =>
           actions.desktop!.openWorkbench(article.htmlPath)
         )
       );
-      rowActions.append(preview, edit);
+      rowActions.append(edit);
       row.append(details, rowActions);
       list.append(row);
     }
@@ -329,16 +322,14 @@ async function safeArticles(actions: GalleyActions): Promise<ArticleCatalogSnaps
 async function safeManagement(actions: GalleyActions): Promise<HomeManagementSnapshot> {
   const runtime = actions.desktop;
   if (!runtime) return emptyManagement();
-  const [settings, themes, skills, secrets] = await Promise.all([
+  const [settings, themes, secrets] = await Promise.all([
     runtime.readSettings?.().catch(() => undefined),
     runtime.listThemes?.().catch(() => []),
-    runtime.listSkills?.().catch(() => []),
     runtime.listSecrets?.().catch(() => [])
   ]);
   return {
     ...(settings ? { settings } : {}),
     themes: themes ?? [],
-    skills: skills ?? [],
     secretAvailable: Boolean(
       settings?.secretId && (secrets ?? []).includes(settings.secretId)
     )
@@ -346,7 +337,7 @@ async function safeManagement(actions: GalleyActions): Promise<HomeManagementSna
 }
 
 function emptyManagement(): HomeManagementSnapshot {
-  return { themes: [], skills: [], secretAvailable: false };
+  return { themes: [], secretAvailable: false };
 }
 
 function readinessItem(label: string, value: string): HTMLElement {

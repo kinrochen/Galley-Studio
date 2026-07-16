@@ -8,7 +8,12 @@ import {
 } from "../skill/ObsidianActiveSkillPointerStore";
 import { SkillPackageSettings } from "../skill/SkillPackageSettings";
 import { SkillVirtualFileSystem } from "../skill/SkillVirtualFileSystem";
-import { ThemeGenerationService, type ThemeDraft, type ThemeGenerationInput } from "../theme-lab/ThemeGenerationService";
+import {
+  ThemeGenerationService,
+  type ThemeDraft,
+  type ThemeGenerationInput,
+  type ThemeGenerationProgress
+} from "../theme-lab/ThemeGenerationService";
 import { BuiltInThemeRepository } from "../themes/BuiltInThemeRepository";
 import { CustomThemeRepository } from "../themes/CustomThemeRepository";
 import { ObsidianCustomThemeStore } from "../themes/ObsidianCustomThemeStore";
@@ -31,7 +36,8 @@ export async function generateThemeDraft(
   app: App,
   settings: Readonly<GalleySettings>,
   input: ThemeGenerationInput,
-  signal: AbortSignal
+  signal: AbortSignal,
+  progress?: ThemeGenerationProgress
 ): Promise<ThemeDraft> {
   const context = await createProductionSkillContext(
     app,
@@ -44,7 +50,27 @@ export async function generateThemeDraft(
     session: context.session,
     capabilities: context.capabilities,
     repository: context.customThemes
-  }).generate(input, signal);
+  }).generate(input, signal, progress);
+}
+
+export async function finalizeAndSaveThemeDraft(
+  app: App,
+  draft: ThemeDraft,
+  settings: Readonly<GalleySettings>,
+  signal: AbortSignal,
+  progress?: ThemeGenerationProgress
+): Promise<ThemeDraft> {
+  const context = await createProductionSkillContext(
+    app,
+    settings,
+    signal,
+    "theme"
+  );
+  return new ThemeGenerationService({
+    session: context.session,
+    capabilities: context.capabilities,
+    repository: context.customThemes
+  }).finalizeAndSave(draft, signal, progress);
 }
 
 export async function saveThemeDraft(
@@ -52,25 +78,15 @@ export async function saveThemeDraft(
   draft: ThemeDraft,
   settings: Readonly<GalleySettings>
 ): Promise<void> {
-  if (!draft.validation.valid) throw new Error("Theme draft validation failed.");
+  if (!draft.validation.valid || !draft.componentLibrary) {
+    throw new Error("A finalized theme is required before saving.");
+  }
   const repository = await customThemeRepository(app, settings);
   await repository.save({
     manifest: draft.manifest,
     componentLibrary: draft.componentLibrary,
     previewHtml: draft.previewHtml
   });
-}
-
-export async function importThemeArchive(
-  app: App,
-  bytes: Uint8Array,
-  settings: Readonly<GalleySettings>
-): Promise<string> {
-  const repository = await customThemeRepository(app, settings);
-  const archive = new ThemeArchive();
-  const files = archive.import(bytes);
-  await repository.save(files);
-  return files.manifest.id;
 }
 
 export async function exportThemeArchive(

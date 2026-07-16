@@ -38,7 +38,7 @@ describe("GenerationPage", () => {
         desktop: {
           openWorkbench: async () => undefined
         }
-      } as GalleyActions,
+      } as unknown as GalleyActions,
       task,
       text: ENGLISH_LOCALIZED_TEXT,
       navigate: async () => undefined
@@ -91,5 +91,58 @@ describe("GenerationPage", () => {
       .toBe("Generation failed.");
     expect(error?.querySelector(".galley-generation__error-message")?.textContent)
       .toBe("The model response did not contain usable HTML.");
+  });
+
+  it("hides completed tool-only rounds and numbers visible messages continuously", () => {
+    const container = document.createElement("div");
+    const task = {
+      snapshot: () => ({
+        status: "succeeded" as const,
+        sourcePath: "notes/article.md",
+        stage: "saving" as const,
+        elapsedMs: 5_000,
+        turns: [
+          {
+            requestId: 1,
+            text: "",
+            status: "complete" as const,
+            startedAt: 0,
+            elapsedMs: 1_000,
+            truncated: false
+          },
+          {
+            requestId: 3,
+            text: "<section>done</section>",
+            status: "complete" as const,
+            startedAt: 2_000,
+            elapsedMs: 3_000,
+            truncated: false
+          }
+        ],
+        result: {
+          status: "committed" as const,
+          htmlPath: "notes/article.html",
+          sidecarPath: ""
+        }
+      }),
+      subscribe: () => () => undefined,
+      start: () => "task",
+      wait: async () => task.snapshot(),
+      cancel: vi.fn(),
+      dispose: vi.fn()
+    };
+
+    renderGenerationPage(container, {
+      actions: {} as GalleyActions,
+      task,
+      text: ENGLISH_LOCALIZED_TEXT,
+      navigate: async () => undefined
+    });
+
+    expect(container.querySelectorAll(".galley-generation__message.is-assistant"))
+      .toHaveLength(1);
+    expect(container.textContent).toContain("Model rounds1");
+    expect(container.textContent).toContain("Model · round 1 · 3s");
+    expect(container.textContent).not.toContain("Waiting for visible model output");
   });
 });

@@ -1,6 +1,5 @@
 export const EN = {
   "common.action.cancel": "Cancel",
-  "common.action.continue": "Continue editing",
   "common.action.delete": "Delete",
   "common.action.duplicate": "Duplicate",
   "common.action.edit": "Edit",
@@ -73,7 +72,6 @@ export const EN = {
   "console.nav.exports": "Export configurations",
   "console.nav.home": "Console",
   "console.nav.settings": "Settings",
-  "console.nav.skills": "Skill",
   "console.nav.themes": "Themes",
   "console.ribbon": "Open Galley console",
   "console.generation.title": "Generation conversation",
@@ -124,26 +122,6 @@ export const EN = {
   "console.settings.temperature": "Temperature",
   "console.settings.timeout": "Timeout (ms)",
   "console.settings.title": "Settings",
-  "console.skills.activate": "Activate",
-  "console.skills.active": "Active",
-  "console.skills.bundled": "Bundled Skill",
-  "console.skills.source.bundled": "Bundled",
-  "console.skills.source.imported": "Imported",
-  "console.skills.valid": "Valid",
-  "console.skills.invalid": "Invalid",
-  "console.skills.import": "Import Skill ZIP",
-  "console.skills.importedInactive": "Imported Skill {version}. It remains inactive until explicitly activated.",
-  "console.skills.title": "Skill",
-  "console.skills.tooLarge": "A Skill ZIP must be no larger than 25 MiB.",
-  "console.skills.description": "The active Skill is the generation playbook: it defines the HTML rules, theme recipes, and validation requirements the Agent must follow.",
-  "console.skills.howItWorks": "What this Skill does",
-  "console.skills.step.rules": "Loads the safe HTML authoring rules and allowed components.",
-  "console.skills.step.theme": "Provides the selected theme's colors, typography, and layout recipes.",
-  "console.skills.step.html": "Guides the Agent to turn every Markdown block into one final HTML document.",
-  "console.skills.step.validation": "Checks source coverage and repairs invalid output before saving.",
-  "console.skills.current": "Active Skill: {id} · {version}",
-  "console.skills.files": "{count} instruction files loaded",
-  "console.skills.instructions": "View the active SKILL.md instructions",
   "console.themes.disable": "Disable",
   "console.themes.description": "Use a built-in theme, manage custom themes, or create one with AI.",
   "console.themes.empty": "No themes are available from the active Skill.",
@@ -151,7 +129,6 @@ export const EN = {
   "console.themes.custom": "Custom",
   "console.themes.enable": "Enable",
   "console.themes.export": "Export",
-  "console.themes.import": "Import theme ZIP",
   "console.themes.preview": "Preview of {theme}",
   "console.themes.title": "Themes",
   "console.title": "Galley console",
@@ -214,11 +191,27 @@ export const EN = {
   ,"settings.secret.desc": "Select a key stored in Obsidian SecretStorage."
   ,"settings.temperature.desc": "Sampling temperature from 0 to 2."
   ,"settings.timeout.desc": "Generation requests use a fixed 30-minute timeout (1800000 ms)."
+  ,"themeLab.assistant": "Galley"
+  ,"themeLab.assistant.finalizing": "I’m turning the approved preview into the complete reusable theme and saving it…"
+  ,"themeLab.assistant.generating": "I’m generating a new theme draft from the full conversation…"
+  ,"themeLab.assistant.invalid": "The draft was generated, but it has {count} validation issue(s). Continue the conversation and ask me to revise it."
+  ,"themeLab.assistant.saved": "“{name}” is saved. It is now available when you generate new articles."
+  ,"themeLab.assistant.valid": "I generated “{name}” with {color} as its primary color. Review the preview, continue with changes, or save it when you are satisfied."
+  ,"themeLab.assistant.welcome": "Describe the visual direction you want: mood, colors, typography, layout, and suitable article types. I’ll quickly generate a lightweight preview. You can keep sending changes; the complete theme is built only when you save."
+  ,"themeLab.conversation.aria": "Theme design conversation"
   ,"themeLab.description.aria": "Theme description"
-  ,"themeLab.description.placeholder": "Describe the visual style, mood, colors, and intended articles."
-  ,"themeLab.generate": "Generate draft"
+  ,"themeLab.description.placeholder": "Describe a theme, or tell Galley what to change… (⌘/Ctrl + Enter to send)"
+  ,"themeLab.error.collision": "A theme with this id already exists. Ask Galley to use a different theme name, then save again."
+  ,"themeLab.error.invalidResponse": "The model did not return a readable theme package. Save again to retry."
+  ,"themeLab.error.missingSecret": "No API key is available for theme generation."
+  ,"themeLab.error.provider": "The model provider could not complete the theme. Check the connection and retry."
+  ,"themeLab.error.timeout": "Complete theme generation timed out. Save again or use a faster model."
+  ,"themeLab.error.validation": "The complete theme did not pass validation. Save again to regenerate it."
+  ,"themeLab.generate.initial": "Generate first draft"
+  ,"themeLab.generate.refine": "Send changes"
   ,"themeLab.image.aria": "Optional reference image"
   ,"themeLab.image.tooLarge": "A theme reference image must be no larger than 10 MiB."
+  ,"themeLab.intro": "Iterate quickly with lightweight previews. Galley builds the complete reusable theme only after you explicitly save it."
   ,"themeLab.issue.invalid": "The theme draft contains a validation issue."
   ,"themeLab.issue.designVariables": "The component library is missing design variables."
   ,"themeLab.issue.componentHtml": "The component library is missing complete component HTML."
@@ -235,18 +228,25 @@ export const EN = {
   ,"themeLab.issue.previewDocument": "The theme preview is not a valid full HTML document."
   ,"themeLab.issue.previewScript": "The theme preview contains a script."
   ,"themeLab.issue.previewEvent": "The theme preview contains an event handler."
-  ,"themeLab.issue.previewCount": "The theme preview must contain 45 to 75 marked blocks."
+  ,"themeLab.issue.previewCount": "The lightweight preview must contain 8 to 12 marked blocks."
   ,"themeLab.issue.previewSequence": "Theme preview markers must be consecutive and in DOM order."
   ,"themeLab.notice.saved": "Saved custom theme: {name}"
+  ,"themeLab.preview.heading": "Live theme preview"
   ,"themeLab.preview.title": "Galley custom theme full-page preview"
   ,"themeLab.save": "Save theme"
   ,"themeLab.status.cancelled": "Theme generation cancelled."
+  ,"themeLab.status.drafting": "Generating a lightweight preview… {seconds}s"
+  ,"themeLab.status.finalizing": "Building the complete theme package… {seconds}s"
   ,"themeLab.status.generating": "Generating theme draft…"
   ,"themeLab.status.invalid": "Draft has validation errors and cannot be saved."
+  ,"themeLab.status.loadingRules": "Loading complete theme rules… {seconds}s"
   ,"themeLab.status.operationFailed": "Theme operation failed."
   ,"themeLab.status.saved": "Theme saved and available to new Skill sessions."
-  ,"themeLab.status.valid": "Draft is valid. Review the full page, then save explicitly."
+  ,"themeLab.status.saving": "Saving the completed theme… {seconds}s"
+  ,"themeLab.status.valid": "Lightweight preview is ready. Continue refining it, or save to build the complete theme."
+  ,"themeLab.status.validating": "Validating the generated theme… {seconds}s"
   ,"themeLab.title": "AI Theme Lab"
+  ,"themeLab.you": "You"
   ,"workbench.conflict.copy": "Save a copy"
   ,"workbench.conflict.message": "This article changed outside Galley. Choose how to continue."
   ,"workbench.conflict.overwrite": "Overwrite external"
@@ -340,7 +340,6 @@ export type MessageResources = Readonly<Record<MessageKey, string>>;
 
 export const ZH_CN: MessageResources = {
   "common.action.cancel": "取消",
-  "common.action.continue": "继续编辑",
   "common.action.delete": "删除",
   "common.action.duplicate": "复制",
   "common.action.edit": "编辑",
@@ -413,7 +412,6 @@ export const ZH_CN: MessageResources = {
   "console.nav.exports": "导出配置",
   "console.nav.home": "控制台",
   "console.nav.settings": "设置",
-  "console.nav.skills": "技能",
   "console.nav.themes": "主题",
   "console.ribbon": "打开 Galley 控制台",
   "console.generation.title": "生成对话",
@@ -464,26 +462,6 @@ export const ZH_CN: MessageResources = {
   "console.settings.temperature": "温度",
   "console.settings.timeout": "超时（毫秒）",
   "console.settings.title": "设置",
-  "console.skills.activate": "激活",
-  "console.skills.active": "已激活",
-  "console.skills.bundled": "内置技能",
-  "console.skills.source.bundled": "内置",
-  "console.skills.source.imported": "已导入",
-  "console.skills.valid": "有效",
-  "console.skills.invalid": "无效",
-  "console.skills.import": "导入技能 ZIP",
-  "console.skills.importedInactive": "已导入技能 {version}。明确激活前它保持未启用状态。",
-  "console.skills.title": "技能",
-  "console.skills.tooLarge": "技能 ZIP 不得超过 25 MiB。",
-  "console.skills.description": "当前 Skill 是生成操作手册：它规定 Agent 必须遵循的 HTML 规则、主题配方和校验要求。",
-  "console.skills.howItWorks": "这个 Skill 具体做什么",
-  "console.skills.step.rules": "加载安全 HTML 编写规则和允许使用的组件。",
-  "console.skills.step.theme": "提供所选主题的配色、字体与版式配方。",
-  "console.skills.step.html": "指导 Agent 将每个 Markdown 区块转换为一个完整 HTML 文档。",
-  "console.skills.step.validation": "保存前检查原文覆盖情况，并修复不合格输出。",
-  "console.skills.current": "当前 Skill：{id} · {version}",
-  "console.skills.files": "已加载 {count} 个说明文件",
-  "console.skills.instructions": "查看当前 SKILL.md 完整说明",
   "console.themes.disable": "停用",
   "console.themes.description": "使用内置主题、管理自定义主题，或通过 AI 创建新主题。",
   "console.themes.empty": "当前 Skill 没有提供可用主题。",
@@ -491,7 +469,6 @@ export const ZH_CN: MessageResources = {
   "console.themes.custom": "自定义",
   "console.themes.enable": "启用",
   "console.themes.export": "导出",
-  "console.themes.import": "导入主题 ZIP",
   "console.themes.preview": "{theme} 主题预览",
   "console.themes.title": "主题",
   "console.title": "Galley 控制台",
@@ -554,11 +531,27 @@ export const ZH_CN: MessageResources = {
   ,"settings.secret.desc": "选择存储在 Obsidian SecretStorage 中的密钥。"
   ,"settings.temperature.desc": "0 到 2 之间的采样温度。"
   ,"settings.timeout.desc": "生成请求固定使用 30 分钟超时（1800000 毫秒）。"
+  ,"themeLab.assistant": "Galley"
+  ,"themeLab.assistant.finalizing": "我正在把确认过的预览生成完整可复用主题并保存……"
+  ,"themeLab.assistant.generating": "我正在根据完整对话生成新的主题草稿…"
+  ,"themeLab.assistant.invalid": "草稿已生成，但还有 {count} 个验证问题。请继续告诉我如何调整。"
+  ,"themeLab.assistant.saved": "“{name}”已保存，之后生成新文章时可以直接使用。"
+  ,"themeLab.assistant.valid": "我已生成“{name}”，主色为 {color}。你可以检查预览、继续提出修改，满意后再保存。"
+  ,"themeLab.assistant.welcome": "告诉我你想要的视觉方向，例如氛围、色彩、字体、版式和适用文章类型。我会先快速生成轻量预览，你可以继续修改；只有保存时才会生成完整主题。"
+  ,"themeLab.conversation.aria": "主题设计对话"
   ,"themeLab.description.aria": "主题描述"
-  ,"themeLab.description.placeholder": "描述视觉风格、氛围、色彩和适用文章。"
-  ,"themeLab.generate": "生成草稿"
+  ,"themeLab.description.placeholder": "描述主题，或告诉 Galley 还要修改什么……（⌘/Ctrl + Enter 发送）"
+  ,"themeLab.error.collision": "相同 ID 的主题已存在，请让 Galley 更换主题名称后再保存。"
+  ,"themeLab.error.invalidResponse": "模型没有返回可读取的主题包，请再次点击保存重试。"
+  ,"themeLab.error.missingSecret": "没有可用于主题生成的 API 密钥。"
+  ,"themeLab.error.provider": "模型服务未能完成主题生成，请检查连接后重试。"
+  ,"themeLab.error.timeout": "完整主题生成超时，请再次保存或换用更快的模型。"
+  ,"themeLab.error.validation": "完整主题未通过校验，请再次点击保存重新生成。"
+  ,"themeLab.generate.initial": "生成第一个草稿"
+  ,"themeLab.generate.refine": "发送修改意见"
   ,"themeLab.image.aria": "可选参考图"
   ,"themeLab.image.tooLarge": "主题参考图不得超过 10 MiB。"
+  ,"themeLab.intro": "通过轻量预览快速迭代。只有明确点击保存后，Galley 才会生成完整可复用主题并加入主题库。"
   ,"themeLab.issue.invalid": "主题草稿存在验证问题。"
   ,"themeLab.issue.designVariables": "组件库缺少设计变量。"
   ,"themeLab.issue.componentHtml": "组件库缺少完整组件 HTML。"
@@ -575,18 +568,25 @@ export const ZH_CN: MessageResources = {
   ,"themeLab.issue.previewDocument": "主题预览不是有效的完整 HTML 文档。"
   ,"themeLab.issue.previewScript": "主题预览包含脚本。"
   ,"themeLab.issue.previewEvent": "主题预览包含事件处理器。"
-  ,"themeLab.issue.previewCount": "主题预览必须包含 45 到 75 个标记区块。"
+  ,"themeLab.issue.previewCount": "轻量预览必须包含 8 到 12 个标记区块。"
   ,"themeLab.issue.previewSequence": "主题预览标记必须按 DOM 顺序连续排列。"
   ,"themeLab.notice.saved": "已保存自定义主题：{name}"
+  ,"themeLab.preview.heading": "主题实时预览"
   ,"themeLab.preview.title": "Galley 自定义主题全页预览"
   ,"themeLab.save": "保存主题"
   ,"themeLab.status.cancelled": "主题生成已取消。"
+  ,"themeLab.status.drafting": "正在生成轻量预览……{seconds} 秒"
+  ,"themeLab.status.finalizing": "正在生成完整主题包……{seconds} 秒"
   ,"themeLab.status.generating": "正在生成主题草稿…"
   ,"themeLab.status.invalid": "草稿存在验证错误，无法保存。"
+  ,"themeLab.status.loadingRules": "正在加载完整主题规则……{seconds} 秒"
   ,"themeLab.status.operationFailed": "主题操作失败。"
   ,"themeLab.status.saved": "主题已保存，可供新的技能会话使用。"
-  ,"themeLab.status.valid": "草稿有效。请检查完整页面后明确保存。"
+  ,"themeLab.status.saving": "正在保存完整主题……{seconds} 秒"
+  ,"themeLab.status.valid": "轻量预览已完成。你可以继续修改，或保存并生成完整主题。"
+  ,"themeLab.status.validating": "正在校验生成结果……{seconds} 秒"
   ,"themeLab.title": "AI 主题实验室"
+  ,"themeLab.you": "你"
   ,"workbench.conflict.copy": "另存副本"
   ,"workbench.conflict.message": "此文章已在 Galley 外部更改，请选择后续操作。"
   ,"workbench.conflict.overwrite": "覆盖外部版本"

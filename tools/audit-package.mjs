@@ -4,8 +4,8 @@ const packageJson = JSON.parse(await readFile("package.json", "utf8"));
 const lock = JSON.parse(await readFile("package-lock.json", "utf8"));
 const manifest = JSON.parse(await readFile("manifest.json", "utf8"));
 const failures = [];
-if (packageJson.version !== "0.1.0" || lock.version !== "0.1.0" || manifest.version !== "0.1.0") {
-  failures.push("package, lockfile, and manifest versions must all be 0.1.0");
+if (packageJson.version !== "0.2.0" || lock.version !== "0.2.0" || manifest.version !== "0.2.0") {
+  failures.push("package, lockfile, and manifest versions must all be 0.2.0");
 }
 if (manifest.minAppVersion !== "1.11.4" || manifest.isDesktopOnly !== false) {
   failures.push("manifest platform contract changed");

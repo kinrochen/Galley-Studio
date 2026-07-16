@@ -13,21 +13,22 @@ destructive or activating actions require explicit confirmation.
 
 Mobile is preview-only. The console shell and catalog remain available, while
 the desktop generation, HugeRTE, Theme Lab, export/clipboard, diagnostics, and
-Skill-management dependency graph stays behind a desktop-only dynamic import.
+theme-management dependency graph stays behind a desktop-only dynamic import.
 The mobile audit fails if those modules enter the static startup graph.
 
 Theme reference images require an explicit file selection, PNG/JPEG/WebP magic
 bytes that agree with MIME, and a size no greater than 10 MiB. The selected image
 is not sent unless the model first passes a separate built-in vision probe.
 
-Skill and theme ZIP readers reject traversal, absolute paths, symbolic link
-entries, duplicate canonical paths, encryption, missing files, and configured
-archive/entry/extracted-size limits. The UI rejects oversized `File.size` values
-before allocating an `ArrayBuffer`; extraction then reconciles local and central
-headers and streams actual output through length, aggregate-limit, and CRC checks.
-Imported Python, shell, and other scripts are read-only reference text and are
-never executed. Import does not activate a Skill; failed explicit activation
-preserves and durably restores the prior active version.
+Theme ZIP readers and the retained Skill-package validation primitives reject
+traversal, absolute paths, symbolic link entries, duplicate canonical paths,
+encryption, missing files, and configured archive/entry/extracted-size limits.
+The UI rejects oversized `File.size` values before allocating an `ArrayBuffer`;
+extraction then reconciles local and central headers and streams actual output
+through length, aggregate-limit, and CRC checks. Python, shell, and other
+scripts are read-only reference text and are never executed. Galley 0.2.0 does
+not expose Skill import or activation in the UI; its bundled Skill is pinned to
+an audited upstream commit.
 
 Language selection is persisted before it is published to live views. Locale
 changes rerender only Galley-owned chrome and preserve the active route, form

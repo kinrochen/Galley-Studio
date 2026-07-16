@@ -41,8 +41,7 @@ const read = (id: string, path: string): ChatTurnResult =>
 it("records files actually loaded through read_skill_file", async () => {
   const client = new ScriptedChatClient([
     read("1", "SKILL.md"),
-    read("2", "references/theme-index.md"),
-    completed({ content: "loaded" })
+    read("2", "references/theme-index.md")
   ]);
   const session = makeSession(client);
 
@@ -56,7 +55,7 @@ it("records files actually loaded through read_skill_file", async () => {
     files: ["SKILL.md", "references/theme-index.md"]
   });
   expect(client.remainingSteps()).toBe(0);
-  expect(client.requestsWithTools()).toHaveLength(3);
+  expect(client.requestsWithTools()).toHaveLength(2);
   expect(client.requestsWithTools()[0]?.tools).toEqual([
     READ_SKILL_FILE_TOOL
   ]);
@@ -66,11 +65,6 @@ it("records files actually loaded through read_skill_file", async () => {
         role: "tool",
         toolCallId: "1",
         content: "Complete workflow instructions."
-      },
-      {
-        role: "tool",
-        toolCallId: "2",
-        content: "Complete theme index."
       }
     ])
   );
@@ -376,9 +370,7 @@ it("returns final content only after bootstrap requirements and tool results", a
   const client = new ScriptedChatClient([
     read("root", "SKILL.md"),
     read("themes", "references/theme-index.md"),
-    completed({ content: "bootstrap complete" }),
     read("components", "references/common-components.md"),
-    completed({ content: "components loaded" }),
     completed({ content: "final answer" })
   ]);
   const session = makeSession(client);
@@ -410,7 +402,6 @@ it("loads bootstrap requirements before accepting complete() content", async () 
   const client = new ScriptedChatClient([
     read("root", "SKILL.md"),
     read("themes", "references/theme-index.md"),
-    completed({ content: "bootstrap complete" }),
     completed({ content: "final answer" })
   ]);
   const session = makeSession(client);
@@ -430,7 +421,6 @@ it("reloads an accumulated requirement after an earlier ensureFiles failure", as
     new AiError("aborted"),
     read("root", "SKILL.md"),
     read("themes", "references/theme-index.md"),
-    completed({ content: "bootstrap complete" }),
     (request) => {
       const lastMessage = request.messages.at(-1);
       return lastMessage?.role === "system" &&
@@ -438,7 +428,6 @@ it("reloads an accumulated requirement after an earlier ensureFiles failure", as
         ? read("recovered-custom", customPath)
         : completed({ content: "final answer" });
     },
-    completed({ content: "custom requirement loaded" }),
     completed({ content: "final answer" })
   ]);
   const session = makeSession(client);
@@ -485,7 +474,6 @@ it("throws tool_round_limit before processing a ninth complete() tool round", as
   const client = new ScriptedChatClient([
     read("root", "SKILL.md"),
     read("themes", "references/theme-index.md"),
-    completed({ content: "bootstrap complete" }),
     ...completionToolRounds,
     ninth
   ]);
@@ -495,7 +483,7 @@ it("throws tool_round_limit before processing a ninth complete() tool round", as
   await expect(session.complete("loop", signal())).rejects.toEqual(
     expect.objectContaining({ code: "tool_round_limit" })
   );
-  expect(client.requests).toHaveLength(12);
+  expect(client.requests).toHaveLength(11);
   expect(session.audit().files).toEqual([
     "SKILL.md",
     "references/theme-index.md"
@@ -512,7 +500,6 @@ it("injects full required files and retries complete() without tools after downg
   const client = new ScriptedChatClient([
     read("root", "SKILL.md"),
     read("themes", "references/theme-index.md"),
-    completed({ content: "bootstrap complete" }),
     new AiError("tools_unsupported"),
     completed({ content: "fallback answer" })
   ]);
@@ -542,7 +529,6 @@ it("rejects an empty tool-call terminal returned by a downgrade retry", async ()
   const client = new ScriptedChatClient([
     read("root", "SKILL.md"),
     read("themes", "references/theme-index.md"),
-    completed({ content: "bootstrap complete" }),
     new AiError("tools_unsupported"),
     completed({
       content: "must not be accepted",
@@ -617,19 +603,29 @@ it("snapshots package identity so caller mutation cannot rewrite audit evidence"
 
 it("returns Skill script files as inert text when the model reads them", async () => {
   const client = new ScriptedChatClient([
+    read("root", "SKILL.md"),
+    read("themes", "references/theme-index.md"),
     read("script", "scripts/component_lint.py"),
     completed({ content: "read as text" })
   ]);
   const session = makeSession(client);
 
+  await session.bootstrap(signal());
   await session.ensureFiles(["scripts/component_lint.py"], signal());
+  await expect(session.complete("continue", signal())).resolves.toBe(
+    "read as text"
+  );
 
   expect(client.requests.at(-1)?.messages).toContainEqual({
     role: "tool",
     toolCallId: "script",
     content: "raise RuntimeError('must never execute')"
   });
-  expect(session.audit().files).toEqual(["scripts/component_lint.py"]);
+  expect(session.audit().files).toEqual([
+    "SKILL.md",
+    "references/theme-index.md",
+    "scripts/component_lint.py"
+  ]);
 });
 
 describe("completeScoped", () => {
@@ -664,11 +660,10 @@ describe("completeScoped", () => {
     });
   });
 
-  it("reuses a tool-first load transcript without accumulating scoped turns", async () => {
+  it("reuses a compact tool-loaded baseline without stale load instructions", async () => {
     const client = new ScriptedChatClient([
       read("root", "SKILL.md"),
       read("themes", "references/theme-index.md"),
-      completed({ content: "bootstrap complete" }),
       completed({ content: "FIRST_OUTPUT_SENTINEL" }),
       completed({ content: "SECOND_OUTPUT" })
     ]);
@@ -678,17 +673,17 @@ describe("completeScoped", () => {
     await session.completeScoped("FIRST_PROMPT_SENTINEL", signal());
     await session.completeScoped("SECOND_PROMPT", signal());
 
-    const secondScoped = client.requests[4]!;
+    const secondScoped = client.requests[3]!;
     expect(secondScoped.tools).toEqual([READ_SKILL_FILE_TOOL]);
     expect(secondScoped.messages).toContainEqual({
-      role: "tool",
-      toolCallId: "root",
-      content: "Complete workflow instructions."
+      role: "system",
+      content:
+        '<skill-file path="SKILL.md">\nComplete workflow instructions.\n</skill-file>'
     });
     expect(secondScoped.messages).toContainEqual({
-      role: "tool",
-      toolCallId: "themes",
-      content: "Complete theme index."
+      role: "system",
+      content:
+        '<skill-file path="references/theme-index.md">\nComplete theme index.\n</skill-file>'
     });
     const secondText = secondScoped.messages
       .map(({ content }) => content)
@@ -696,17 +691,93 @@ describe("completeScoped", () => {
     expect(secondText).toContain("SECOND_PROMPT");
     expect(secondText).not.toContain("FIRST_PROMPT_SENTINEL");
     expect(secondText).not.toContain("FIRST_OUTPUT_SENTINEL");
+    expect(secondText).not.toContain("Before replying, call read_skill_file");
     expect(session.audit()).toMatchObject({
       loadMode: "tool-calls",
       files: ["SKILL.md", "references/theme-index.md"]
     });
   });
 
-  it("treats provider tool-call ids as request-scoped across independent calls", async () => {
+  it("sends the Skill and scoped article prompt together in the first request", async () => {
     const client = new ScriptedChatClient([
-      read("root", "SKILL.md"),
+      (request) => {
+        expect(request.messages.at(-1)).toEqual({
+          role: "user",
+          content: "ARTICLE_MARKDOWN_SENTINEL"
+        });
+        expect(
+          request.messages.some(
+            (message) =>
+              message.role === "assistant" &&
+              message.content.includes("provide")
+          )
+        ).toBe(false);
+        expect(request.messages).toContainEqual({
+          role: "system",
+          content:
+            '<skill-file path="SKILL.md">\nComplete workflow instructions.\n</skill-file>'
+        });
+        expect(request.messages).toContainEqual({
+          role: "system",
+          content:
+            '<skill-file path="references/theme-index.md">\nComplete theme index.\n</skill-file>'
+        });
+        return completed({ content: "<section>FINAL_HTML</section>" });
+      }
+    ]);
+    const session = makeSession(client);
+
+    await expect(
+      session.completeScoped("ARTICLE_MARKDOWN_SENTINEL", signal())
+    ).resolves.toBe("<section>FINAL_HTML</section>");
+
+    expect(client.requests).toHaveLength(1);
+    expect(session.audit()).toMatchObject({
+      loadMode: "injected",
+      files: ["SKILL.md", "references/theme-index.md"]
+    });
+  });
+
+  it("injects explicitly required generation files and disables tool calls", async () => {
+    const client = new ScriptedChatClient([
+      (request) => {
+        expect(request.tools).toBeUndefined();
+        expect(request.messages).toContainEqual({
+          role: "system",
+          content:
+            '<skill-file path="references/common-components.md">\nComplete common components.\n</skill-file>'
+        });
+        expect(request.messages.at(-1)).toEqual({
+          role: "user",
+          content: "GENERATE_WITHOUT_TOOLS"
+        });
+        return completed({ content: "<section>FINAL_HTML</section>" });
+      }
+    ]);
+    const session = makeSession(client);
+
+    await expect(
+      session.completeScopedWithRequiredFiles(
+        "GENERATE_WITHOUT_TOOLS",
+        ["references/common-components.md"],
+        signal()
+      )
+    ).resolves.toBe("<section>FINAL_HTML</section>");
+
+    expect(session.audit()).toMatchObject({
+      loadMode: "injected",
+      files: [
+        "SKILL.md",
+        "references/theme-index.md",
+        "references/common-components.md"
+      ]
+    });
+  });
+
+  it("treats provider tool-call ids as request-scoped across bootstrap and independent calls", async () => {
+    const client = new ScriptedChatClient([
+      read("provider-reused-id", "SKILL.md"),
       read("themes", "references/theme-index.md"),
-      completed({ content: "bootstrap complete" }),
       read("provider-reused-id", "scripts/component_lint.py"),
       completed({ content: "FIRST_OUTPUT" }),
       read("provider-reused-id", "scripts/component_lint.py"),
@@ -734,7 +805,6 @@ describe("completeScoped", () => {
     const client = new ScriptedChatClient([
       read("root", "SKILL.md"),
       read("themes", "references/theme-index.md"),
-      completed({ content: "bootstrap complete" }),
       read("scoped-script", "scripts/component_lint.py"),
       completed({ content: "SCOPED_OUTPUT_SENTINEL" }),
       completed({ content: "REGULAR_OUTPUT" })
@@ -778,7 +848,6 @@ describe("completeScoped", () => {
     const downgradeClient = new ScriptedChatClient([
       read("root", "SKILL.md"),
       read("themes", "references/theme-index.md"),
-      completed({ content: "bootstrap complete" }),
       new AiError("tools_unsupported"),
       completed({ content: "fallback answer" })
     ]);

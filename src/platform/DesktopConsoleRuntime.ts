@@ -62,8 +62,6 @@ export function createDesktopActions(host: DesktopConsoleHost): DesktopGalleyAct
     openWorkbench: (path) => openWorkbench(host.app, path),
     openThemeLab: () => openThemeLab(host.app),
     listThemes: () => listThemes(host),
-    importTheme: (bytes) =>
-      themeRuntime.importThemeArchive(host.app, bytes, host.getSettings()),
     exportTheme: (id) =>
       themeRuntime.exportThemeArchive(host.app, id, host.getSettings()),
     setThemeEnabled: (id, enabled) =>
@@ -75,54 +73,6 @@ export function createDesktopActions(host: DesktopConsoleHost): DesktopGalleyAct
       ),
     deleteTheme: (id) =>
       themeRuntime.deleteCustomTheme(host.app, id, host.getSettings()),
-    listSkills: async () => {
-      const settings = host.getSettings();
-      const versions = await themeRuntime.listImportedSkills(host.app);
-      return [
-        {
-          version: "bundled",
-          source: "bundled" as const,
-          active: settings.activeSkillVersion === "bundled",
-          valid: true
-        },
-        ...versions.map((version) => ({
-          version,
-          source: "imported" as const,
-          active: version === settings.activeSkillVersion,
-          valid: true
-        }))
-      ];
-    },
-    readActiveSkill: async () => {
-      const active = await loadActiveSkillPackage(host.app, host.getSettings());
-      return {
-        id: active.skillPackage.id,
-        version: active.skillPackage.version,
-        files: [...active.skillPackage.files.keys()].sort(),
-        instructions: active.skillPackage.files.get("SKILL.md") ?? ""
-      };
-    },
-    importSkill: (bytes) => themeRuntime.importSkillArchive(host.app, bytes),
-    activateSkill: async (version) => {
-      const current = host.getSettings().activeSkillVersion;
-      let activationError: unknown;
-      try {
-        await themeRuntime.activateImportedSkill(host.app, version, current, {
-          load: () => host.loadData(),
-          save: (value) => host.saveData(value)
-        });
-      } catch (error) {
-        activationError = error;
-      }
-      let refreshError: unknown;
-      try {
-        host.replaceSettings(normalizeSettings(await host.loadData()));
-      } catch (error) {
-        refreshError = error;
-      }
-      if (activationError !== undefined) throw activationError;
-      if (refreshError !== undefined) throw refreshError;
-    },
     listExportConfigurations: async () => host.getSettings().exportConfigurations,
     saveExportConfiguration: async (value) => {
       const configuration = normalizeExportConfiguration(value);

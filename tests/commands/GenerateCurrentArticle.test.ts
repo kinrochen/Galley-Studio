@@ -539,7 +539,6 @@ describe("plugin command registration", () => {
     const source = annotateMarkdown(markdown);
     const harness = makeProductionPluginApp(markdown);
     const providerResponses = [
-      toolsUnsupportedResponse(),
       openAiContent(validAuthoringHtml(source))
     ];
     setRequestUrlHandler(async () => {
@@ -586,7 +585,6 @@ describe("plugin command registration", () => {
       raceFirstHtmlFinal: true
     });
     const providerResponses = [
-      toolsUnsupportedResponse(),
       openAiContent(validAuthoringHtml(source))
     ];
     setRequestUrlHandler(async () => {

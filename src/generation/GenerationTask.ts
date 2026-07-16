@@ -247,11 +247,15 @@ export class GenerationTaskStore implements GenerationTaskController {
       this.#notifyOutput();
       return;
     }
-    turns[index] = {
-      ...current,
-      status: "complete",
-      elapsedMs: event.elapsedMs
-    };
+    if (!current.text.trim()) {
+      turns.splice(index, 1);
+    } else {
+      turns[index] = {
+        ...current,
+        status: "complete",
+        elapsedMs: event.elapsedMs
+      };
+    }
     this.#state = { ...this.#state, turns };
     this.#notify();
   }

@@ -35,7 +35,9 @@ for (const command of [
     main.indexOf(`id: "${command}"`),
     main.indexOf(`"${command}"`)
   );
-  if (position < desktopGuard) failures.push(`${command} is outside the desktop registration guard`);
+  if (position >= 0 && position < desktopGuard) {
+    failures.push(`${command} is outside the desktop registration guard`);
+  }
 }
 if (failures.length > 0) throw new Error(`Mobile/static audit failed:\n${failures.join("\n")}`);
 console.log("Mobile/static audit passed: preview-only mobile boundary is preserved.");

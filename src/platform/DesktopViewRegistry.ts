@@ -74,18 +74,25 @@ export function createThemeLabView(
         return false;
       }
     },
-    generate: async (input, signal) => {
+    generate: async (input, signal, progress) => {
       const runtime = await import("./DesktopThemeRuntime");
       return runtime.generateThemeDraft(
         host.app,
         host.getSettings(),
         input,
-        signal
+        signal,
+        progress
       );
     },
-    save: async (draft) => {
+    save: async (draft, signal, progress) => {
       const runtime = await import("./DesktopThemeRuntime");
-      return runtime.saveThemeDraft(host.app, draft, host.getSettings());
+      return runtime.finalizeAndSaveThemeDraft(
+        host.app,
+        draft,
+        host.getSettings(),
+        signal,
+        progress
+      );
     },
     report: (message) => new Notice(message),
     locale: host.locale

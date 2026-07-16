@@ -44,7 +44,6 @@ describe("GalleyConsoleView", () => {
       "Generation",
       "Articles",
       "Themes",
-      "Skill",
       "Settings"
     ]);
     expect(view.contentEl.querySelector(".galley-console__task")?.textContent).toContain(
@@ -58,6 +57,9 @@ describe("GalleyConsoleView", () => {
     expect(view.contentEl.textContent).toContain("article.galley.html");
     expect(view.contentEl.querySelectorAll(".galley-console__article-row")).toHaveLength(1);
     expect(view.contentEl.querySelector('[role="status"]')).not.toBeNull();
+
+    await view.setState({ route: "skills" });
+    expect(view.route()).toBe("home");
   });
 
   it("renders one focused generation workspace without running a connection diagnostic", async () => {
@@ -83,10 +85,6 @@ describe("GalleyConsoleView", () => {
         listThemes: async () => [
           { id: "paper", name: "Paper", builtIn: true, enabled: true },
           { id: "custom", name: "Custom", builtIn: false, enabled: true }
-        ],
-        listSkills: async () => [
-          { version: "bundled", source: "bundled", active: false, valid: true },
-          { version: "2026.7", source: "imported", active: true, valid: true }
         ],
         readSettings: async () => ({
           generationAgent: "plugin",
@@ -121,13 +119,14 @@ describe("GalleyConsoleView", () => {
         .map((option) => option.value)
     ).toEqual(["paper", "custom"]);
     expect(view.contentEl.querySelectorAll(".galley-theme-preview")).toHaveLength(2);
-    expect(view.contentEl.querySelector('[data-action="continue-edit"]')?.textContent)
-      .toContain("Continue");
+    expect(view.contentEl.querySelector('[data-action="preview"]')).toBeNull();
+    expect(view.contentEl.querySelector('[data-action="edit"]')?.textContent)
+      .toBe("Edit");
     for (const action of ["theme-lab", "open-themes", "open-skills", "open-exports"]) {
       expect(view.contentEl.querySelector(`[data-action="${action}"]`)).toBeNull();
     }
     expect(view.contentEl.querySelector('[data-action="open-settings"]')).not.toBeNull();
-    view.contentEl.querySelector<HTMLButtonElement>('[data-action="continue-edit"]')?.click();
+    view.contentEl.querySelector<HTMLButtonElement>('[data-action="edit"]')?.click();
     await vi.waitFor(() => expect(openWorkbench).toHaveBeenCalledWith("article.galley.html"));
   });
 
@@ -573,9 +572,6 @@ function fixture(
             openWorkbench: async () => undefined,
             listThemes: async () => [
               { id: "paper", name: "Paper", builtIn: true, enabled: true }
-            ],
-            listSkills: async () => [
-              { version: "bundled", source: "bundled", active: true, valid: true }
             ],
             listSecrets: async () => ["fixture-key", "provider-key"],
             readSettings: async () => ({

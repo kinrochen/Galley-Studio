@@ -1,4 +1,5 @@
 .DS_Store
+.idea/
 .superpowers/
 .worktrees/
 node_modules/

@@ -98,6 +98,40 @@ describe("GenerationTaskStore", () => {
     store.dispose();
   });
 
+  it("removes completed tool-only rounds that have no visible model text", async () => {
+    let input: GenerateArticleFormInput | undefined;
+    let finish: (() => void) | undefined;
+    const store = new GenerationTaskStore({
+      createTaskId: () => "task-tool-round",
+      run: async (value) => {
+        input = value;
+        await new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+        return {
+          status: "committed",
+          htmlPath: "article.html",
+          sidecarPath: ""
+        };
+      },
+      failureMessage: () => "failed"
+    });
+
+    store.start({ sourcePath: "article.md" });
+    input?.onModelEvent?.({ type: "request-start", requestId: 1, at: 10 });
+    input?.onModelEvent?.({
+      type: "request-complete",
+      requestId: 1,
+      elapsedMs: 900,
+      at: 910
+    });
+
+    expect(store.snapshot().turns).toEqual([]);
+    finish?.();
+    await vi.waitFor(() => expect(store.snapshot().status).toBe("succeeded"));
+    store.dispose();
+  });
+
   it("aborts only when the user explicitly cancels or the plugin disposes", async () => {
     let signal: AbortSignal | undefined;
     const store = new GenerationTaskStore({

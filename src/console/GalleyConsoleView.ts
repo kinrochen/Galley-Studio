@@ -12,7 +12,6 @@ import {
 import type { GalleyActions } from "./GalleyActions";
 import { renderGenerationPage } from "./GenerationPage";
 import { renderSettingsPage, type SettingsPageState } from "./SettingsPage";
-import { renderSkillPage } from "./SkillPage";
 import { renderThemePage } from "./ThemePage";
 import {
   DESKTOP_CONSOLE_ROUTES,
@@ -38,7 +37,6 @@ const NAV_KEYS: Readonly<Record<ConsoleRoute, MessageKey>> = {
   generation: "console.nav.generation",
   articles: "console.nav.articles",
   themes: "console.nav.themes",
-  skills: "console.nav.skills",
   settings: "console.nav.settings"
 };
 
@@ -254,9 +252,6 @@ export class GalleyConsoleView extends ItemView {
         return;
       case "themes":
         await renderThemePage(main, shared);
-        return;
-      case "skills":
-        await renderSkillPage(main, shared);
         return;
       case "settings":
         await renderSettingsPage(main, {

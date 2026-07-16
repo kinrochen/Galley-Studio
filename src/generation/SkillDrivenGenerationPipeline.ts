@@ -62,7 +62,14 @@ export class SkillDrivenGenerationPipeline implements GenerationCommandPipeline 
       text: prompt,
       at: Date.now()
     });
-    const response = await this.#session.completeScoped(prompt, signal);
+    const themeFiles = manualTheme
+      ? [manualTheme.file]
+      : this.#themes.list().map(({ file }) => file);
+    const response = await this.#session.completeScopedWithRequiredFiles(
+      prompt,
+      ["references/common-components.md", ...themeFiles],
+      signal
+    );
     throwIfAborted(signal);
 
     let html: string;
@@ -105,6 +112,7 @@ export function composeSkillHandoffPrompt(input: SkillHandoffPromptInput): strin
   return [
     "Use the already loaded gzh-design Skill to format the following Markdown as a WeChat Official Account article.",
     themeInstruction,
+    "This is a complete, fully automatic request. The Markdown content, source path, and theme policy are already supplied below. Do not ask the user to provide article text, choose a style, confirm the structure, or answer follow-up questions.",
     "Follow the Skill itself as the complete generation procedure. Galley adds no validation, repair, batching, consistency, source-marker, or other control workflow.",
     "Return only the final HTML content for the article. Do not return explanations, JSON, Markdown fences, validation reports, audit data, or file paths.",
     "Produce exactly one final HTML artifact. Do not create or request preview files, sidecar files, manifests, temporary files, history files, or any other auxiliary artifact.",

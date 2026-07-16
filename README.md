@@ -12,9 +12,11 @@ Markdown 文章交给 OpenAI-compatible 模型、Codex CLI 或 Claude CLI，
 中完成预览、可视化编辑、源码编辑和复制导出。
 
 - 作者：**Kinrochen**
+- 当前版本：**0.2.0**
 - 最低 Obsidian 版本：**1.11.4**
 - 许可证：**AGPL-3.0-or-later**
-- 项目地址：<https://github.com/isjiamu/Galley>
+- 项目地址：<https://github.com/kinrochen/Galley>
+- 宣传文章：[Galley：把 Obsidian 里的 Markdown，变成真正可编辑的公众号 HTML](docs/blog/galley-obsidian-ai-publishing-studio.md)
 - 支持项目：<https://ifdian.net/a/kinrochen>
 
 ### 功能
@@ -44,9 +46,9 @@ Markdown 文章交给 OpenAI-compatible 模型、Codex CLI 或 Claude CLI，
 
 #### 控制台与资源管理
 
-- 控制台：首页、生成对话、文章、主题、Skill 和设置。
+- 控制台：首页、生成对话、文章、主题和设置。
 - 管理内置主题和自定义主题。
-- 导入并显式启用经过校验的 Skill ZIP。
+- 使用固定版本、只读加载的内置公众号排版 Skill。
 - 中文、英文和跟随 Obsidian 三种界面语言模式。
 - Mobile 端提供文章列表和安全预览，不加载桌面生成及编辑运行时。
 
@@ -157,7 +159,8 @@ npm run release
 - 模型生成的 HTML 按不可信内容处理。
 - 预览会移除脚本和可执行属性，并使用限制性 CSP 与空沙箱。
 - API 凭据保存在 Obsidian SecretStorage。
-- Skill 和主题压缩包会检查路径穿越、符号链接、加密条目和大小限制。
+- 内置 Skill 固定到已审计提交，并以只读文本方式提供给生成流程。
+- 自定义主题导入会检查路径穿越、符号链接、加密条目和大小限制。
 - 更完整的安全边界请参阅 [SECURITY.md](SECURITY.md)。
 
 ### 支持项目
@@ -184,9 +187,11 @@ document can be previewed, visually edited, source-edited, saved, and copied
 without leaving Obsidian.
 
 - Author: **Kinrochen**
+- Current version: **0.2.0**
 - Minimum Obsidian version: **1.11.4**
 - License: **AGPL-3.0-or-later**
-- Repository: <https://github.com/isjiamu/Galley>
+- Repository: <https://github.com/kinrochen/Galley>
+- Launch article (Chinese): [Galley: turn Obsidian Markdown into editable publishing HTML](docs/blog/galley-obsidian-ai-publishing-studio.md)
 - Support the project: <https://ifdian.net/a/kinrochen>
 
 ### Features
@@ -218,9 +223,9 @@ without leaving Obsidian.
 
 #### Console and resource management
 
-- Use stable Console, Generation, Articles, Themes, Skill, and Settings pages.
+- Use stable Console, Generation, Articles, Themes, and Settings pages.
 - Manage built-in and custom themes.
-- Import validated Skill ZIP archives and activate them explicitly.
+- Use the pinned, read-only bundled WeChat formatting Skill.
 - Use English, Simplified Chinese, or the current Obsidian language.
 - On Mobile, browse articles and open safe previews without loading Desktop
   generation or editing runtimes.
@@ -335,8 +340,10 @@ metadata, Mobile boundaries, licenses, and secret scanning.
 - Preview removes scripts and executable attributes and uses a restrictive CSP
   inside an empty sandbox.
 - API credentials remain in Obsidian SecretStorage.
-- Skill and theme archives are checked for traversal, symbolic links,
-  encryption, and configured size limits.
+- The bundled Skill is pinned to an audited commit and exposed to generation as
+  read-only text.
+- Custom theme imports are checked for traversal, symbolic links, encryption,
+  and configured size limits.
 - See [SECURITY.md](SECURITY.md) for the complete security model.
 
 ### Support

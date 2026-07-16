@@ -63,10 +63,13 @@ export function renderGenerationPage(
 
   const meta = document.createElement("div");
   meta.className = "galley-generation__meta";
+  const visibleTurns = snapshot.turns.filter(
+    (turn) => turn.status === "streaming" || Boolean(turn.text.trim())
+  );
   meta.append(
     fact(environment.text.t("console.generation.source"), snapshot.sourcePath ?? "-"),
     fact(environment.text.t("console.generation.elapsed"), duration(snapshot.elapsedMs)),
-    fact(environment.text.t("console.generation.rounds"), String(snapshot.turns.length))
+    fact(environment.text.t("console.generation.rounds"), String(visibleTurns.length))
   );
   section.append(meta, progress(snapshot, environment.text));
 
@@ -78,8 +81,8 @@ export function renderGenerationPage(
   if (snapshot.prompt) {
     conversation.append(promptBubble(snapshot.prompt.text, environment.text));
   }
-  for (const turn of snapshot.turns) {
-    conversation.append(modelBubble(turn, environment.text));
+  for (const [index, turn] of visibleTurns.entries()) {
+    conversation.append(modelBubble(turn, index + 1, environment.text));
   }
   section.append(conversation);
 
@@ -174,13 +177,14 @@ function promptBubble(prompt: string, text: LocalizedText): HTMLElement {
 
 function modelBubble(
   turn: GenerationTaskSnapshot["turns"][number],
+  visibleRound: number,
   text: LocalizedText
 ): HTMLElement {
   const message = messageBubble({
     role: "assistant",
     avatar: text.t("console.generation.agentAvatar"),
     label: text.t("console.generation.modelRound", {
-      round: turn.requestId,
+      round: visibleRound,
       duration: turn.elapsedMs === undefined ? "…" : duration(turn.elapsedMs)
     }),
     content: turn.text || text.t("console.generation.waitingOutput"),

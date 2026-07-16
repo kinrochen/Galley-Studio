@@ -15,20 +15,6 @@ export interface ThemeSummary {
   readonly enabled: boolean;
 }
 
-export interface SkillSummary {
-  readonly version: string;
-  readonly source: "bundled" | "imported";
-  readonly active: boolean;
-  readonly valid: boolean;
-}
-
-export interface SkillDetail {
-  readonly id: string;
-  readonly version: string;
-  readonly files: readonly string[];
-  readonly instructions: string;
-}
-
 export interface SettingsSnapshot {
   readonly generationAgent: GenerationAgent;
   readonly codexCliPath: string;
@@ -59,14 +45,9 @@ export interface DesktopGalleyActions {
   openWorkbench(path: string): Promise<void>;
   openThemeLab?(): Promise<void>;
   listThemes?(): Promise<readonly ThemeSummary[]>;
-  importTheme?(bytes: Uint8Array): Promise<string>;
   exportTheme?(id: string): Promise<{ filename: string; bytes: Uint8Array }>;
   setThemeEnabled?(id: string, enabled: boolean): Promise<void>;
   deleteTheme?(id: string): Promise<boolean>;
-  listSkills?(): Promise<readonly SkillSummary[]>;
-  readActiveSkill?(): Promise<SkillDetail>;
-  importSkill?(bytes: Uint8Array): Promise<string>;
-  activateSkill?(version: string): Promise<void>;
   listExportConfigurations?(): Promise<readonly ExportConfiguration[]>;
   saveExportConfiguration?(value: unknown): Promise<ExportConfiguration>;
   deleteExportConfiguration?(id: string): Promise<void>;

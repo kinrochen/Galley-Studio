@@ -60,12 +60,13 @@ export async function ArticlePage(
       const name = document.createElement("td");
       name.textContent = article.htmlPath;
       const actions = document.createElement("td");
-      const preview = button(options.text.t("common.action.preview"), "preview");
-      preview.addEventListener("click", () =>
-        void options.run("preview", () => options.actions.openPreview(article.htmlPath))
-      );
-      actions.append(preview);
-      if (!options.mobile && options.actions.desktop) {
+      if (options.mobile) {
+        const preview = button(options.text.t("common.action.preview"), "preview");
+        preview.addEventListener("click", () =>
+          void options.run("preview", () => options.actions.openPreview(article.htmlPath))
+        );
+        actions.append(preview);
+      } else if (options.actions.desktop) {
         const edit = button(options.text.t("common.action.edit"), "edit");
         edit.addEventListener("click", () =>
           void options.run("edit", () => options.actions.desktop!.openWorkbench(article.htmlPath))

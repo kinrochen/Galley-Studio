@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
 import { renderThemePage } from "../../src/console/ThemePage";
-import { renderSkillPage } from "../../src/console/SkillPage";
 import {
   renderExportConfigurationPage,
   type ExportConfigurationFormState
@@ -12,7 +11,7 @@ import { LocaleStore } from "../../src/i18n/LocaleStore";
 const text = new LocaleStore({ language: "en", obsidianLocale: () => "en" });
 
 describe("console management pages", () => {
-  it("shows built-in and custom themes with import/export/toggle/delete and Theme Lab", async () => {
+  it("shows built-in and custom themes with Theme Lab, export, toggle, and delete", async () => {
     const openThemeLab = vi.fn(async () => undefined);
     const setThemeEnabled = vi.fn(async () => undefined);
     const deleteTheme = vi.fn(async () => true);
@@ -45,7 +44,7 @@ describe("console management pages", () => {
 
     expect(container.querySelector('[data-theme-id="paper"]')?.textContent)
       .toContain("PaperpaperBuilt in");
-    expect(container.querySelector('[data-action="theme-import"]')).not.toBeNull();
+    expect(container.querySelector('[data-action="theme-import"]')).toBeNull();
     container.querySelector<HTMLButtonElement>('[data-action="theme-lab"]')?.click();
     container.querySelector<HTMLButtonElement>('[data-action="theme-toggle"]')?.click();
     container.querySelector<HTMLButtonElement>('[data-action="theme-export"]')?.click();
@@ -56,82 +55,6 @@ describe("console management pages", () => {
     expect(exportTheme).toHaveBeenCalledWith("custom");
     expect(anchorClick).toHaveBeenCalledTimes(1);
     expect(confirm).toHaveBeenCalledWith("Delete “custom”?");
-  });
-
-  it("rejects oversized theme and Skill files before allocating bytes", async () => {
-    const themeArrayBuffer = vi.fn(async () => new ArrayBuffer(1));
-    const skillArrayBuffer = vi.fn(async () => new ArrayBuffer(1));
-    const importTheme = vi.fn(async () => "theme");
-    const importSkill = vi.fn(async () => "skill");
-    const failures: string[] = [];
-    const run = async (
-      operation: string,
-      action: (signal: AbortSignal) => Promise<unknown>
-    ) => {
-      try {
-        await action(new AbortController().signal);
-      } catch {
-        failures.push(operation);
-      }
-    };
-    const theme = document.createElement("div");
-    await renderThemePage(theme, {
-      actions: baseActions({ importTheme, listThemes: async () => [] }),
-      text,
-      confirm: () => true,
-      run
-    });
-    const themeInput = theme.querySelector<HTMLInputElement>('input[type="file"]')!;
-    Object.defineProperty(themeInput, "files", {
-      configurable: true,
-      value: [{ size: 12 * 1024 * 1024 + 1, arrayBuffer: themeArrayBuffer }]
-    });
-    themeInput.dispatchEvent(new Event("change"));
-
-    const skill = document.createElement("div");
-    await renderSkillPage(skill, {
-      actions: baseActions({ importSkill, listSkills: async () => [] }),
-      text,
-      confirm: () => true,
-      run
-    });
-    const skillInput = skill.querySelector<HTMLInputElement>('input[type="file"]')!;
-    Object.defineProperty(skillInput, "files", {
-      configurable: true,
-      value: [{ size: 25 * 1024 * 1024 + 1, arrayBuffer: skillArrayBuffer }]
-    });
-    skillInput.dispatchEvent(new Event("change"));
-
-    await vi.waitFor(() => expect(failures).toEqual(["theme-import", "skill-import"]));
-    expect(themeArrayBuffer).not.toHaveBeenCalled();
-    expect(skillArrayBuffer).not.toHaveBeenCalled();
-    expect(importTheme).not.toHaveBeenCalled();
-    expect(importSkill).not.toHaveBeenCalled();
-  });
-
-  it("imports Skills inactive and requires explicit confirmed activation", async () => {
-    const activateSkill = vi.fn(async () => undefined);
-    const confirm = vi.fn(() => true);
-    const container = document.createElement("div");
-    await renderSkillPage(container, {
-      actions: baseActions({
-        listSkills: async () => [
-          { version: "bundled", source: "bundled", active: true, valid: true },
-          { version: "2026.7", source: "imported", active: false, valid: true },
-          { version: "broken", source: "imported", active: false, valid: false }
-        ],
-        activateSkill
-      }),
-      text,
-      confirm,
-      run: directRun
-    });
-
-    container.querySelector<HTMLButtonElement>('[data-action="skill-activate"]')?.click();
-    await vi.waitFor(() => expect(activateSkill).toHaveBeenCalledWith("2026.7"));
-    expect(confirm).toHaveBeenCalledWith("Activate “2026.7”?");
-    expect(container.textContent).toContain("Bundled · Valid");
-    expect(container.textContent).toContain("Imported · Invalid");
   });
 
   it("retains export configuration input after validation errors and exposes three profiles", async () => {
@@ -287,6 +210,63 @@ describe("console management pages", () => {
     ).toEqual(["provider-key", "backup-key"]);
     container.querySelector<HTMLButtonElement>('[data-action="diagnostic"]')?.click();
     await vi.waitFor(() => expect(runDiagnostic).toHaveBeenCalledTimes(1));
+  });
+
+  it("persists the visible provider configuration as soon as the Agent changes", async () => {
+    const saveSettings = vi.fn(async (value) => ({
+      generationAgent: value.generationAgent ?? "claude-cli",
+      codexCliPath: "codex",
+      claudeCliPath: "claude",
+      baseUrl: String(value.baseUrl ?? "https://api.openai.com/v1"),
+      model: String(value.model ?? ""),
+      secretId: String(value.secretId ?? ""),
+      temperature: 0.4,
+      timeoutMs: 1_800_000,
+      contextWindow: 128000,
+      outputFolder: "",
+      language: "zh-CN" as const
+    }));
+    const container = document.createElement("div");
+    await renderSettingsPage(container, {
+      actions: baseActions({
+        readSettings: async () => ({
+          generationAgent: "claude-cli",
+          codexCliPath: "codex",
+          claudeCliPath: "claude",
+          baseUrl: "https://api.openai.com/v1",
+          model: "",
+          secretId: "",
+          temperature: 0.4,
+          timeoutMs: 1_800_000,
+          contextWindow: 128000,
+          outputFolder: "",
+          language: "zh-CN"
+        }),
+        listSecrets: async () => ["key"],
+        saveSettings
+      }),
+      text,
+      state: {},
+      run: directRun
+    });
+
+    const baseUrl = container.querySelector<HTMLInputElement>('[name="baseUrl"]')!;
+    const model = container.querySelector<HTMLInputElement>('[name="model"]')!;
+    const secret = container.querySelector<HTMLSelectElement>('[name="secretId"]')!;
+    const agent = container.querySelector<HTMLSelectElement>('[name="generationAgent"]')!;
+    baseUrl.value = "https://dashscope.aliyuncs.com/compatible-mode/v1";
+    model.value = "qwen3.7-plus";
+    secret.value = "key";
+    agent.value = "plugin";
+    agent.dispatchEvent(new Event("change"));
+
+    await vi.waitFor(() => expect(saveSettings).toHaveBeenCalledTimes(1));
+    expect(saveSettings).toHaveBeenCalledWith({
+      generationAgent: "plugin",
+      baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      model: "qwen3.7-plus",
+      secretId: "key"
+    });
   });
 
   it("never saves a stale cached language and displays the latest durable language", async () => {

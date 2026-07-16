@@ -40,7 +40,10 @@ import {
   PersistentObsidianBacking,
   persistentObsidianVault
 } from "../support/obsidianVaultFixtures";
-import { themeModelResponse, validSkillArchive } from "../support/phase5Fixtures";
+import {
+  themeComponentLibraryResponse,
+  themeConceptResponse,
+} from "../support/phase5Fixtures";
 import {
   resetRequestUrlHandler,
   setRequestUrlHandler
@@ -54,7 +57,7 @@ afterEach(() => {
 });
 
 describe("production services behind typed console actions", () => {
-  it("drives the lower production chain for generation, editing, management, exports, Theme Lab, Skill activation, and locale safety", async () => {
+  it("drives the lower production chain for generation, editing, management, exports, Theme Lab, and locale safety", async () => {
     vi.stubGlobal("matchMedia", vi.fn((media: string) => ({
       matches: false,
       media,
@@ -125,9 +128,6 @@ describe("production services behind typed console actions", () => {
             builtIn: true,
             enabled: true
           }
-        ],
-        listSkills: async () => [
-          { version: "bundled", source: "bundled", active: true, valid: true }
         ],
         listSecrets: async () => ["recorded-key"],
         readSettings: async () => ({
@@ -246,12 +246,10 @@ describe("production services behind typed console actions", () => {
       publishLanguage: (language) => locale.configure(language),
       desktop
     });
-    const confirm = vi.fn(() => true);
     const consoleView = new GalleyConsoleView(new WorkspaceLeaf(), {
       actions,
       locale,
-      mobile: false,
-      confirm
+      mobile: false
     });
     document.body.append(consoleView.containerEl);
     await consoleView.onOpen();
@@ -347,8 +345,8 @@ describe("production services behind typed console actions", () => {
 
     const providerResponses = [
       openAiContent("unsupported"),
-      toolsUnsupportedResponse(),
-      openAiContent(themeModelResponse())
+      openAiContent(themeConceptResponse()),
+      openAiContent(themeComponentLibraryResponse())
     ];
     setRequestUrlHandler(async () => {
       const response = providerResponses.shift();
@@ -368,9 +366,15 @@ describe("production services behind typed console actions", () => {
         themeRuntime.supportsThemeVision(app, host.getSettings()),
       generate: (input, signal) =>
         themeRuntime.generateThemeDraft(app, host.getSettings(), input, signal),
-      save: async (draft) => {
+      save: async (draft, signal, progress) => {
         try {
-          await themeRuntime.saveThemeDraft(app, draft, host.getSettings());
+          return await themeRuntime.finalizeAndSaveThemeDraft(
+            app,
+            draft,
+            host.getSettings(),
+            signal,
+            progress
+          );
         } catch (error) {
           themeSaveError = error;
           throw error;
@@ -383,18 +387,19 @@ describe("production services behind typed console actions", () => {
     const description = themeLab.contentEl.querySelector<HTMLTextAreaElement>("textarea");
     if (!description) throw new Error("Theme Lab description missing");
     description.value = "A calm ocean research notebook";
-    [...themeLab.contentEl.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => button.textContent === "Generate draft")
+    themeLab.contentEl
+      .querySelector<HTMLButtonElement>('[data-action="theme-generate"]')
       ?.click();
     await vi.waitFor(() =>
       expect(
-        [...themeLab.contentEl.querySelectorAll<HTMLButtonElement>("button")]
-          .find((button) => button.textContent === "Save theme")?.disabled
+        themeLab.contentEl
+          .querySelector<HTMLButtonElement>('[data-action="theme-save"]')
+          ?.disabled
       ).toBe(false)
     );
     expect((await desktop.listThemes?.())?.some(({ id }) => id === "ocean-notes")).toBe(false);
-    [...themeLab.contentEl.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => button.textContent === "Save theme")
+    themeLab.contentEl
+      .querySelector<HTMLButtonElement>('[data-action="theme-save"]')
       ?.click();
     await vi.waitFor(() =>
       expect(
@@ -412,47 +417,6 @@ describe("production services behind typed console actions", () => {
     );
     expect(providerResponses).toEqual([]);
 
-    await consoleView.navigate("skills");
-    const skillArchive = validSkillArchive();
-    const skillInput = consoleView.contentEl.querySelector<HTMLInputElement>(
-      '[data-action="skill-import"]'
-    );
-    if (!skillInput) throw new Error("Skill import missing");
-    Object.defineProperty(skillInput, "files", {
-      configurable: true,
-      value: [
-        {
-          name: "skill.zip",
-          type: "application/zip",
-          size: skillArchive.byteLength,
-          arrayBuffer: async () =>
-            skillArchive.buffer.slice(
-              skillArchive.byteOffset,
-              skillArchive.byteOffset + skillArchive.byteLength
-            )
-        }
-      ]
-    });
-    skillInput.dispatchEvent(new Event("change"));
-    await vi.waitFor(async () =>
-      expect((await desktop.listSkills?.())?.filter(({ source }) => source === "imported"))
-        .toHaveLength(1)
-    );
-    const imported = (await desktop.listSkills?.())?.find(
-      ({ source }) => source === "imported"
-    );
-    expect(imported).toMatchObject({ active: false, valid: true });
-    expect(durable.activeSkillVersion).toBe("bundled");
-    consoleView.contentEl
-      .querySelector<HTMLButtonElement>('[data-action="skill-activate"]')
-      ?.click();
-    await vi.waitFor(() =>
-      expect(durable.activeSkillVersion).toBe(imported?.version)
-    );
-    expect(confirm).toHaveBeenCalledWith(`Activate “${imported?.version}”?`);
-    expect((await desktop.listSkills?.())?.find(({ version }) => version === imported?.version))
-      .toMatchObject({ active: true });
-
     const beforeLanguageSwitch = backingSnapshot(backing);
     const language = consoleView.contentEl.querySelector<HTMLSelectElement>(
       '[aria-label="Language"]'
@@ -460,7 +424,7 @@ describe("production services behind typed console actions", () => {
     if (!language) throw new Error("Language selector missing");
     language.value = "zh-CN";
     language.dispatchEvent(new Event("change"));
-    await vi.waitFor(() => expect(consoleView.contentEl.textContent).toContain("技能"));
+    await vi.waitFor(() => expect(consoleView.contentEl.textContent).toContain("主题"));
     expect(durable.language).toBe("zh-CN");
     expect(backingSnapshot(backing)).toEqual(beforeLanguageSwitch);
     expect(executeCommandById).not.toHaveBeenCalled();
@@ -617,17 +581,6 @@ function openAiContent(content: string): { status: number; json: unknown } {
           finish_reason: "stop"
         }
       ]
-    }
-  };
-}
-
-function toolsUnsupportedResponse(): { status: number; json: unknown } {
-  return {
-    status: 400,
-    json: {
-      error: {
-        message: "Function tools are not supported by this test provider."
-      }
     }
   };
 }

@@ -3,28 +3,12 @@ import { afterEach, expect, it, vi } from "vitest";
 import type { App, PluginManifest } from "obsidian";
 
 import GalleyPlugin from "../../src/main";
-import { notices } from "../setup/obsidian";
 
 afterEach(() => {
   Platform.isMobileApp = false;
-  notices.length = 0;
-  vi.restoreAllMocks();
 });
 
-it("rejects an oversized Skill ZIP from File.size before arrayBuffer allocation", async () => {
-  const arrayBuffer = vi.fn(async () => new ArrayBuffer(0));
-  vi.spyOn(HTMLInputElement.prototype, "click").mockImplementation(function (this: HTMLInputElement) {
-    Object.defineProperty(this, "files", {
-      configurable: true,
-      value: [{
-        name: "oversized.zip",
-        type: "application/zip",
-        size: 25 * 1024 * 1024 + 1,
-        arrayBuffer
-      }]
-    });
-    this.dispatchEvent(new Event("change"));
-  });
+it("does not expose Skill import or activation through the plugin UI API", async () => {
   const app = {
     workspace: {
       getActiveFile: () => null,
@@ -42,8 +26,12 @@ it("rejects an oversized Skill ZIP from File.size before arrayBuffer allocation"
   const plugin = new GalleyPlugin(app, {} as PluginManifest);
   await plugin.onload();
 
-  await plugin.importSkillPackage();
-
-  expect(arrayBuffer).not.toHaveBeenCalled();
-  expect(notices.at(-1)).toMatch(/25 MiB|too large/iu);
+  const exposed = plugin as unknown as {
+    commands: readonly { readonly id: string }[];
+    importSkillPackage?: unknown;
+    activateImportedSkill?: unknown;
+  };
+  expect(exposed.importSkillPackage).toBeUndefined();
+  expect(exposed.activateImportedSkill).toBeUndefined();
+  expect(exposed.commands.some(({ id }) => id.startsWith("skill-"))).toBe(false);
 });

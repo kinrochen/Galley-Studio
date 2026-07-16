@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 
+import { AiError } from "../../src/ai/AiError";
 import type { ChatTurnResult } from "../../src/ai/AiProtocol";
 import { SkillSession } from "../../src/skill/SkillSession";
 import { SkillVirtualFileSystem } from "../../src/skill/SkillVirtualFileSystem";
 import {
   ThemeGenerationService,
-  THEME_GENERATION_REQUIRED_FILES
+  THEME_GENERATION_REQUIRED_FILES,
+  type ThemeGenerationStage
 } from "../../src/theme-lab/ThemeGenerationService";
 import { validateReferenceImage } from "../../src/theme-lab/ReferenceImage";
 import type {
@@ -14,14 +16,19 @@ import type {
   StoredThemeRecord
 } from "../../src/themes/CustomThemeRepository";
 import { CustomThemeRepository } from "../../src/themes/CustomThemeRepository";
-import { ScriptedChatClient } from "../support/ScriptedChatClient";
+import {
+  ScriptedChatClient,
+  type ScriptedChatStep
+} from "../support/ScriptedChatClient";
 import { makeProviderCapabilities, TEST_PACKAGE_HASH } from "../support/phase1Factories";
 import {
   CUSTOM_THEME_ID,
+  themeComponentLibraryResponse,
+  themeConceptResponse,
   themeIndexMarkdown,
-  themeModelResponse,
   tinyPng,
   validComponentLibrary,
+  validThemeConceptPreview,
   validThemePreview
 } from "../support/phase5Fixtures";
 
@@ -53,7 +60,7 @@ class Store implements AtomicThemeStore {
 }
 
 function harness(
-  steps: ChatTurnResult[],
+  steps: readonly ScriptedChatStep[],
   capabilities = makeProviderCapabilities({ tools: false, vision: false })
 ) {
   const files = new Map<string, string>([
@@ -88,91 +95,192 @@ function harness(
   };
 }
 
-describe("AI Theme Lab generation", () => {
-  it("loads every required file through tool calls before generating direct HTML", async () => {
-    const toolCalls = THEME_GENERATION_REQUIRED_FILES.map((path, index) => ({
-      id: `read-${index}`,
-      name: "read_skill_file",
-      argumentsJson: JSON.stringify({ path })
-    }));
-    const { client, service } = harness(
-      [
-        { content: "", toolCalls, finishReason: "tool_calls" },
-        completed("loaded"),
-        completed(themeModelResponse())
-      ],
-      makeProviderCapabilities({ tools: true, vision: false })
-    );
+describe("AI Theme Lab two-stage generation", () => {
+  it("creates one lightweight preview request without loading the full theme library", async () => {
+    const { client, service } = harness([
+      completed(validThemeConceptPreview())
+    ]);
+    const stages: ThemeGenerationStage[] = [];
 
     const draft = await service.generate(
       { description: "A calm ocean research notebook" },
+      signal(),
+      (stage) => stages.push(stage)
+    );
+
+    expect(stages).toEqual(["drafting", "validating"]);
+    expect(draft.validation.valid).toBe(true);
+    expect(draft.finalized).toBe(false);
+    expect(draft.componentLibrary).toBe("");
+    expect(draft.previewHtml).toContain('data-galley-theme-block="10"');
+    expect(client.requests).toHaveLength(1);
+    expect(client.messagesText()).not.toContain(
+      '<skill-file path="references/common-components.md">'
+    );
+    expect(client.messagesText()).not.toContain(
+      '<skill-file path="references/theme-generator.md">'
+    );
+    expect(client.messagesText()).toContain(
+      "Return only one script-free full HTML5 document."
+    );
+    expect(client.messagesText()).not.toContain(
+      "Return one strict JSON object"
+    );
+  });
+
+  it("accepts fenced direct HTML and infers safe theme metadata locally", async () => {
+    const { service } = harness([
+      completed(
+        `Here is the concept:\n\n\`\`\`html\n${validThemeConceptPreview("Neon Future")}\n\`\`\``
+      )
+    ]);
+
+    const draft = await service.generate(
+      { description: "科幻霓虹风" },
       signal()
     );
 
     expect(draft.validation.valid).toBe(true);
-    expect(draft.previewHtml).not.toMatch(/<script\b/iu);
-    expect(draft.skillAudit.files).toEqual(THEME_GENERATION_REQUIRED_FILES);
-    expect(draft.skillAudit.loadMode).toBe("tool-calls");
-    expect(client.requests.at(-1)?.messages.at(-1)?.content).toEqual(
-      expect.stringContaining("Return the complete theme preview HTML directly")
-    );
+    expect(draft.manifest.name).toBe("Neon Future concept");
+    expect(draft.manifest.id).toMatch(/^theme-[a-z0-9]+$/u);
+    expect(draft.previewHtml).toContain('data-galley-theme-block="10"');
   });
 
-  it("fully injects the same required files when tools are unavailable", async () => {
-    const { client, service } = harness([completed(themeModelResponse())]);
-
-    const draft = await service.generate(
-      { description: "A calm ocean research notebook" },
-      signal()
-    );
-
-    expect(draft.skillAudit.loadMode).toBe("injected");
-    for (const path of THEME_GENERATION_REQUIRED_FILES) {
-      expect(client.messagesText()).toContain(`<skill-file path="${path}">`);
-    }
-  });
-
-  it("does not persist a valid draft until explicit save", async () => {
-    const { repository, service } = harness([completed(themeModelResponse())]);
-    const draft = await service.generate(
-      { description: "A calm ocean research notebook" },
-      signal()
-    );
-
-    await expect(repository.list()).resolves.toEqual([]);
-    await service.save(draft);
-    await expect(repository.get(CUSTOM_THEME_ID)).resolves.toMatchObject({
-      componentLibrary: validComponentLibrary(),
-      previewHtml: expect.stringContaining("data-galley-theme-block=\"45\"")
-    });
-  });
-
-  it("returns lint errors and refuses to save an unsafe or incomplete draft", async () => {
-    const { repository, service } = harness([
-      completed(themeModelResponse({
-        componentLibrary: validComponentLibrary().replace(
-          "<section",
-          "<script>alert(1)</script><section"
-        ),
-        previewHtml: validThemePreview().replace(
-          "</article>",
-          "<script>alert(1)</script></article>"
-        )
-      }))
+  it("creates a usable local concept when the model returns only explanation text", async () => {
+    const { service } = harness([
+      completed("Please provide the article content before I can continue.")
     ]);
 
     const draft = await service.generate(
+      {
+        description:
+          "Treat the following as one cumulative multi-turn theme design conversation.\n\nInitial request:\n科幻风"
+      },
+      signal()
+    );
+
+    expect(draft.validation.valid).toBe(true);
+    expect(draft.manifest.name).toBe("科幻风");
+    expect(draft.manifest.primaryColor).toBe("#00E5FF");
+    expect(draft.previewHtml).toContain("GALLEY THEME LAB");
+    expect(draft.previewHtml).toContain('data-galley-theme-block="10"');
+  });
+
+  it("uses the local concept fallback for an empty provider response", async () => {
+    const { service } = harness([new AiError("invalid_response")]);
+
+    await expect(
+      service.generate({ description: "科幻风" }, signal())
+    ).resolves.toMatchObject({
+      manifest: {
+        name: "科幻风",
+        primaryColor: "#00E5FF"
+      },
+      validation: { valid: true }
+    });
+  });
+
+  it("builds and persists the complete theme only after explicit finalization", async () => {
+    const { client, repository, service } = harness([
+      completed(themeConceptResponse()),
+      completed(themeComponentLibraryResponse())
+    ]);
+    const draft = await service.generate(
       { description: "A calm ocean research notebook" },
       signal()
     );
-    expect(draft.validation.valid).toBe(false);
-    expect(draft.validation.issues.map(({ code }) => code)).toEqual(
-      expect.arrayContaining(["component_script", "preview_script"])
+    const stages: ThemeGenerationStage[] = [];
+
+    await expect(repository.list()).resolves.toEqual([]);
+    const finalized = await service.finalizeAndSave(
+      draft,
+      signal(),
+      (stage) => stages.push(stage)
     );
-    await expect(service.save(draft)).rejects.toMatchObject({
+
+    expect(stages).toEqual([
+      "loading-rules",
+      "finalizing",
+      "validating",
+      "saving"
+    ]);
+    expect(finalized.finalized).toBe(true);
+    expect(finalized.componentLibrary).toBe(validComponentLibrary());
+    expect(finalized.previewHtml).toContain('data-galley-theme-block="10"');
+    for (const path of THEME_GENERATION_REQUIRED_FILES) {
+      expect(client.messagesText()).toContain(`<skill-file path="${path}">`);
+    }
+    await expect(repository.get(CUSTOM_THEME_ID)).resolves.toMatchObject({
+      componentLibrary: validComponentLibrary(),
+      previewHtml: expect.stringContaining('data-galley-theme-block="10"')
+    });
+  });
+
+  it("rejects an unsafe finalized package without persisting it", async () => {
+    const unsafe = validComponentLibrary().replace(
+      "<section",
+      "<script>alert(1)</script><section"
+    );
+    const { repository, service } = harness([
+      completed(themeConceptResponse()),
+      completed(themeComponentLibraryResponse(unsafe)),
+      completed(themeComponentLibraryResponse(unsafe))
+    ]);
+    const draft = await service.generate(
+      { description: "A calm ocean research notebook" },
+      signal()
+    );
+
+    await expect(service.finalizeAndSave(draft, signal())).rejects.toMatchObject({
       code: "theme_validation_failed"
     });
     await expect(repository.list()).resolves.toEqual([]);
+  });
+
+  it("automatically repairs one invalid component library before saving", async () => {
+    const unsafe = validComponentLibrary().replace(
+      "<section",
+      "<script>alert(1)</script><section"
+    );
+    const { client, repository, service } = harness([
+      completed(themeConceptResponse()),
+      completed(themeComponentLibraryResponse(unsafe)),
+      completed(themeComponentLibraryResponse())
+    ]);
+    const draft = await service.generate(
+      { description: "A calm ocean research notebook" },
+      signal()
+    );
+
+    const finalized = await service.finalizeAndSave(draft, signal());
+
+    expect(finalized.validation.valid).toBe(true);
+    expect(finalized.componentLibrary).toBe(validComponentLibrary());
+    expect(client.requests).toHaveLength(3);
+    await expect(repository.get(CUSTOM_THEME_ID)).resolves.toMatchObject({
+      componentLibrary: validComponentLibrary()
+    });
+  });
+
+  it("accepts JSON wrapped in prose and direct Markdown component output", async () => {
+    const { repository, service } = harness([
+      completed(
+        `Here is the concept:\n\n\`\`\`json\n${themeConceptResponse()}\n\`\`\``
+      ),
+      completed(`Here is the completed library:\n\n${validComponentLibrary()}`)
+    ]);
+    const draft = await service.generate(
+      { description: "A calm ocean research notebook" },
+      signal()
+    );
+
+    await expect(
+      service.finalizeAndSave(draft, signal())
+    ).resolves.toMatchObject({
+      componentLibrary: validComponentLibrary(),
+      finalized: true
+    });
+    await expect(repository.get(CUSTOM_THEME_ID)).resolves.not.toBeNull();
   });
 
   it("never sends a selected image when vision capability is absent", async () => {
@@ -189,9 +297,9 @@ describe("AI Theme Lab generation", () => {
     expect(client.requests).toHaveLength(0);
   });
 
-  it("sends a validated explicit image only in the final vision request", async () => {
+  it("sends a validated explicit image only with the lightweight concept request", async () => {
     const { client, service } = harness(
-      [completed(themeModelResponse())],
+      [completed(themeConceptResponse())],
       makeProviderCapabilities({ tools: false, vision: true })
     );
     await service.generate({
@@ -217,28 +325,30 @@ describe("AI Theme Lab generation", () => {
   });
 
   it.each([
-    ["duplicate", (html: string) => html.replace('block="45"', 'block="44"')],
-    ["gap", (html: string) => html.replace('block="45"', 'block="46"')],
-    ["out of order", (html: string) => html
-      .replace('block="1"', 'block="swap"')
-      .replace('block="2"', 'block="1"')
-      .replace('block="swap"', 'block="2"')],
-    ["empty", (html: string) => html.replace('block="1"', 'block=""')],
-    ["non-numeric", (html: string) => html.replace('block="1"', 'block="one"')]
-  ])("rejects %s preview markers instead of accepting count alone", async (_label, mutate) => {
+    ["duplicate", validThemeConceptPreview().replace('block="10"', 'block="9"')],
+    ["gap", validThemeConceptPreview().replace('block="10"', 'block="11"')],
+    ["too many", validThemePreview()]
+  ])("normalizes a %s lightweight preview", async (_label, previewHtml) => {
     const { service } = harness([
-      completed(themeModelResponse({ previewHtml: mutate(validThemePreview()) }))
+      completed(themeConceptResponse({ previewHtml }))
     ]);
 
     const draft = await service.generate(
-      { description: "Marker contract regression" },
+      { description: "Concept marker regression" },
       signal()
     );
 
-    expect(draft.validation.valid).toBe(false);
-    expect(draft.validation.issues.map(({ code }) => code)).toContain(
-      "preview_block_sequence"
+    const document = new DOMParser().parseFromString(
+      draft.previewHtml,
+      "text/html"
     );
+    const markers = [
+      ...document.querySelectorAll("[data-galley-theme-block]")
+    ].map((element) => element.getAttribute("data-galley-theme-block"));
+    expect(draft.validation.valid).toBe(true);
+    expect(markers.length).toBeGreaterThanOrEqual(8);
+    expect(markers.length).toBeLessThanOrEqual(12);
+    expect(markers).toEqual(markers.map((_, index) => String(index + 1)));
   });
 });
 
