@@ -40,6 +40,10 @@ import {
   TransactionRecordUnstableError
 } from "./ObsidianTransactionStore";
 import type { GalleyExportRecordV1 } from "../export/ExportRecord";
+import {
+  isSingleHtmlPath,
+  ObsidianSingleHtmlDocumentSessionOpener
+} from "./ObsidianSingleHtmlDocumentSession";
 
 const MAX_OPEN_ATTEMPTS = 8;
 
@@ -75,8 +79,10 @@ export class ObsidianDocumentSessionOpener implements DocumentSessionOpener {
     ObsidianDocumentSessionOpenerOptions,
     "now" | "randomUUID"
   >;
+  readonly #single: ObsidianSingleHtmlDocumentSessionOpener;
 
   constructor(vault: Vault, options: ObsidianDocumentSessionOpenerOptions = {}) {
+    this.#single = new ObsidianSingleHtmlDocumentSessionOpener(vault);
     const adapter = new ObsidianWorkbenchVault(vault, options.vaultOptions);
     this.#repository = new GalleyDocumentRepository(adapter);
     this.#history = new HistoryRepository(
@@ -94,6 +100,7 @@ export class ObsidianDocumentSessionOpener implements DocumentSessionOpener {
     htmlPath: string,
     signal?: AbortSignal
   ): Promise<OpenedGalleyDocumentSession> {
+    if (isSingleHtmlPath(htmlPath)) return this.#single.open(htmlPath, signal);
     const paths = galleyArtifactPaths(htmlPath);
     try {
       for (let attempt = 0; attempt < MAX_OPEN_ATTEMPTS; attempt += 1) {
@@ -146,6 +153,9 @@ export class ObsidianDocumentSessionOpener implements DocumentSessionOpener {
     htmlPath: string,
     signal?: AbortSignal
   ): Promise<DocumentRecoveryInspection> {
+    if (isSingleHtmlPath(htmlPath)) {
+      return this.#single.inspectRecovery(htmlPath, signal);
+    }
     const paths = galleyArtifactPaths(htmlPath);
     try {
       const pair = await this.#repository.readPair(paths, signal);

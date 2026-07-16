@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { extractHtmlDocument } from "../../src/generation/HtmlResponseExtractor";
+import {
+  extractFinalHtmlContent,
+  extractHtmlDocument
+} from "../../src/generation/HtmlResponseExtractor";
 import {
   recoveryDependentFragments,
   wrapBodyFragment
@@ -141,4 +144,53 @@ describe("extractHtmlDocument", () => {
       expect(() => extractHtmlDocument(html)).toThrow(/complete|shell|unterminated/i);
     }
   );
+});
+
+describe("extractFinalHtmlContent", () => {
+  it("removes conversational prose around an inline HTML fence", () => {
+    const response = [
+      "I have everything I need and will now produce the result. ```html",
+      '<section style="max-width: 677px"><p>article</p></section>',
+      "```",
+      "Done."
+    ].join("\n");
+
+    expect(extractFinalHtmlContent(response)).toBe(
+      '<section style="max-width: 677px"><p>article</p></section>'
+    );
+  });
+
+  it("extracts the largest article root when a model omits fences", () => {
+    const response =
+      "Here is the final result.\n" +
+      '<section style="max-width: 677px"><section><p>article</p></section></section>\n' +
+      "Hope this helps.";
+
+    expect(extractFinalHtmlContent(response)).toBe(
+      '<section style="max-width: 677px"><section><p>article</p></section></section>'
+    );
+  });
+
+  it("keeps clean multi-root HTML fragments", () => {
+    expect(
+      extractFinalHtmlContent("<section>one</section><section>two</section>")
+    ).toBe("<section>one</section><section>two</section>");
+  });
+
+  it("drops HTML-wrapped explanation and fence markers around the article", () => {
+    const response =
+      "<p>Here is the result. ```html</p>" +
+      '<section style="max-width: 677px"><section><p>article</p></section></section>' +
+      "<p>```</p>";
+
+    expect(extractFinalHtmlContent(response)).toBe(
+      '<section style="max-width: 677px"><section><p>article</p></section></section>'
+    );
+  });
+
+  it("rejects prose and incidental inline markup without an article root", () => {
+    expect(() =>
+      extractFinalHtmlContent("The model returned <code>no article</code>.")
+    ).toThrow(/usable HTML|contain HTML/i);
+  });
 });

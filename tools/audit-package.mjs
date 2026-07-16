@@ -10,6 +10,19 @@ if (packageJson.version !== "0.1.0" || lock.version !== "0.1.0" || manifest.vers
 if (manifest.minAppVersion !== "1.11.4" || manifest.isDesktopOnly !== false) {
   failures.push("manifest platform contract changed");
 }
+if (manifest.author !== "Kinrochen") {
+  failures.push("manifest author must be Kinrochen");
+}
+if (manifest.fundingUrl !== "https://ifdian.net/a/kinrochen") {
+  failures.push("manifest fundingUrl changed");
+}
+if (
+  packageJson.author !== manifest.author ||
+  packageJson.funding?.url !== manifest.fundingUrl ||
+  packageJson.license !== "AGPL-3.0-or-later"
+) {
+  failures.push("package metadata does not match manifest author/funding/license");
+}
 for (const [name, version] of Object.entries({
   ...packageJson.dependencies,
   ...packageJson.devDependencies

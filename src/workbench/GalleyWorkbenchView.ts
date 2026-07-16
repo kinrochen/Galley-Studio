@@ -105,10 +105,12 @@ export interface GalleyWorkbenchViewServices {
     signal: AbortSignal
   ) => Promise<{ readonly path: string; readonly html: string }>;
   readonly copyExportHtml?: (html: string) => Promise<void>;
+  readonly copyHtml?: (html: string) => Promise<void>;
   readonly saveExportConfiguration?: (
     configuration: ExportConfiguration
   ) => Promise<readonly ExportConfiguration[]>;
   readonly reportExportOutcome?: (message: string) => void;
+  readonly reportCopyOutcome?: (message: string) => void;
   readonly locale?: LocalizedText;
 }
 
@@ -116,7 +118,7 @@ export class GalleyPathInvalidError extends Error {
   readonly code = "galley_path_invalid" as const;
 
   constructor() {
-    super("Galley workbench accepts only canonical *.galley.html artifacts.");
+    super("Galley workbench accepts only vault-relative HTML files.");
     this.name = "GalleyPathInvalidError";
   }
 }
@@ -184,18 +186,12 @@ export class GalleyWorkbenchView extends ItemView {
   }
 
   getState(): Record<string, unknown> {
-    return this.#state.documentPath ? { path: this.#state.documentPath } : {};
+    return this.#state.documentPath ? { file: this.#state.documentPath } : {};
   }
 
   async setState(state: unknown, _result: ViewStateResult): Promise<void> {
-    if (
-      typeof state === "object" &&
-      state !== null &&
-      "path" in state &&
-      typeof state.path === "string"
-    ) {
-      await this.openPath(state.path);
-    }
+    const path = filePathFromState(state);
+    if (path) await this.openPath(path);
   }
 
   async onOpen(): Promise<void> {
@@ -329,6 +325,26 @@ export class GalleyWorkbenchView extends ItemView {
   async saveExplicit(): Promise<void> {
     this.#captureAdapterBody();
     await this.#save("explicit");
+  }
+
+  async copyCurrentHtml(): Promise<void> {
+    const session = this.#document?.session;
+    const copy = this.#services.copyHtml;
+    if (!session || !copy) {
+      throw new Error("Galley HTML copy is unavailable.");
+    }
+    this.#captureAdapterBody();
+    try {
+      await copy(session.html());
+      this.#services.reportCopyOutcome?.(
+        this.#text.t("workbench.copyHtml.success")
+      );
+    } catch (error) {
+      this.#services.reportCopyOutcome?.(
+        this.#text.t("workbench.copyHtml.failed")
+      );
+      throw error;
+    }
   }
 
   exportCurrent(configurationId: string, copy: boolean): Promise<void> {
@@ -518,6 +534,7 @@ export class GalleyWorkbenchView extends ItemView {
     if (workflow) workflow.textContent = this.#text.t("workbench.workflow");
     renderWorkbenchToolbar(this.#toolbar, this.#state, {
       onMode: (mode) => this.selectMode(mode),
+      onCopy: () => this.copyCurrentHtml(),
       onSave: () => this.saveExplicit()
     }, this.#text);
     if (this.#state.conflict) {
@@ -643,7 +660,9 @@ export class GalleyWorkbenchView extends ItemView {
             sourceId: element?.dataset.galleySource ?? null
           });
           this.#render();
-        }
+        },
+        sourceFormatLabel: this.#text.t("workbench.source.format"),
+        sourceLanguageLabel: this.#text.t("workbench.source.language")
       });
       if (this.#closed || generation !== this.#mountGeneration || this.#adapter !== adapter) {
         this.#destroyAdapter(adapter);
@@ -666,13 +685,17 @@ export class GalleyWorkbenchView extends ItemView {
     if (!session) return;
     let previewHtml = session.html();
     if (this.#services.resourceResolver) {
-      const parsed = GalleyDocumentCodec.parse(previewHtml);
-      previewHtml = GalleyDocumentCodec.serialize({
-        ...parsed,
-        bodyHtml: this.#services.resourceResolver.rewriteForDisplay(
-          parsed.bodyHtml
-        )
-      });
+      try {
+        const parsed = GalleyDocumentCodec.parse(previewHtml);
+        previewHtml = GalleyDocumentCodec.serialize({
+          ...parsed,
+          bodyHtml: this.#services.resourceResolver.rewriteForDisplay(
+            parsed.bodyHtml
+          )
+        });
+      } catch {
+        previewHtml = this.#services.resourceResolver.rewriteForDisplay(previewHtml);
+      }
     }
     createSafePreviewFrame(
       this.#canvas,
@@ -872,7 +895,14 @@ export class GalleyWorkbenchView extends ItemView {
 }
 
 export function isGalleyHtmlPath(path: string): boolean {
-  return isNormalizedVaultRelativePath(path) && path.endsWith(".galley.html");
+  return isNormalizedVaultRelativePath(path) && path.endsWith(".html");
+}
+
+function filePathFromState(state: unknown): string | null {
+  if (typeof state !== "object" || state === null) return null;
+  if ("file" in state && typeof state.file === "string") return state.file;
+  if ("path" in state && typeof state.path === "string") return state.path;
+  return null;
 }
 
 function assertGalleyHtmlPath(path: string): void {

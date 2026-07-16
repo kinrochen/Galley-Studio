@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import { AiError } from "../../src/ai/AiError";
 import {
+  DIRECT_GENERATION_SOURCE_TOKEN_LIMIT,
   GenerationPipeline,
   GenerationPipelineError,
   MANUAL_THEME_ARTICLE_TYPE,
+  MAX_LONG_BATCH_SOURCE_TOKENS,
   type GenerateArticleInput
 } from "../../src/generation/GenerationPipeline";
 import { parseThemeDecision } from "../../src/generation/ThemeDecision";
@@ -257,6 +259,13 @@ describe("direct generation and repair", () => {
     expect(result.validation).toEqual({ valid: true, issues: [] });
     expect(result.diagnostics).toBe(result.validation.issues);
     expect(result.html).not.toContain("<script");
+    const article = new DOMParser()
+      .parseFromString(result.html, "text/html")
+      .querySelector<HTMLElement>("body > article");
+    expect(article?.style.maxWidth).toBe("677px");
+    expect(article?.style.width).toBe("100%");
+    expect(article?.style.margin).toBe("0px auto");
+    expect(article?.style.boxSizing).toBe("border-box");
     expect(result.source).toEqual(source);
     expect(input).toEqual(makeInput());
   });
@@ -356,6 +365,19 @@ describe("direct generation and repair", () => {
     expect(client.remainingSteps()).toBe(1);
   });
 
+  it("does not return an empty fallback document after failed repairs", async () => {
+    const { pipeline } = makePipeline([
+      contentTurn(themeDecision()),
+      contentTurn("not html"),
+      contentTurn("still not html"),
+      contentTurn("still not html")
+    ]);
+
+    await expect(
+      pipeline.generate(makeInput(), new AbortController().signal)
+    ).rejects.toMatchObject({ code: "generation_empty" });
+  });
+
   it("repairs with only the exact missing source blocks and current safe HTML", async () => {
     const source = annotateMarkdown(DEFAULT_MARKDOWN);
     const invalid = validAuthoringHtmlForIds([source.blocks[0]!.id]);
@@ -392,6 +414,44 @@ describe("direct generation and repair", () => {
 });
 
 describe("long mode", () => {
+  it("batches medium sources whose styled HTML expansion would overload one request", async () => {
+    const markdown = Array.from(
+      { length: 6 },
+      (_, index) => `## Section ${index + 1}\n\n${"body ".repeat(650)}`
+    ).join("\n\n");
+    const source = annotateMarkdown(markdown);
+    expect(estimateTokens(markdown)).toBeGreaterThan(
+      DIRECT_GENERATION_SOURCE_TOKEN_LIMIT
+    );
+    const batches = planDocumentBatches(
+      source,
+      MAX_LONG_BATCH_SOURCE_TOKENS
+    );
+    expect(batches.length).toBeGreaterThan(1);
+    const { pipeline, client } = makePipeline([
+      ...batches.map((batch) => contentTurn(batchFragment(batch.blockIds))),
+      ...batches.map((batch) => contentTurn(batchFragment(batch.blockIds)))
+    ]);
+
+    const result = await pipeline.generate(
+      makeInput({
+        markdown,
+        manualThemeId: GRAPHITE_THEME.id,
+        modelContextWindow: 128_000
+      }),
+      new AbortController().signal
+    );
+
+    expect(result.status).toBe("verified");
+    expect(client.requests).toHaveLength(batches.length * 2);
+    expect(
+      client.requests.every((request) =>
+        lastUserPrompt(request).includes("long-document batch") ||
+        lastUserPrompt(request).includes("batch consistency normalization")
+      )
+    ).toBe(true);
+  });
+
   it("runs one bounded consistency normalization per batch, then assembles in DOM order", async () => {
     const markdown = makeLongDocumentMarkdown(8);
     const source = annotateMarkdown(markdown);
@@ -545,7 +605,7 @@ describe("long mode", () => {
     expect(ids).toEqual(source.blocks.map(({ id }) => id));
   });
 
-  it.each(["duplicate", "unknown", "nested"] as const)(
+  it.each(["duplicate", "unknown"] as const)(
     "rejects %s markers in batch output before the consistency pass",
     async (failure) => {
       const markdown = makeLongDocumentMarkdown(8);
@@ -561,7 +621,7 @@ describe("long mode", () => {
           ? batchFragment([...firstIds, firstIds[0]!])
           : failure === "unknown"
             ? batchFragment([...firstIds.slice(0, -1), "invented-999"])
-            : `<div>${batchFragment(firstIds)}</div>`;
+            : batchFragment(firstIds);
       const { pipeline, client } = makePipeline([
         contentTurn(themeDecision()),
         contentTurn(badFragment),
@@ -595,6 +655,40 @@ describe("long mode", () => {
       ).toBe(false);
     }
   );
+
+  it.each([
+    ["a layout wrapper", (fragment: string) => `<div class="layout">${fragment}</div>`],
+    ["an article wrapper", (fragment: string) => `<article>${fragment}</article>`],
+    ["an HTML fence", (fragment: string) => `\`\`\`html\n${fragment}\n\`\`\``]
+  ])("accepts %s around a valid long-document batch", async (_label, wrap) => {
+    const markdown = makeLongDocumentMarkdown(8);
+    const source = annotateMarkdown(markdown);
+    const modelContextWindow = 140;
+    const batches = planDocumentBatches(
+      source,
+      Math.floor(modelContextWindow * 0.5)
+    );
+    const steps = [
+      contentTurn(themeDecision()),
+      ...batches.map((batch, index) =>
+        contentTurn(
+          index === 0
+            ? wrap(batchFragment(batch.blockIds))
+            : batchFragment(batch.blockIds)
+        )
+      ),
+      ...batches.map((batch) => contentTurn(batchFragment(batch.blockIds)))
+    ];
+    const { pipeline } = makePipeline(steps);
+
+    const result = await pipeline.generate(
+      makeInput({ markdown, modelContextWindow }),
+      new AbortController().signal
+    );
+
+    expect(result.status).toBe("verified");
+    expect(result.html).toContain(source.blocks[0]!.id);
+  });
 
   it("fails an indivisible over-budget block before requesting partial output", async () => {
     const { pipeline, client } = makePipeline([]);

@@ -12,6 +12,7 @@ import { ArtifactConfigurationError } from "../../src/documents/ArtifactReposito
 import { GalleySidecarV1Schema } from "../../src/documents/GalleySidecar";
 import type { GeneratedDocument } from "../../src/generation/GenerationPipeline";
 import { GenerationPipelineError } from "../../src/generation/GenerationPipeline";
+import { applyWechatArticleFrame } from "../../src/generation/WechatArticleFrame";
 import GalleyPlugin, { ObsidianArtifactVault } from "../../src/main";
 import { normalizeSettings } from "../../src/settings/GalleySettings";
 import { LocaleStore } from "../../src/i18n/LocaleStore";
@@ -115,13 +116,12 @@ describe("generateCurrentArticle", () => {
       "Galley: Reading current Markdown.",
       "Galley: Loading generation dependencies.",
       "Galley: Generating article.",
-      "Galley: Validating generated article.",
-      "Galley: Saving independent artifacts.",
-      "Galley: Generated generated/note.galley.html and generated/note.galley.json."
+      "Galley: Saving the final HTML file.",
+      "Galley: Generated generated/note.galley.html."
     ]);
   });
 
-  it("clearly reports an unverified draft in both paths and the final Notice", async () => {
+  it("reports only the final HTML path even for a legacy unverified result", async () => {
     const noticesSeen: string[] = [];
     const writeNew = vi.fn(async () => ({
       html: "note.unverified.galley.html",
@@ -140,9 +140,7 @@ describe("generateCurrentArticle", () => {
 
     await generateCurrentArticle(context, new AbortController().signal);
 
-    expect(noticesSeen.at(-1)).toBe(
-      "Galley: Saved UNVERIFIED DRAFT note.unverified.galley.html and note.unverified.galley.json."
-    );
+    expect(noticesSeen.at(-1)).toBe("Galley: Generated note.unverified.galley.html.");
   });
 
   it("opens the generated Galley HTML after the independent pair is committed", async () => {
@@ -191,9 +189,8 @@ describe("generateCurrentArticle", () => {
       "Galley：正在读取当前 Markdown。",
       "Galley：正在加载生成依赖。",
       "Galley：正在生成文章。",
-      "Galley：正在验证生成的文章。",
-      "Galley：正在保存独立产物。",
-      "Galley：已生成 notes/note.galley.html 和 notes/note.galley.json。",
+      "Galley：正在保存最终 HTML 文件。",
+      "Galley：已生成 notes/note.galley.html。",
       "Galley：文章已生成，但无法打开工作台。"
     ]);
     expect(noticesSeen.join("\n")).not.toMatch(
@@ -305,6 +302,28 @@ describe("generateCurrentArticle", () => {
     );
   });
 
+  it("does not require a provider model when a local CLI Agent is selected", async () => {
+    const createPipeline = vi.fn(async () => ({
+      model: "Codex CLI",
+      pipeline: { generate: async () => makeDocument("verified") }
+    }));
+
+    await expect(
+      generateCurrentArticle(
+        makeContext({
+          getSettings: () => ({
+            generationAgent: "codex-cli",
+            model: "",
+            codexCliPath: "codex"
+          }),
+          createPipeline
+        }),
+        new AbortController().signal
+      )
+    ).resolves.toMatchObject({ html: "notes/note.galley.html" });
+    expect(createPipeline).toHaveBeenCalledTimes(1);
+  });
+
   it("fails actionably before reading when the output folder cannot be prepared", async () => {
     const read = vi.fn();
     const notice = vi.fn();
@@ -361,10 +380,12 @@ describe("generateCurrentArticle", () => {
 
   it.each([
     [new AiError("missing_secret"), "Galley: Configure an API key before generating."],
+    [new AiError("cli_not_found"), "Galley: The selected local CLI was not found."],
+    [new AiError("cli_failed"), "Galley: The local CLI exited with an error."],
     [new AiError("invalid_base_url"), "Galley: Check the configured provider Base URL."],
     [
       new AiError("timeout"),
-      "Galley: The model did not finish within the configured timeout. Increase it in Settings or use a faster model."
+      "Galley: The model did not finish within 30 minutes. Retry or use a faster model."
     ],
     [new AiError("http_error", { status: 401 }), "Galley: The provider rejected the API key or permissions."],
     [new AiError("http_error", { status: 429 }), "Galley: The provider is temporarily unavailable; try again."],
@@ -373,6 +394,7 @@ describe("generateCurrentArticle", () => {
     [new AiError("invalid_response"), "Galley: The model returned an unreadable response."],
     [new AiError("tool_round_limit"), "Galley: The model did not finish loading the Skill files."],
     [new GenerationPipelineError("theme_invalid", "unsafe provider detail"), "Galley: The model could not choose a valid theme."],
+    [new GenerationPipelineError("generation_empty", "unsafe provider detail"), "Galley: The Agent returned no usable article body after repair, so no blank HTML file was saved."],
     [new Error("Authorization: Bearer top-secret; markdown and <html>raw</html>"), "Galley: Generation failed. Check settings and try again."]
   ])("shows only an allowlisted error for %s", async (failure, safeMessage) => {
     const notice = vi.fn();
@@ -426,7 +448,7 @@ describe("generateCurrentArticle", () => {
     expect(sidecar.htmlHash).toBe(await sha256(await vault.read(paths.html)));
   });
 
-  it("saves a real empty-marker validator report as an unmistakable unverified pair", async () => {
+  it("does not expose an internal validator stage in the final notice", async () => {
     const markdown = "# Empty marker\n";
     const document = makeEmptyMarkerDocument(markdown);
     const vault = memoryVault({ "folder/source.md": markdown });
@@ -467,7 +489,9 @@ describe("generateCurrentArticle", () => {
       severity: "error",
       message: "A generated source marker is invalid."
     });
-    expect(noticesSeen.at(-1)).toContain("UNVERIFIED DRAFT");
+    expect(noticesSeen.at(-1)).toBe(
+      "Galley: Generated folder/source.unverified.galley.html."
+    );
   });
 });
 
@@ -510,19 +534,12 @@ describe("plugin command registration", () => {
     expect(notices).toContain("Galley: Generation cancelled.");
   });
 
-  it("runs the real desktop dependency graph and commits an exact independent pair", async () => {
+  it("runs one Skill generation turn and saves only the final HTML file", async () => {
     const markdown = "# Production path\r\n\r\nBody bytes.\n";
     const source = annotateMarkdown(markdown);
     const harness = makeProductionPluginApp(markdown);
     const providerResponses = [
       toolsUnsupportedResponse(),
-      openAiContent(
-        JSON.stringify({
-          themeId: "graphite-minimal",
-          articleType: "tutorial",
-          reason: "Matches the article."
-        })
-      ),
       openAiContent(validAuthoringHtml(source))
     ];
     setRequestUrlHandler(async () => {
@@ -548,48 +565,21 @@ describe("plugin command registration", () => {
 
     expect(providerResponses).toEqual([]);
     expect(harness.contents.get("note.md")).toBe(markdown);
-    const html = harness.contents.get("generated/note.galley.html");
-    const sidecarText = harness.contents.get("generated/note.galley.json");
+    const html = harness.contents.get("note.html");
     expect(html).toBe(validAuthoringHtml(source));
-    expect(sidecarText).toBeTypeOf("string");
-    const sidecar = JSON.parse(sidecarText ?? "") as {
-      sourceHash: string;
-      htmlHash: string;
-      model: string;
-      skillLoadMode: string;
-      skillFiles: string[];
-    };
-    expect(sidecar.sourceHash).toBe(await sha256(markdown));
-    expect(sidecar.htmlHash).toBe(await sha256(html ?? ""));
-    expect(sidecar.model).toBe("production-model");
-    expect(sidecar.skillLoadMode).toBe("injected");
-    expect(sidecar.skillFiles).toEqual(
-      expect.arrayContaining([
-        "SKILL.md",
-        "references/theme-index.md",
-        "references/common-components.md",
-        "references/theme-graphite-minimal.md"
-      ])
-    );
+    expect([...harness.contents.keys()].filter((path) => path !== "note.md")).toEqual([
+      "note.html"
+    ]);
     expect(notices.at(-1)).toBe(
-      "Galley: Generated generated/note.galley.html and generated/note.galley.json."
+      "Galley: Generated note.html."
     );
     expect(harness.renameCalls.count).toBe(0);
-    expect(harness.createCalls).toHaveLength(2);
-    expect(harness.createCalls.every((path) => path.includes("galley-tmp"))).toBe(
-      true
-    );
-    expect(harness.copyCalls.map(({ to }) => to)).toEqual([
-      "generated/note.galley.html",
-      "generated/note.galley.json"
-    ]);
-    expect(harness.adapterReadCalls).toEqual([
-      "generated/note.galley.html",
-      "generated/note.galley.json"
-    ]);
+    expect(harness.createCalls).toEqual(["note.html"]);
+    expect(harness.copyCalls).toEqual([]);
+    expect(harness.adapterReadCalls).toEqual([]);
   });
 
-  it("uses exclusive adapter copies when a production destination appears between pair probe and commit", async () => {
+  it("does not create numbered, sidecar, or temporary files", async () => {
     const markdown = "# Production race\n";
     const source = annotateMarkdown(markdown);
     const harness = makeProductionPluginApp(markdown, {
@@ -597,13 +587,6 @@ describe("plugin command registration", () => {
     });
     const providerResponses = [
       toolsUnsupportedResponse(),
-      openAiContent(
-        JSON.stringify({
-          themeId: "graphite-minimal",
-          articleType: "tutorial",
-          reason: "Matches the article."
-        })
-      ),
       openAiContent(validAuthoringHtml(source))
     ];
     setRequestUrlHandler(async () => {
@@ -626,22 +609,12 @@ describe("plugin command registration", () => {
     await command?.callback?.();
 
     expect(harness.renameCalls.count).toBe(0);
-    expect(harness.contents.get("generated/note.galley.html")).toBe(
-      "replacement HTML"
-    );
-    expect(harness.contents.get("generated/note-2.galley.html")).toBe(
-      validAuthoringHtml(source)
-    );
-    expect(harness.contents.has("generated/note-2.galley.json")).toBe(true);
-    expect(harness.createCalls).toHaveLength(4);
-    expect(harness.createCalls.every((path) => path.includes("galley-tmp"))).toBe(
-      true
-    );
-    expect(harness.copyCalls.map(({ to }) => to)).toEqual([
-      "generated/note.galley.html",
-      "generated/note-2.galley.html",
-      "generated/note-2.galley.json"
+    expect(harness.contents.get("note.html")).toBe(validAuthoringHtml(source));
+    expect([...harness.contents.keys()].filter((path) => path !== "note.md")).toEqual([
+      "note.html"
     ]);
+    expect(harness.createCalls).toEqual(["note.html"]);
+    expect(harness.copyCalls).toEqual([]);
   });
 
   it("allows exactly one of two concurrent production adapter commits to claim an absent destination", async () => {

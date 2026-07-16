@@ -16,6 +16,12 @@ if (manifest.version !== VERSION) throw new Error("Release manifest version mism
 if (manifest.isDesktopOnly !== false || manifest.minAppVersion !== "1.11.4") {
   throw new Error("Release manifest platform contract mismatch.");
 }
+if (
+  manifest.author !== "Kinrochen" ||
+  manifest.fundingUrl !== "https://ifdian.net/a/kinrochen"
+) {
+  throw new Error("Release manifest author/funding metadata mismatch.");
+}
 
 const entries = {};
 const originals = new Map();

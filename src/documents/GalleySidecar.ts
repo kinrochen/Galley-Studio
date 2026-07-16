@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import type { GeneratedDocument } from "../generation/GenerationPipeline";
+import type { GeneratedDocument } from "../generation/SkillDrivenGenerationTypes";
 import { GalleyExportRecordV1Schema } from "../export/ExportRecord";
 
 const LOWERCASE_SHA256 = /^[a-f0-9]{64}$/;

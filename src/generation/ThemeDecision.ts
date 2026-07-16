@@ -10,6 +10,7 @@ import {
 
 export type GenerationPipelineErrorCode =
   | "input_invalid"
+  | "generation_empty"
   | "long_block_oversized"
   | "theme_invalid";
 

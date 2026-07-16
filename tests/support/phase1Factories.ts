@@ -62,29 +62,8 @@ export function makeSession(
 export function makeDiagnosticDeps(
   overrides: Partial<ConnectionDiagnosticDeps> = {}
 ): ConnectionDiagnosticDeps {
-  const responses = [
-    openAiToolCall("capability", "galley_capability_echo", "{}"),
-    openAiContent("galley_stream_probe"),
-    openAiToolCall(
-      "skill-root",
-      "read_skill_file",
-      JSON.stringify({ path: "SKILL.md" })
-    ),
-    openAiToolCall(
-      "skill-themes",
-      "read_skill_file",
-      JSON.stringify({ path: "references/theme-index.md" })
-    ),
-    openAiContent("Skill loaded")
-  ];
   const transport: HttpTransport = {
-    post: async () => {
-      const response = responses.shift();
-      if (!response) {
-        throw new Error("Unexpected diagnostic request");
-      }
-      return response;
-    }
+    post: async () => openAiContent("OK")
   };
 
   return {

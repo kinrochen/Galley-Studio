@@ -43,6 +43,8 @@ describe("0.1.0 release configuration", () => {
     expect(notices).toContain("Copyright");
     expect(JSON.parse(readFileSync(resolve("manifest.json"), "utf8"))).toMatchObject({
       version: "0.1.0",
+      author: "Kinrochen",
+      fundingUrl: "https://ifdian.net/a/kinrochen",
       isDesktopOnly: false
     });
   });
@@ -60,6 +62,7 @@ describe("0.1.0 release configuration", () => {
     expect(readme).toContain("Desktop");
     expect(readme).toContain("Mobile");
     expect(readme).toContain("OpenAI-compatible");
+    expect(readme).toContain("https://ifdian.net/a/kinrochen");
     expect(security).toContain("SecretStorage");
     expect(security).toContain("symbolic link");
     expect(security).toContain("never executed");

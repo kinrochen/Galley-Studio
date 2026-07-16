@@ -39,6 +39,7 @@ export const EN = {
   "console.home.context.galley": "Current Galley article",
   "console.home.context.markdown": "Current Markdown",
   "console.home.description": "Turn the current Markdown into an independent, visually editable HTML article.",
+  "console.home.readiness.agent": "Generation Agent",
   "console.home.readiness.model": "Model",
   "console.home.readiness.skill": "Skill",
   "console.home.readiness.apiKey": "API key",
@@ -47,9 +48,9 @@ export const EN = {
   "console.home.readiness.missing": "Not configured",
   "console.home.themesUnavailable": "No usable theme was loaded. Check the active Skill or theme settings.",
   "console.home.checkSettings": "Check settings",
-  "console.home.notReady": "Complete the model, API key, Skill, and theme setup before generating.",
+  "console.home.notReady": "Choose an available generation Agent, active Skill, and theme before generating.",
   "console.home.viewAll": "View all",
-  "console.home.articleMeta": "Theme {theme} · {exports} exports",
+  "console.home.articleMeta": "Theme {theme}",
   "console.home.continue": "Continue working",
   "console.home.metrics": "{words} words · {characters} characters",
   "console.home.activity.pendingExport": "Pending export: {path}",
@@ -68,22 +69,52 @@ export const EN = {
   "console.language.aria": "Language",
   "console.mobile.previewOnly": "Preview only on mobile",
   "console.nav.articles": "Articles",
+  "console.nav.generation": "Generation",
   "console.nav.exports": "Export configurations",
   "console.nav.home": "Console",
   "console.nav.settings": "Settings",
   "console.nav.skills": "Skill",
   "console.nav.themes": "Themes",
   "console.ribbon": "Open Galley console",
+  "console.generation.title": "Generation conversation",
+  "console.generation.description": "Follow every generation stage and the visible model output. This task keeps running when the console is closed.",
+  "console.generation.empty": "No generation task has been started in this Obsidian session.",
+  "console.generation.new": "Start a new generation",
+  "console.generation.source": "Source",
+  "console.generation.elapsed": "Elapsed",
+  "console.generation.rounds": "Model rounds",
+  "console.generation.modelRound": "Model · round {round} · {duration}",
+  "console.generation.prompt": "You · initial prompt",
+  "console.generation.youAvatar": "You",
+  "console.generation.agentAvatar": "AI",
+  "console.generation.waitingOutput": "Waiting for visible model output…",
+  "console.generation.truncated": "Earlier output in this round was folded to keep the console responsive.",
+  "console.generation.system": "Galley",
+  "console.generation.backgroundHint": "Generation is running in the background. You may close this console and return later.",
+  "console.generation.completed": "Generation completed and saved: {path}",
+  "console.generation.running": "Running",
+  "console.generation.succeeded": "Completed",
+  "console.generation.failed": "Generation failed.",
+  "console.generation.cancelled": "Generation cancelled.",
   "console.settings.baseUrl": "Base URL",
-  "console.settings.description": "Configure the model connection and generation defaults used by Galley.",
+  "console.settings.description": "Choose the Agent Galley uses to generate the final HTML file.",
+  "console.settings.agent": "Generation Agent",
+  "console.settings.agentDescription": "Use Galley's provider connection or a local authenticated CLI. Local executables are detected automatically.",
+  "console.settings.agent.plugin": "Galley Agent",
+  "console.settings.agent.codex": "Local Codex CLI",
+  "console.settings.agent.claude": "Local Claude Code CLI",
+  "console.settings.codexPath": "Codex executable",
+  "console.settings.claudePath": "Claude executable",
+  "console.settings.cliDiscovery": "CLI executable",
+  "console.settings.cliDiscoveryDescription": "Galley automatically scans desktop app bundles, the Obsidian PATH, and common system and user-level install locations. The availability check runs one minimal model call.",
   "console.settings.provider": "Model provider",
   "console.settings.providerDescription": "OpenAI-compatible endpoint, model, and SecretStorage key.",
   "console.settings.generation": "Generation defaults",
   "console.settings.generationDescription": "Request limits and where independent article files are saved.",
-  "console.settings.diagnosticTitle": "Connection check",
-  "console.settings.diagnosticDescription": "Verify the model and confirm how the active Skill files are loaded.",
+  "console.settings.diagnosticTitle": "Agent availability",
+  "console.settings.diagnosticDescription": "Run one minimal model call to verify that the selected Agent can respond. The bundled Skill is not part of this check.",
   "console.settings.contextWindow": "Context window",
-  "console.settings.diagnostic": "Run connection and Skill diagnostic",
+  "console.settings.diagnostic": "Check Agent availability",
   "console.settings.language": "Display language: {language}",
   "console.settings.model": "Model",
   "console.settings.outputFolder": "Output folder",
@@ -104,6 +135,15 @@ export const EN = {
   "console.skills.importedInactive": "Imported Skill {version}. It remains inactive until explicitly activated.",
   "console.skills.title": "Skill",
   "console.skills.tooLarge": "A Skill ZIP must be no larger than 25 MiB.",
+  "console.skills.description": "The active Skill is the generation playbook: it defines the HTML rules, theme recipes, and validation requirements the Agent must follow.",
+  "console.skills.howItWorks": "What this Skill does",
+  "console.skills.step.rules": "Loads the safe HTML authoring rules and allowed components.",
+  "console.skills.step.theme": "Provides the selected theme's colors, typography, and layout recipes.",
+  "console.skills.step.html": "Guides the Agent to turn every Markdown block into one final HTML document.",
+  "console.skills.step.validation": "Checks source coverage and repairs invalid output before saving.",
+  "console.skills.current": "Active Skill: {id} · {version}",
+  "console.skills.files": "{count} instruction files loaded",
+  "console.skills.instructions": "View the active SKILL.md instructions",
   "console.themes.disable": "Disable",
   "console.themes.description": "Use a built-in theme, manage custom themes, or create one with AI.",
   "console.themes.empty": "No themes are available from the active Skill.",
@@ -112,6 +152,7 @@ export const EN = {
   "console.themes.enable": "Enable",
   "console.themes.export": "Export",
   "console.themes.import": "Import theme ZIP",
+  "console.themes.preview": "Preview of {theme}",
   "console.themes.title": "Themes",
   "console.title": "Galley console",
   "console.unavailable": "Unavailable: {reason}",
@@ -124,25 +165,27 @@ export const EN = {
   "generation.notice.reading": "Galley: Reading current Markdown.",
   "generation.notice.loading": "Galley: Loading generation dependencies.",
   "generation.notice.generating": "Galley: Generating article.",
-  "generation.notice.validating": "Galley: Validating generated article.",
-  "generation.notice.saving": "Galley: Saving independent artifacts.",
-  "generation.notice.generated": "Galley: Generated {html} and {sidecar}.",
+  "generation.notice.validating": "Galley: The Agent is following the Skill.",
+  "generation.notice.saving": "Galley: Saving the final HTML file.",
+  "generation.notice.generated": "Galley: Generated {html}.",
   "generation.notice.unverified": "Galley: Saved UNVERIFIED DRAFT {html} and {sidecar}.",
   "generation.notice.openFailed": "Galley: The article was generated, but the workbench could not open it.",
   "generation.status.inProgress": "Reading Markdown, loading the Skill, and generating HTML…",
-  "generation.status.reading": "1/5 Reading the locked Markdown source…",
-  "generation.status.loadingSkill": "2/5 Connecting to the model and loading Skill files…",
-  "generation.status.generating": "3/5 The model is generating HTML…",
-  "generation.status.validating": "4/5 Validating the generated document…",
-  "generation.status.saving": "5/5 Saving the independent HTML and metadata files…",
+  "generation.status.reading": "1/4 Reading the Markdown source…",
+  "generation.status.loadingSkill": "2/4 Connecting to the Agent and loading the Skill…",
+  "generation.status.generating": "3/4 The Agent is using the Skill to generate HTML…",
+  "generation.status.validating": "3/4 The Agent is using the Skill to generate HTML…",
+  "generation.status.saving": "4/4 Saving the one final HTML file…",
   "generation.status.complete": "Generated and opened: {path}",
   "generation.error.cancelled": "Galley: Generation cancelled.",
+  "generation.error.cliNotFound": "Galley: The selected local CLI was not found. Check its executable path in Settings.",
+  "generation.error.cliFailed": "Galley: The local CLI exited with an error. Check that it is signed in and can run from a terminal.",
   "generation.error.missingMarkdown": "Galley: Open one Markdown file before generating.",
   "generation.error.missingModel": "Galley: Configure a model before generating.",
   "generation.error.outputFolder": "Galley: Configure a valid vault-relative output folder.",
   "generation.error.missingSecret": "Galley: Configure an API key before generating.",
   "generation.error.baseUrl": "Galley: Check the configured provider Base URL.",
-  "generation.error.timeout": "Galley: The model did not finish within the configured timeout. Increase it in Settings or use a faster model.",
+  "generation.error.timeout": "Galley: The model did not finish within 30 minutes. Retry or use a faster model.",
   "generation.error.authorization": "Galley: The provider rejected the API key or permissions.",
   "generation.error.providerUnavailable": "Galley: The provider is temporarily unavailable; try again.",
   "generation.error.compatibility": "Galley: The provider rejected this OpenAI-compatible request. Check the endpoint and model compatibility.",
@@ -153,22 +196,24 @@ export const EN = {
   "generation.error.themeDecision": "Galley: The model could not choose a valid theme. Select one of the available themes and generate again.",
   "generation.error.inputInvalid": "Galley: The current Markdown could not be prepared for generation.",
   "generation.error.longBlock": "Galley: One Markdown block is too large for the configured context window.",
+  "generation.error.empty": "Galley: The Agent returned no usable article body after repair, so no blank HTML file was saved.",
   "generation.error.failed": "Galley: Generation failed. Check settings and try again."
   ,"fileMenu.preview": "Open Galley preview"
   ,"fileMenu.workbench": "Open in Galley workbench"
   ,"preview.frameTitle": "Galley article preview"
   ,"preview.title": "Galley preview"
   ,"settings.baseUrl.desc": "OpenAI-compatible API base URL."
+  ,"settings.cliPath.desc": "Command name or absolute path. The CLI uses its existing local sign-in."
   ,"settings.contextWindow.desc": "Maximum model context window in tokens."
-  ,"settings.diagnostic.desc": "Check the configured model and audit loading of the bundled Skill."
-  ,"settings.diagnostic.name": "Connection and Skill diagnostic"
+  ,"settings.diagnostic.desc": "Run one minimal model call. The bundled Skill is used directly and is not checked here."
+  ,"settings.diagnostic.name": "Agent availability"
   ,"settings.language.desc": "Follow Obsidian or choose a Galley display language."
   ,"settings.language.name": "Language"
   ,"settings.model.desc": "Model identifier sent to the provider."
   ,"settings.outputFolder.desc": "Vault folder for generated Galley files."
   ,"settings.secret.desc": "Select a key stored in Obsidian SecretStorage."
   ,"settings.temperature.desc": "Sampling temperature from 0 to 2."
-  ,"settings.timeout.desc": "Request timeout in milliseconds."
+  ,"settings.timeout.desc": "Generation requests use a fixed 30-minute timeout (1800000 ms)."
   ,"themeLab.description.aria": "Theme description"
   ,"themeLab.description.placeholder": "Describe the visual style, mood, colors, and intended articles."
   ,"themeLab.generate": "Generate draft"
@@ -237,7 +282,12 @@ export const EN = {
   ,"workbench.history.title": "History"
   ,"workbench.mode.preview": "Preview"
   ,"workbench.mode.source": "Source"
-  ,"workbench.mode.visual": "Visual"
+  ,"workbench.mode.visual": "Edit"
+  ,"workbench.copyHtml": "Copy HTML"
+  ,"workbench.copyHtml.success": "Copied the complete HTML document."
+  ,"workbench.copyHtml.failed": "Could not copy the HTML document."
+  ,"workbench.source.format": "Format HTML"
+  ,"workbench.source.language": "HTML source"
   ,"workbench.outline.title": "Outline"
   ,"workbench.properties.componentRole": "Component role"
   ,"workbench.properties.paragraph": "Paragraph"
@@ -275,22 +325,14 @@ export const EN = {
   ,"workbench.confirm.reload": "Discard local edits and reload the external file?"
   ,"workbench.confirm.overwrite": "Overwrite the external file with the local Galley edit?"
   ,"workbench.workflow": "Generate → Edit → Export"
-  ,"diagnostic.title": "Galley connection and Skill diagnostic"
-  ,"diagnostic.status": "Status"
-  ,"diagnostic.passed": "Passed"
-  ,"diagnostic.failed": "Failed"
-  ,"diagnostic.model": "Model"
-  ,"diagnostic.tools": "Tools"
-  ,"diagnostic.streaming": "Streaming"
-  ,"diagnostic.vision": "Vision"
-  ,"diagnostic.supported": "Supported"
-  ,"diagnostic.notObserved": "Not observed"
-  ,"diagnostic.skillVersion": "Skill version"
-  ,"diagnostic.skillLoadMode": "Skill load mode"
+  ,"diagnostic.title": "Agent availability"
+  ,"diagnostic.status": "Model call"
+  ,"diagnostic.passed": "Available"
+  ,"diagnostic.failed": "Unavailable"
+  ,"diagnostic.model": "Agent / model"
   ,"diagnostic.errorCode": "Error code"
-  ,"diagnostic.skillFiles": "Skill files:"
-  ,"diagnostic.notice.passed": "Galley diagnostic passed: Skill loaded via {mode}."
-  ,"diagnostic.notice.failed": "Galley diagnostic failed ({code})."
+  ,"diagnostic.notice.passed": "Galley Agent is available."
+  ,"diagnostic.notice.failed": "Galley Agent is unavailable ({code})."
 } as const;
 
 export type MessageKey = keyof typeof EN;
@@ -337,6 +379,7 @@ export const ZH_CN: MessageResources = {
   "console.home.context.galley": "当前 Galley 文章",
   "console.home.context.markdown": "当前 Markdown",
   "console.home.description": "将当前 Markdown 转换为独立、可视化编辑的 HTML 文章。",
+  "console.home.readiness.agent": "生成 Agent",
   "console.home.readiness.model": "模型",
   "console.home.readiness.skill": "Skill",
   "console.home.readiness.apiKey": "API 密钥",
@@ -345,9 +388,9 @@ export const ZH_CN: MessageResources = {
   "console.home.readiness.missing": "未配置",
   "console.home.themesUnavailable": "没有加载到可用主题，请检查当前 Skill 或主题设置。",
   "console.home.checkSettings": "检查设置",
-  "console.home.notReady": "请先完成模型、API 密钥、Skill 和主题配置。",
+  "console.home.notReady": "请先选择可用的生成 Agent、当前 Skill 和主题。",
   "console.home.viewAll": "查看全部",
-  "console.home.articleMeta": "主题 {theme} · 已导出 {exports} 次",
+  "console.home.articleMeta": "主题 {theme}",
   "console.home.continue": "继续工作",
   "console.home.metrics": "{words} 字词 · {characters} 字符",
   "console.home.activity.pendingExport": "待处理导出：{path}",
@@ -366,22 +409,52 @@ export const ZH_CN: MessageResources = {
   "console.language.aria": "语言",
   "console.mobile.previewOnly": "移动端仅支持预览",
   "console.nav.articles": "文章",
+  "console.nav.generation": "生成对话",
   "console.nav.exports": "导出配置",
   "console.nav.home": "控制台",
   "console.nav.settings": "设置",
   "console.nav.skills": "技能",
   "console.nav.themes": "主题",
   "console.ribbon": "打开 Galley 控制台",
+  "console.generation.title": "生成对话",
+  "console.generation.description": "查看每个生成阶段和模型可见输出。关闭控制台后，任务仍会在后台继续。",
+  "console.generation.empty": "本次 Obsidian 会话中还没有启动生成任务。",
+  "console.generation.new": "开始新的生成",
+  "console.generation.source": "源文件",
+  "console.generation.elapsed": "已用时间",
+  "console.generation.rounds": "模型轮次",
+  "console.generation.modelRound": "模型 · 第 {round} 轮 · {duration}",
+  "console.generation.prompt": "你 · 初始提示词",
+  "console.generation.youAvatar": "你",
+  "console.generation.agentAvatar": "AI",
+  "console.generation.waitingOutput": "正在等待模型输出…",
+  "console.generation.truncated": "为保持控制台流畅，本轮较早的输出已折叠。",
+  "console.generation.system": "Galley",
+  "console.generation.backgroundHint": "任务正在后台生成。你可以关闭控制台，稍后再回来查看。",
+  "console.generation.completed": "生成完成并已保存：{path}",
+  "console.generation.running": "生成中",
+  "console.generation.succeeded": "已完成",
+  "console.generation.failed": "生成失败。",
+  "console.generation.cancelled": "生成已取消。",
   "console.settings.baseUrl": "基础 URL",
-  "console.settings.description": "配置 Galley 使用的模型连接与生成默认值。",
+  "console.settings.description": "选择 Galley 用来生成最终 HTML 文件的 Agent。",
+  "console.settings.agent": "生成 Agent",
+  "console.settings.agentDescription": "使用 Galley 自带的模型连接，或本机已登录的 CLI；本地可执行文件会自动探测。",
+  "console.settings.agent.plugin": "本插件 Agent",
+  "console.settings.agent.codex": "本地 Codex CLI",
+  "console.settings.agent.claude": "本地 Claude Code CLI",
+  "console.settings.codexPath": "Codex 可执行文件",
+  "console.settings.claudePath": "Claude 可执行文件",
+  "console.settings.cliDiscovery": "CLI 可执行文件",
+  "console.settings.cliDiscoveryDescription": "Galley 会自动扫描桌面应用内置 CLI、Obsidian PATH、常见系统目录和用户级安装目录；可用性检查只发起一次最小模型调用。",
   "console.settings.provider": "模型服务",
   "console.settings.providerDescription": "OpenAI 兼容端点、模型和 SecretStorage 密钥。",
   "console.settings.generation": "生成默认值",
   "console.settings.generationDescription": "请求限制，以及独立文章文件的保存位置。",
-  "console.settings.diagnosticTitle": "连接检查",
-  "console.settings.diagnosticDescription": "验证模型连接，并确认当前 Skill 文件的加载方式。",
+  "console.settings.diagnosticTitle": "Agent 可用性检查",
+  "console.settings.diagnosticDescription": "发起一次最小模型调用，只确认当前 Agent 能否正常响应；内置 Skill 不参与检查。",
   "console.settings.contextWindow": "上下文窗口",
-  "console.settings.diagnostic": "运行连接与技能诊断",
+  "console.settings.diagnostic": "检查 Agent 可用性",
   "console.settings.language": "显示语言：{language}",
   "console.settings.model": "模型",
   "console.settings.outputFolder": "输出文件夹",
@@ -402,6 +475,15 @@ export const ZH_CN: MessageResources = {
   "console.skills.importedInactive": "已导入技能 {version}。明确激活前它保持未启用状态。",
   "console.skills.title": "技能",
   "console.skills.tooLarge": "技能 ZIP 不得超过 25 MiB。",
+  "console.skills.description": "当前 Skill 是生成操作手册：它规定 Agent 必须遵循的 HTML 规则、主题配方和校验要求。",
+  "console.skills.howItWorks": "这个 Skill 具体做什么",
+  "console.skills.step.rules": "加载安全 HTML 编写规则和允许使用的组件。",
+  "console.skills.step.theme": "提供所选主题的配色、字体与版式配方。",
+  "console.skills.step.html": "指导 Agent 将每个 Markdown 区块转换为一个完整 HTML 文档。",
+  "console.skills.step.validation": "保存前检查原文覆盖情况，并修复不合格输出。",
+  "console.skills.current": "当前 Skill：{id} · {version}",
+  "console.skills.files": "已加载 {count} 个说明文件",
+  "console.skills.instructions": "查看当前 SKILL.md 完整说明",
   "console.themes.disable": "停用",
   "console.themes.description": "使用内置主题、管理自定义主题，或通过 AI 创建新主题。",
   "console.themes.empty": "当前 Skill 没有提供可用主题。",
@@ -410,6 +492,7 @@ export const ZH_CN: MessageResources = {
   "console.themes.enable": "启用",
   "console.themes.export": "导出",
   "console.themes.import": "导入主题 ZIP",
+  "console.themes.preview": "{theme} 主题预览",
   "console.themes.title": "主题",
   "console.title": "Galley 控制台",
   "console.unavailable": "不可用：{reason}",
@@ -422,25 +505,27 @@ export const ZH_CN: MessageResources = {
   "generation.notice.reading": "Galley：正在读取当前 Markdown。",
   "generation.notice.loading": "Galley：正在加载生成依赖。",
   "generation.notice.generating": "Galley：正在生成文章。",
-  "generation.notice.validating": "Galley：正在验证生成的文章。",
-  "generation.notice.saving": "Galley：正在保存独立产物。",
-  "generation.notice.generated": "Galley：已生成 {html} 和 {sidecar}。",
+  "generation.notice.validating": "Galley：Agent 正在按 Skill 生成。",
+  "generation.notice.saving": "Galley：正在保存最终 HTML 文件。",
+  "generation.notice.generated": "Galley：已生成 {html}。",
   "generation.notice.unverified": "Galley：已保存未验证草稿 {html} 和 {sidecar}。",
   "generation.notice.openFailed": "Galley：文章已生成，但无法打开工作台。",
   "generation.status.inProgress": "正在读取 Markdown、加载 Skill 并生成 HTML…",
-  "generation.status.reading": "1/5 正在读取已锁定的 Markdown 源文件…",
-  "generation.status.loadingSkill": "2/5 正在连接模型并加载 Skill 文件…",
-  "generation.status.generating": "3/5 模型正在生成 HTML…",
-  "generation.status.validating": "4/5 正在验证生成文档…",
-  "generation.status.saving": "5/5 正在保存独立 HTML 与元数据文件…",
+  "generation.status.reading": "1/4 正在读取 Markdown 源文件…",
+  "generation.status.loadingSkill": "2/4 正在连接 Agent 并加载 Skill…",
+  "generation.status.generating": "3/4 Agent 正在使用 Skill 生成 HTML…",
+  "generation.status.validating": "3/4 Agent 正在使用 Skill 生成 HTML…",
+  "generation.status.saving": "4/4 正在保存唯一的最终 HTML 文件…",
   "generation.status.complete": "已生成并打开：{path}",
   "generation.error.cancelled": "Galley：生成已取消。",
+  "generation.error.cliNotFound": "Galley：找不到所选的本地 CLI，请检查设置中的可执行文件路径。",
+  "generation.error.cliFailed": "Galley：本地 CLI 执行失败，请确认它已登录且能在终端中正常运行。",
   "generation.error.missingMarkdown": "Galley：请先打开一个 Markdown 文件。",
   "generation.error.missingModel": "Galley：请先配置模型。",
   "generation.error.outputFolder": "Galley：请配置有效的仓库相对输出文件夹。",
   "generation.error.missingSecret": "Galley：请先配置 API 密钥。",
   "generation.error.baseUrl": "Galley：请检查服务商基础 URL。",
-  "generation.error.timeout": "Galley：模型未在设定时限内完成，请在设置中增大超时或更换响应更快的模型。",
+  "generation.error.timeout": "Galley：模型未在 30 分钟内完成，请重试或更换响应更快的模型。",
   "generation.error.authorization": "Galley：服务商拒绝了 API 密钥或权限。",
   "generation.error.providerUnavailable": "Galley：服务商暂时不可用，请稍后重试。",
   "generation.error.compatibility": "Galley：服务商拒绝了当前 OpenAI 兼容请求，请检查端点与模型兼容性。",
@@ -451,22 +536,24 @@ export const ZH_CN: MessageResources = {
   "generation.error.themeDecision": "Galley：模型未能选择有效主题，请明确选择一个可用主题后重新生成。",
   "generation.error.inputInvalid": "Galley：当前 Markdown 无法进入生成流程。",
   "generation.error.longBlock": "Galley：Markdown 中有单个区块超出当前上下文窗口。",
+  "generation.error.empty": "Galley：Agent 修复后仍未返回可用正文，因此没有保存空白 HTML 文件。",
   "generation.error.failed": "Galley：生成失败，请检查设置后重试。"
   ,"fileMenu.preview": "打开 Galley 预览"
   ,"fileMenu.workbench": "在 Galley 工作台中打开"
   ,"preview.frameTitle": "Galley 文章预览"
   ,"preview.title": "Galley 预览"
   ,"settings.baseUrl.desc": "OpenAI 兼容 API 的基础 URL。"
+  ,"settings.cliPath.desc": "填写命令名或绝对路径；CLI 会使用本机现有的登录状态。"
   ,"settings.contextWindow.desc": "模型上下文窗口的最大 token 数。"
-  ,"settings.diagnostic.desc": "检查已配置模型并审计内置技能的加载。"
-  ,"settings.diagnostic.name": "连接与技能诊断"
+  ,"settings.diagnostic.desc": "发起一次最小模型调用；内置 Skill 直接使用，不在这里检查。"
+  ,"settings.diagnostic.name": "Agent 可用性检查"
   ,"settings.language.desc": "跟随 Obsidian，或选择 Galley 显示语言。"
   ,"settings.language.name": "语言"
   ,"settings.model.desc": "发送给服务商的模型标识。"
   ,"settings.outputFolder.desc": "生成 Galley 文件的仓库文件夹。"
   ,"settings.secret.desc": "选择存储在 Obsidian SecretStorage 中的密钥。"
   ,"settings.temperature.desc": "0 到 2 之间的采样温度。"
-  ,"settings.timeout.desc": "请求超时毫秒数。"
+  ,"settings.timeout.desc": "生成请求固定使用 30 分钟超时（1800000 毫秒）。"
   ,"themeLab.description.aria": "主题描述"
   ,"themeLab.description.placeholder": "描述视觉风格、氛围、色彩和适用文章。"
   ,"themeLab.generate": "生成草稿"
@@ -535,7 +622,12 @@ export const ZH_CN: MessageResources = {
   ,"workbench.history.title": "历史"
   ,"workbench.mode.preview": "预览"
   ,"workbench.mode.source": "源码"
-  ,"workbench.mode.visual": "可视化"
+  ,"workbench.mode.visual": "编辑"
+  ,"workbench.copyHtml": "复制 HTML"
+  ,"workbench.copyHtml.success": "已复制完整 HTML 文档。"
+  ,"workbench.copyHtml.failed": "无法复制 HTML 文档。"
+  ,"workbench.source.format": "格式化 HTML"
+  ,"workbench.source.language": "HTML 源码"
   ,"workbench.outline.title": "大纲"
   ,"workbench.properties.componentRole": "组件角色"
   ,"workbench.properties.paragraph": "段落"
@@ -573,22 +665,14 @@ export const ZH_CN: MessageResources = {
   ,"workbench.confirm.reload": "放弃本地编辑并重新加载外部文件？"
   ,"workbench.confirm.overwrite": "使用本地 Galley 编辑覆盖外部文件？"
   ,"workbench.workflow": "生成 → 编辑 → 导出"
-  ,"diagnostic.title": "Galley 连接与技能诊断"
-  ,"diagnostic.status": "状态"
-  ,"diagnostic.passed": "通过"
-  ,"diagnostic.failed": "失败"
-  ,"diagnostic.model": "模型"
-  ,"diagnostic.tools": "工具调用"
-  ,"diagnostic.streaming": "流式输出"
-  ,"diagnostic.vision": "视觉"
-  ,"diagnostic.supported": "支持"
-  ,"diagnostic.notObserved": "未检测到"
-  ,"diagnostic.skillVersion": "技能版本"
-  ,"diagnostic.skillLoadMode": "技能加载模式"
+  ,"diagnostic.title": "Agent 可用性检查"
+  ,"diagnostic.status": "模型调用"
+  ,"diagnostic.passed": "可用"
+  ,"diagnostic.failed": "不可用"
+  ,"diagnostic.model": "Agent / 模型"
   ,"diagnostic.errorCode": "错误代码"
-  ,"diagnostic.skillFiles": "技能文件："
-  ,"diagnostic.notice.passed": "Galley 诊断通过：技能通过 {mode} 加载。"
-  ,"diagnostic.notice.failed": "Galley 诊断失败（{code}）。"
+  ,"diagnostic.notice.passed": "Galley Agent 可正常调用大模型。"
+  ,"diagnostic.notice.failed": "Galley Agent 不可用（{code}）。"
 };
 
 export const RESOURCES = {

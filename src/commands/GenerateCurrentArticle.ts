@@ -7,7 +7,7 @@ import { ArtifactConfigurationError } from "../documents/ArtifactRepository";
 import type {
   GenerateArticleInput,
   GeneratedDocument
-} from "../generation/GenerationPipeline";
+} from "../generation/SkillDrivenGenerationTypes";
 import {
   normalizeSettings,
   type GalleySettings
@@ -85,7 +85,7 @@ export async function generateCurrentArticle(
     }
 
     const settings = Object.freeze(normalizeSettings(context.getSettings()));
-    if (!settings.model.trim()) {
+    if (settings.generationAgent === "plugin" && !settings.model.trim()) {
       throw new GenerateCommandError("missing_model");
     }
     const repository = context.createRepository(settings);
@@ -114,8 +114,6 @@ export async function generateCurrentArticle(
       signal
     );
     throwIfAborted(signal);
-    context.progress?.("validating");
-    context.notice(text.t("generation.notice.validating"));
     context.progress?.("saving");
     context.notice(text.t("generation.notice.saving"));
     const paths = await repository.writeNew(
@@ -129,14 +127,7 @@ export async function generateCurrentArticle(
     );
     throwIfAborted(signal);
 
-    context.notice(
-      text.t(
-        document.status === "unverified"
-          ? "generation.notice.unverified"
-          : "generation.notice.generated",
-        { html: paths.html, sidecar: paths.sidecar }
-      )
-    );
+    context.notice(text.t("generation.notice.generated", { html: paths.html }));
     if (context.openArtifact) {
       try {
         await context.openArtifact(paths.html);
@@ -178,6 +169,12 @@ export function generationFailureMessage(
     return text.t("generation.error.outputFolder");
   }
   if (error instanceof AiError) {
+    if (error.code === "cli_not_found") {
+      return text.t("generation.error.cliNotFound");
+    }
+    if (error.code === "cli_failed") {
+      return text.t("generation.error.cliFailed");
+    }
     if (error.code === "missing_secret") {
       return text.t("generation.error.missingSecret");
     }
@@ -212,6 +209,8 @@ export function generationFailureMessage(
     }
   }
   switch (errorCode(error)) {
+    case "generation_empty":
+      return text.t("generation.error.empty");
     case "theme_invalid":
       return text.t("generation.error.themeDecision");
     case "input_invalid":

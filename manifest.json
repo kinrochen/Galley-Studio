@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "minAppVersion": "1.11.4",
   "description": "AI-driven Markdown-to-HTML publishing studio.",
-  "author": "Galley contributors",
+  "author": "Kinrochen",
+  "fundingUrl": "https://ifdian.net/a/kinrochen",
   "isDesktopOnly": false
 }

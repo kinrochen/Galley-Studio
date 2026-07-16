@@ -2,6 +2,8 @@ export interface HtmlEditorMountOptions {
   documentBaseUrl: string;
   onChange(html: string): void;
   onSelectionChange?(element: HTMLElement | null): void;
+  sourceFormatLabel?: string;
+  sourceLanguageLabel?: string;
 }
 
 export interface HtmlEditorAdapter {

@@ -17,6 +17,7 @@ describe("createSafePreviewFrame", () => {
     expect(frame.srcdoc).not.toContain("onclick");
     expect(frame.srcdoc).toContain("Content-Security-Policy");
     expect(frame.srcdoc).toContain("Safe");
+    expect(frame.srcdoc).toContain("html,body{min-height:100%;background:#fff}");
   });
 
   it("replaces existing preview children and never keeps a second live frame", () => {
@@ -26,6 +27,19 @@ describe("createSafePreviewFrame", () => {
     expect(host.children).toHaveLength(1);
     expect(host.firstElementChild).toBe(second);
     expect(second.srcdoc).toContain("two");
+  });
+
+  it("wraps generated HTML fragments in a safe preview document", () => {
+    const host = document.createElement("div");
+    const frame = createSafePreviewFrame(
+      host,
+      '<section style="color: #dc2626"><p>fragment preview</p></section>'
+    );
+
+    expect(frame.srcdoc).toMatch(/^<!DOCTYPE html><html/);
+    expect(frame.srcdoc).toContain("<body><section");
+    expect(frame.srcdoc).toContain("fragment preview");
+    expect(frame.srcdoc).toContain("color: #dc2626");
   });
 });
 

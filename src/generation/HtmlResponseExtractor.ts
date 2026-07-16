@@ -4,6 +4,8 @@ import {
 } from "../documents/HtmlShellScanner";
 
 const FENCE_LINE_PATTERN = /^[\t ]*```([^\r\n]*)$/gm;
+const FLEXIBLE_FENCE_PATTERN = /```([a-z0-9_-]*)[ \t]*(?:\r?\n)?/giu;
+const ARTICLE_ROOT_TAGS = new Set(["article", "main", "section", "div"]);
 
 interface UnwrappedResponse {
   source: string;
@@ -27,6 +29,88 @@ export function extractHtmlDocument(modelText: string): string {
       `Model output must contain a single complete HTML document: ${detail}`
     );
   }
+}
+
+/**
+ * Extracts the final artifact from model responses that may include prose,
+ * Markdown fences, or other conversational context.
+ */
+export function extractFinalHtmlContent(modelText: string): string {
+  const source = modelText.trim();
+  if (!source) throw new Error("Model output did not contain HTML.");
+
+  for (const candidate of flexibleFenceCandidates(source)) {
+    const extracted = extractCandidate(candidate);
+    if (extracted) return extracted;
+  }
+
+  const extracted = extractCandidate(source);
+  if (extracted) return extracted;
+  throw new Error("Model output did not contain one usable HTML artifact.");
+}
+
+function extractCandidate(value: string): string | null {
+  try {
+    return extractHtmlDocument(value);
+  } catch {
+    const cleanFragment = extractCleanFragment(value);
+    if (cleanFragment) return cleanFragment;
+    return extractLargestArticleRoot(value);
+  }
+}
+
+function extractCleanFragment(value: string): string | null {
+  const parsed = new DOMParser().parseFromString(value, "text/html");
+  const children = [...parsed.body.children];
+  if (children.length === 0) return null;
+  const hasOutsideText = [...parsed.body.childNodes].some(
+    (node) => node.nodeType === Node.TEXT_NODE && Boolean(node.textContent?.trim())
+  );
+  if (hasOutsideText) return null;
+  const structuralChildren = children.filter((element) =>
+    ARTICLE_ROOT_TAGS.has(element.localName)
+  );
+  if (
+    structuralChildren.length > 0 &&
+    structuralChildren.length !== children.length
+  ) {
+    structuralChildren.sort(
+      (left, right) => right.outerHTML.length - left.outerHTML.length
+    );
+    return structuralChildren[0]?.outerHTML.trim() ?? null;
+  }
+  return parsed.body.innerHTML.trim() || null;
+}
+
+function extractLargestArticleRoot(value: string): string | null {
+  const parsed = new DOMParser().parseFromString(value, "text/html");
+  const candidates = [...parsed.body.children].filter((element) =>
+    ARTICLE_ROOT_TAGS.has(element.localName) &&
+    (element.outerHTML.length >= 128 || element.querySelectorAll("*").length >= 2)
+  );
+  candidates.sort((left, right) => right.outerHTML.length - left.outerHTML.length);
+  return candidates[0]?.outerHTML.trim() ?? null;
+}
+
+function flexibleFenceCandidates(value: string): string[] {
+  const markers = [...value.matchAll(FLEXIBLE_FENCE_PATTERN)];
+  const candidates: string[] = [];
+  for (let index = 0; index < markers.length; index += 1) {
+    const opening = markers[index];
+    if (!opening || !["", "html"].includes(opening[1]?.toLowerCase() ?? "")) {
+      continue;
+    }
+    const openingEnd = matchIndex(opening) + opening[0].length;
+    const closing = markers
+      .slice(index + 1)
+      .find((marker) => (marker[1] ?? "") === "");
+    const closingStart = closing ? matchIndex(closing) : value.length;
+    if (closingStart <= openingEnd) continue;
+    const candidate = value.slice(openingEnd, closingStart).trim();
+    if (candidate) candidates.push(candidate);
+    if ((opening[1] ?? "").toLowerCase() === "html") break;
+  }
+  return candidates;
 }
 
 function unwrapOptionalHtmlFence(modelText: string): UnwrappedResponse {

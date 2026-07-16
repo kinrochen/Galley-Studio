@@ -1,8 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
-import { SourceBodyEditor } from "../../src/editor/SourceBodyEditor";
+import { EditorView } from "codemirror";
+import {
+  SourceBodyEditor,
+  formatSourceHtml
+} from "../../src/editor/SourceBodyEditor";
+
+if (!Range.prototype.getClientRects) {
+  Object.defineProperty(Range.prototype, "getClientRects", {
+    configurable: true,
+    value: () => []
+  });
+}
 
 describe("SourceBodyEditor", () => {
-  it("owns only a body-fragment textarea and reports real input once", async () => {
+  it("mounts a formatted HTML CodeMirror editor and reports document edits once", async () => {
     const host = document.createElement("div");
     const sibling = document.createElement("span");
     host.append(sibling);
@@ -14,29 +25,37 @@ describe("SourceBodyEditor", () => {
       onChange
     });
 
-    const textarea = host.querySelector("textarea");
-    expect(textarea?.value).toBe("<p>one</p>");
+    const editorElement = host.querySelector<HTMLElement>(".cm-editor");
+    const view = EditorView.findFromDOM(editorElement!);
+    expect(view?.state.doc.toString()).toBe("<p>one</p>\n");
+    expect(host.querySelectorAll(".cm-line span").length).toBeGreaterThan(0);
+    expect(host.querySelector("textarea")).toBeNull();
     expect(onChange).not.toHaveBeenCalled();
 
     editor.setHtml("<p>two</p>");
     expect(editor.getHtml()).toBe("<p>two</p>");
     expect(onChange).not.toHaveBeenCalled();
 
-    textarea!.value = "<article>typed</article>";
-    textarea!.dispatchEvent(new Event("input", { bubbles: true }));
+    view!.dispatch({
+      changes: {
+        from: 0,
+        to: view!.state.doc.length,
+        insert: "<article>typed</article>"
+      }
+    });
     expect(onChange).toHaveBeenCalledTimes(1);
     expect(onChange).toHaveBeenCalledWith("<article>typed</article>");
 
-    const focus = vi.spyOn(textarea!, "focus");
+    const focus = vi.spyOn(view!.contentDOM, "focus");
     editor.focus();
     expect(focus).toHaveBeenCalledOnce();
 
     editor.destroy();
     expect([...host.childNodes]).toEqual(expect.arrayContaining([sibling]));
-    expect(host.querySelector("textarea")).toBeNull();
+    expect(host.querySelector(".cm-editor")).toBeNull();
   });
 
-  it("uses textarea.value rather than parsing the body fragment", async () => {
+  it("renders unsafe-looking source only as editable text", async () => {
     const host = document.createElement("div");
     const editor = new SourceBodyEditor();
     const fragment = '<img src=x onerror="window.__galleyProbe = true"><script>probe</script>';
@@ -48,6 +67,7 @@ describe("SourceBodyEditor", () => {
 
     expect(host.querySelector("img")).toBeNull();
     expect(host.querySelector("script")).toBeNull();
+    expect(host.textContent).toContain("window.__galleyProbe");
     expect(editor.getHtml()).toBe(fragment);
     editor.destroy();
   });
@@ -65,11 +85,9 @@ describe("SourceBodyEditor", () => {
       code: "editor_already_mounted"
     });
 
-    const detachedTextarea = host.querySelector("textarea")!;
     editor.destroy();
     editor.destroy();
-    detachedTextarea.value = "after destroy";
-    detachedTextarea.dispatchEvent(new Event("input"));
+    expect(host.querySelector(".cm-editor")).toBeNull();
     expect(options.onChange).not.toHaveBeenCalled();
   });
 
@@ -84,5 +102,35 @@ describe("SourceBodyEditor", () => {
     expect(() => editor.focus()).not.toThrow();
     expect(() => editor.setHtml("<p>after</p>")).not.toThrow();
     expect(editor.getHtml()).toBe("<p>after</p>");
+  });
+
+  it("formats nested body fragments with IDE-style indentation", async () => {
+    await expect(
+      formatSourceHtml("<section><section><p>text</p></section></section>")
+    ).resolves.toBe(
+      "<section>\n  <section><p>text</p></section>\n</section>\n"
+    );
+  });
+
+  it("applies the visible automatic formatting when Format HTML is clicked", async () => {
+    const host = document.createElement("div");
+    const onChange = vi.fn();
+    const editor = new SourceBodyEditor();
+    const source = "<section><section><p>text</p></section></section>";
+    await editor.mount(host, source, {
+      documentBaseUrl: "app://vault/",
+      onChange,
+      sourceFormatLabel: "Format HTML"
+    });
+
+    (host.querySelector('[data-action="format-source"]') as HTMLButtonElement).click();
+
+    await vi.waitFor(() =>
+      expect(onChange).toHaveBeenCalledWith(
+        "<section>\n  <section><p>text</p></section>\n</section>\n"
+      )
+    );
+    expect(editor.getHtml()).toContain("\n  <section>");
+    editor.destroy();
   });
 });

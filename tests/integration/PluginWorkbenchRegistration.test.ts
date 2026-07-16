@@ -9,7 +9,7 @@ afterEach(() => {
 });
 
 describe("Galley plugin workbench registration", () => {
-  it("opens only canonical Galley HTML through the command and never claims normal HTML", async () => {
+  it("opens the one final HTML through the command", async () => {
     const harness = makeApp("notes/a.galley.html");
     const plugin = new GalleyPlugin(harness.app, {} as PluginManifest);
     await plugin.onload();
@@ -32,11 +32,11 @@ describe("Galley plugin workbench registration", () => {
     expect(harness.revealLeaf).toHaveBeenCalledWith(harness.leaf);
 
     harness.active.path = "notes/a.html";
-    expect(command?.checkCallback?.(true)).toBe(false);
-    expect(command?.checkCallback?.(false)).toBe(false);
+    expect(command?.checkCallback?.(true)).toBe(true);
+    expect(command?.checkCallback?.(false)).toBe(true);
   });
 
-  it("adds a file-menu action only for a Galley file, not ordinary HTML or a lookalike folder", async () => {
+  it("adds file-menu actions for HTML files but not lookalike folders", async () => {
     const harness = makeApp("notes/a.md");
     const plugin = new GalleyPlugin(harness.app, {} as PluginManifest);
     await plugin.onload();
@@ -50,7 +50,10 @@ describe("Galley plugin workbench registration", () => {
 
     const normalMenu = new Menu();
     listener(normalMenu, { path: "notes/a.html", name: "a.html" });
-    expect(menuItems(normalMenu)).toHaveLength(0);
+    expect(menuItems(normalMenu).map(({ title }) => title)).toEqual([
+      "Open in Galley workbench",
+      "Open Galley preview"
+    ]);
 
     const folderMenu = new Menu();
     listener(folderMenu, {
@@ -60,6 +63,25 @@ describe("Galley plugin workbench registration", () => {
     });
     expect(menuItems(folderMenu)).toHaveLength(0);
   });
+
+  it("reuses the existing workbench leaf across repeated edit actions", async () => {
+    const harness = makeApp("notes/a.html");
+    const plugin = new GalleyPlugin(harness.app, {} as PluginManifest);
+    await plugin.onload();
+    const command = (plugin as unknown as {
+      commands: Array<{
+        id: string;
+        checkCallback?: (checking: boolean) => boolean;
+      }>;
+    }).commands.find(({ id }) => id === "open-current-galley-in-workbench");
+
+    command?.checkCallback?.(false);
+    await vi.waitFor(() => expect(harness.getLeaf).toHaveBeenCalledTimes(1));
+    command?.checkCallback?.(false);
+    await vi.waitFor(() => expect(harness.revealLeaf).toHaveBeenCalledTimes(2));
+
+    expect(harness.getLeaf).toHaveBeenCalledTimes(1);
+  });
 });
 
 function makeApp(initialPath: string) {
@@ -67,9 +89,14 @@ function makeApp(initialPath: string) {
   const leaf = new WorkspaceLeaf();
   const revealLeaf = vi.fn();
   let fileMenu: ((menu: Menu, file: { path: string; name: string; children?: unknown[] }) => void) | null = null;
+  const getLeaf = vi.fn(() => leaf);
   const workspace = {
     getActiveFile: () => active,
-    getLeaf: () => leaf,
+    getLeavesOfType: (type: string) =>
+      (leaf as unknown as { state?: { type?: string } }).state?.type === type
+        ? [leaf]
+        : [],
+    getLeaf,
     revealLeaf,
     on: (name: string, callback: typeof fileMenu) => {
       if (name !== "file-menu" || !callback) throw new Error("unexpected event");
@@ -90,6 +117,7 @@ function makeApp(initialPath: string) {
     app,
     active,
     leaf,
+    getLeaf,
     revealLeaf,
     fileMenuListener: () => {
       if (!fileMenu) throw new Error("file menu was not registered");

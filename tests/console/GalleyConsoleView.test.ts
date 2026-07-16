@@ -9,6 +9,11 @@ import type { GalleyActions } from "../../src/console/GalleyActions";
 import type { GenerateArticleFormInput } from "../../src/console/ConsoleTypes";
 import { LocaleStore } from "../../src/i18n/LocaleStore";
 import type { LocalizedText } from "../../src/i18n/LocalizedText";
+import {
+  GenerationTaskStore,
+  type GenerationTaskController,
+  type GenerationTaskSnapshot
+} from "../../src/generation/GenerationTask";
 
 afterEach(() => {
   document.body.replaceChildren();
@@ -36,10 +41,10 @@ describe("GalleyConsoleView", () => {
       )
     ).toEqual([
       "Console",
+      "Generation",
       "Articles",
       "Themes",
       "Skill",
-      "Export configurations",
       "Settings"
     ]);
     expect(view.contentEl.querySelector(".galley-console__task")?.textContent).toContain(
@@ -84,6 +89,9 @@ describe("GalleyConsoleView", () => {
           { version: "2026.7", source: "imported", active: true, valid: true }
         ],
         readSettings: async () => ({
+          generationAgent: "plugin",
+          codexCliPath: "codex",
+          claudeCliPath: "claude",
           baseUrl: "https://api.example.com/v1",
           model: "model-home",
           secretId: "provider-key",
@@ -102,7 +110,7 @@ describe("GalleyConsoleView", () => {
 
     expect(view.contentEl.querySelector(".galley-console__task")).not.toBeNull();
     expect(view.contentEl.querySelector(".galley-console__recent")).not.toBeNull();
-    expect(view.contentEl.querySelector(".galley-console__quick-actions")).not.toBeNull();
+    expect(view.contentEl.querySelector(".galley-console__quick-actions")).toBeNull();
     expect(view.contentEl.textContent).toContain("model-home");
     expect(view.contentEl.textContent).toContain("2026.7");
     expect(view.contentEl.querySelector(".galley-console__readiness")?.textContent)
@@ -110,22 +118,15 @@ describe("GalleyConsoleView", () => {
     expect(runDiagnostic).not.toHaveBeenCalled();
     expect(
       [...view.contentEl.querySelectorAll<HTMLInputElement>('[name="themeId"]')]
-        .map((option) => [option.value, option.nextElementSibling?.textContent])
-    ).toEqual([
-      ["paper", "Paperpaper"],
-      ["custom", "Customcustom"]
-    ]);
+        .map((option) => option.value)
+    ).toEqual(["paper", "custom"]);
+    expect(view.contentEl.querySelectorAll(".galley-theme-preview")).toHaveLength(2);
     expect(view.contentEl.querySelector('[data-action="continue-edit"]')?.textContent)
       .toContain("Continue");
-    for (const action of [
-      "theme-lab",
-      "open-themes",
-      "open-skills",
-      "open-exports",
-      "open-settings"
-    ]) {
-      expect(view.contentEl.querySelector(`[data-action="${action}"]`)).not.toBeNull();
+    for (const action of ["theme-lab", "open-themes", "open-skills", "open-exports"]) {
+      expect(view.contentEl.querySelector(`[data-action="${action}"]`)).toBeNull();
     }
+    expect(view.contentEl.querySelector('[data-action="open-settings"]')).not.toBeNull();
     view.contentEl.querySelector<HTMLButtonElement>('[data-action="continue-edit"]')?.click();
     await vi.waitFor(() => expect(openWorkbench).toHaveBeenCalledWith("article.galley.html"));
   });
@@ -263,7 +264,7 @@ describe("GalleyConsoleView", () => {
       view.contentEl.querySelector<HTMLButtonElement>('[data-action="generate"]')?.disabled
     ).toBe(true);
     await vi.waitFor(() =>
-      expect(view.contentEl.textContent).toContain("3/5 The model is generating HTML")
+      expect(view.contentEl.textContent).toContain("3/4 The Agent is using the Skill to generate HTML")
     );
     expect(
       [...view.contentEl.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(
@@ -306,6 +307,162 @@ describe("GalleyConsoleView", () => {
     );
   });
 
+  it("shows live model output and leaves plugin-owned generation running on close", async () => {
+    let receivedInput: GenerateArticleFormInput | undefined;
+    let receivedSignal: AbortSignal | undefined;
+    let finish: (() => void) | undefined;
+    const generationTask = new GenerationTaskStore({
+      createTaskId: () => "view-task",
+      run: async (input, signal) => {
+        receivedInput = input;
+        receivedSignal = signal;
+        await new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+        return {
+          status: "committed",
+          htmlPath: "current.galley.html",
+          sidecarPath: "current.galley.json"
+        };
+      },
+      failureMessage: () => "failed"
+    });
+    const { view } = fixture({
+      generationTask,
+      inspectActiveContext: async () => ({
+        kind: "markdown",
+        path: "current.md",
+        name: "current.md"
+      })
+    });
+    await view.onOpen();
+
+    view.contentEl.querySelector<HTMLButtonElement>('[data-action="generate"]')?.click();
+    await vi.waitFor(() => expect(view.route()).toBe("generation"));
+    receivedInput?.onModelEvent?.({
+      type: "prompt",
+      text: "INITIAL PROMPT SENT TO AGENT",
+      at: 0
+    });
+    receivedInput?.onModelEvent?.({ type: "request-start", requestId: 1, at: 1 });
+    receivedInput?.onModelEvent?.({
+      type: "text-delta",
+      requestId: 1,
+      text: "<article>visible output</article>",
+      at: 2
+    });
+    await vi.waitFor(() =>
+      expect(view.contentEl.textContent).toContain("visible output")
+    );
+    expect(
+      view.contentEl.querySelector(".galley-generation__message.is-user")
+        ?.textContent
+    ).toContain("INITIAL PROMPT SENT TO AGENT");
+    expect(
+      view.contentEl.querySelector(".galley-generation__message.is-assistant")
+        ?.textContent
+    ).toContain("visible output");
+
+    await view.onClose();
+    expect(receivedSignal?.aborted).toBe(false);
+    finish?.();
+    await vi.waitFor(() => expect(generationTask.snapshot().status).toBe("succeeded"));
+    generationTask.dispose();
+  });
+
+  it("preserves page and message scroll positions while generation updates", async () => {
+    let notify: (() => void) | undefined;
+    let snapshot: GenerationTaskSnapshot = {
+      status: "running",
+      taskId: "scroll-task",
+      sourcePath: "current.md",
+      stage: "generating",
+      startedAt: 0,
+      elapsedMs: 1_000,
+      prompt: {
+        text: "A long initial prompt that the user has scrolled.",
+        at: 0
+      },
+      turns: [{
+        requestId: 1,
+        text: "A long model response that the user has scrolled.",
+        status: "streaming",
+        startedAt: 1,
+        truncated: false
+      }]
+    };
+    const generationTask: GenerationTaskController = {
+      snapshot: () => snapshot,
+      subscribe: (listener) => {
+        notify = listener;
+        return () => {
+          notify = undefined;
+        };
+      },
+      start: () => "scroll-task",
+      wait: async () => snapshot,
+      cancel: vi.fn(),
+      dispose: vi.fn()
+    };
+    const { view } = fixture({ generationTask });
+    await view.onOpen();
+    await view.navigate("generation");
+
+    const previousMain = requiredElement(
+      view.contentEl,
+      ".galley-console__main"
+    );
+    const previousConversation = requiredElement(
+      view.contentEl,
+      '[data-scroll-key="generation-conversation"]'
+    );
+    const previousPrompt = requiredElement(
+      view.contentEl,
+      '[data-scroll-key="generation-prompt"]'
+    );
+    const previousTurn = requiredElement(
+      view.contentEl,
+      '[data-scroll-key="generation-turn-1"]'
+    );
+    setScrollPosition(previousMain, 180, 1_200, 500);
+    setScrollPosition(previousConversation, 140, 900, 420);
+    setScrollPosition(previousPrompt, 60, 600, 240);
+    setScrollPosition(previousTurn, 90, 800, 300);
+
+    const firstTurn = snapshot.turns[0];
+    if (!firstTurn) throw new Error("Missing generation turn");
+    snapshot = {
+      ...snapshot,
+      elapsedMs: 2_000,
+      turns: [{
+        ...firstTurn,
+        text: `${firstTurn.text}\nNew streamed output.`
+      }]
+    };
+    notify?.();
+
+    await vi.waitFor(() =>
+      expect(view.contentEl.querySelector(".galley-console__main"))
+        .not.toBe(previousMain)
+    );
+    expect(requiredElement(
+      view.contentEl,
+      ".galley-console__main"
+    ).scrollTop).toBe(180);
+    expect(requiredElement(
+      view.contentEl,
+      '[data-scroll-key="generation-conversation"]'
+    ).scrollTop).toBe(140);
+    expect(requiredElement(
+      view.contentEl,
+      '[data-scroll-key="generation-prompt"]'
+    ).scrollTop).toBe(60);
+    expect(requiredElement(
+      view.contentEl,
+      '[data-scroll-key="generation-turn-1"]'
+    ).scrollTop).toBe(90);
+  });
+
   it("cancels only console-owned work and disposes subscriptions once", async () => {
     let receivedSignal: AbortSignal | undefined;
     const unsubscribeLocale = vi.fn();
@@ -344,6 +501,25 @@ describe("GalleyConsoleView", () => {
   });
 });
 
+function requiredElement(container: HTMLElement, selector: string): HTMLElement {
+  const element = container.querySelector<HTMLElement>(selector);
+  if (!element) throw new Error(`Missing test element: ${selector}`);
+  return element;
+}
+
+function setScrollPosition(
+  element: HTMLElement,
+  top: number,
+  scrollHeight: number,
+  clientHeight: number
+): void {
+  Object.defineProperties(element, {
+    scrollHeight: { configurable: true, value: scrollHeight },
+    clientHeight: { configurable: true, value: clientHeight }
+  });
+  element.scrollTop = top;
+}
+
 function fixture(
   options: {
     mobile?: boolean;
@@ -352,6 +528,7 @@ function fixture(
     generateActiveMarkdown?: GalleyActions["generateActiveMarkdown"];
     setLanguage?: GalleyActions["setLanguage"];
     subscribeContext?: (listener: () => void) => () => void;
+    generationTask?: GenerationTaskController;
     desktop?: Partial<NonNullable<GalleyActions["desktop"]>>;
   } = {}
 ) {
@@ -402,6 +579,9 @@ function fixture(
             ],
             listSecrets: async () => ["fixture-key", "provider-key"],
             readSettings: async () => ({
+              generationAgent: "plugin",
+              codexCliPath: "codex",
+              claudeCliPath: "claude",
               baseUrl: "https://api.example.com/v1",
               model: "fixture-model",
               secretId: "fixture-key",
@@ -423,7 +603,8 @@ function fixture(
     mobile: options.mobile ?? false,
     ...(options.subscribeContext
       ? { subscribeContext: options.subscribeContext }
-      : {})
+      : {}),
+    ...(options.generationTask ? { generationTask: options.generationTask } : {})
   });
   document.body.append(view.containerEl);
   return { view, actions, locale };

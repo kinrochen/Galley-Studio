@@ -57,15 +57,31 @@ describe("GalleyWorkbenchView", () => {
     });
   });
 
-  it("rejects ordinary HTML and sidecars before asking the opener", async () => {
+  it("opens a single final HTML file and still rejects sidecars", async () => {
     const fixture = makeFixture();
-    await expect(fixture.view.openPath("notes/a.html")).rejects.toMatchObject({
-      code: "galley_path_invalid"
-    });
+    await expect(fixture.view.openPath("notes/a.html")).resolves.toBeUndefined();
     await expect(fixture.view.openPath("notes/a.galley.json")).rejects.toMatchObject({
       code: "galley_path_invalid"
     });
-    expect(fixture.openDocument).not.toHaveBeenCalled();
+    expect(fixture.openDocument).toHaveBeenCalledWith("notes/a.html");
+  });
+
+  it("opens the file state supplied by Obsidian extension routing", async () => {
+    const fixture = makeFixture();
+
+    await fixture.view.setState(
+      { file: "notes/from-explorer.html" },
+      { history: false }
+    );
+
+    expect(fixture.openDocument).toHaveBeenCalledWith(
+      "notes/from-explorer.html"
+    );
+    expect(fixture.view.getState()).toEqual({
+      file: "notes/from-explorer.html"
+    });
+    expect(fixture.view.contentEl.querySelector(".galley-mode-switcher"))
+      .not.toBeNull();
   });
 
   it("captures body edits and destroys each adapter exactly once across modes and close", async () => {
@@ -85,6 +101,23 @@ describe("GalleyWorkbenchView", () => {
     await fixture.view.onClose();
     expect(fixture.source.destroyCalls).toBe(1);
     expect(fixture.visual.destroyCalls).toBe(1);
+  });
+
+  it("copies the complete current HTML document instead of only the editor body", async () => {
+    const copyHtml = vi.fn(async (_html: string) => undefined);
+    const reportCopyOutcome = vi.fn();
+    const fixture = makeFixture({ copyHtml, reportCopyOutcome });
+    await fixture.view.openPath("a.galley.html");
+    fixture.visual.emit("<article><p>current unsaved edit</p></article>");
+
+    await fixture.view.copyCurrentHtml();
+
+    expect(copyHtml).toHaveBeenCalledTimes(1);
+    expect(copyHtml.mock.calls[0]?.[0]).toMatch(/^<!DOCTYPE html>/u);
+    expect(copyHtml.mock.calls[0]?.[0]).toContain("current unsaved edit");
+    expect(reportCopyOutcome).toHaveBeenCalledWith(
+      "Copied the complete HTML document."
+    );
   });
 
   it("flushes a dirty edit on close before the 800ms debounce expires", async () => {
@@ -385,6 +418,8 @@ function makeFixture(options: {
   history?: HistorySnapshot[];
   canEdit?: boolean;
   locale?: LocalizedText;
+  copyHtml?: (html: string) => Promise<void>;
+  reportCopyOutcome?: (message: string) => void;
 } = {}) {
   const session = new FakeSession(options.conflictOnAuto);
   const document: WorkbenchDocument = {
@@ -408,6 +443,10 @@ function makeFixture(options: {
     createSourceEditor: () => source,
     openCopy,
     confirm: async () => true
+    ,...(options.copyHtml ? { copyHtml: options.copyHtml } : {})
+    ,...(options.reportCopyOutcome
+      ? { reportCopyOutcome: options.reportCopyOutcome }
+      : {})
     ,...(options.locale ? { locale: options.locale } : {})
   });
   return { view, session, document, visual, source, openDocument, openCopy };

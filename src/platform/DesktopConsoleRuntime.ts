@@ -1,11 +1,10 @@
 import {
   Modal,
   Notice,
-  type App,
-  type Plugin,
-  type WorkspaceLeaf
+  type App
 } from "obsidian";
 import { generateCurrentArticle } from "../commands/GenerateCurrentArticle";
+import { LocalCliChatClient } from "../ai/LocalCliChatClient";
 import type {
   DesktopGalleyActions,
   SettingsSnapshot,
@@ -17,47 +16,35 @@ import type {
 } from "../console/ConsoleTypes";
 import { runConnectionDiagnostic, type ConnectionDiagnosticResult } from "../diagnostics/ConnectionDiagnostic";
 import { createObsidianTransport } from "../diagnostics/ObsidianTransport";
-import { ArtifactRepository } from "../documents/ArtifactRepository";
-import type { OpenedGalleyDocumentSession } from "../documents/DocumentSessionOpener";
-import { ObsidianDocumentSessionOpener } from "../documents/ObsidianDocumentSessionOpener";
-import { EditorFactory } from "../editor/EditorFactory";
-import { EditorResourceResolver } from "../editor/EditorResourceResolver";
+import { SingleHtmlArtifactRepository } from "../documents/SingleHtmlArtifactRepository";
 import {
   normalizeExportConfiguration,
   type ExportConfiguration
 } from "../export/ExportConfiguration";
-import { ExportService } from "../export/ExportService";
-import { ObsidianExportArtifactWriter } from "../export/ObsidianExportArtifactWriter";
-import { RichTextClipboard } from "../export/RichTextClipboard";
-import {
-  PortableInlineProfile,
-  StandardWebProfile,
-  WechatProfile
-} from "../export/profiles";
 import type { LocalizedText } from "../i18n/LocalizedText";
-import type { MessageKey } from "../i18n/Resources";
 import type { PlatformCapabilities } from "./PlatformCapabilities";
 import { ObsidianSecretStore } from "../secrets/SecretStore";
 import { normalizeSettings, type GalleySettings } from "../settings/GalleySettings";
 import { SkillVirtualFileSystem } from "../skill/SkillVirtualFileSystem";
-import {
-  GALLEY_THEME_LAB_VIEW_TYPE,
-  ThemeLabView
-} from "../theme-lab/ThemeLabView";
 import { BuiltInThemeRepository } from "../themes/BuiltInThemeRepository";
 import {
-  GALLEY_WORKBENCH_VIEW_TYPE,
-  GalleyWorkbenchView,
-  type GalleyWorkbenchViewServices,
-  type WorkbenchDocument
-} from "../workbench/GalleyWorkbenchView";
-import { loadActiveSkillPackage } from "./ProductionSkillContext";
+  generationModelLabel,
+  loadActiveSkillPackage
+} from "./ProductionSkillContext";
 import { ObsidianArtifactVault } from "./ObsidianArtifactVault";
 import * as themeRuntime from "./DesktopThemeRuntime";
 import {
-  createProductionGeneration,
-  createProductionWechatRepairer
+  createProductionGeneration
 } from "./DesktopGenerationRuntime";
+import { openThemeLab, openWorkbench } from "./DesktopViewRegistry";
+
+export {
+  createThemeLabView,
+  createWorkbenchView,
+  openThemeLab,
+  openWorkbench,
+  registerDesktopViews
+} from "./DesktopViewRegistry";
 
 export interface DesktopConsoleHost {
   readonly app: App;
@@ -68,20 +55,6 @@ export interface DesktopConsoleHost {
   loadData(): Promise<unknown>;
   saveData(value: unknown): Promise<void>;
   saveSettings(): Promise<void>;
-}
-
-export function registerDesktopViews(
-  plugin: Pick<Plugin, "registerView">,
-  host: DesktopConsoleHost
-): void {
-  const editorFactory = new EditorFactory();
-  const opener = new ObsidianDocumentSessionOpener(host.app.vault);
-  plugin.registerView(GALLEY_THEME_LAB_VIEW_TYPE, (leaf) =>
-    createThemeLabView(leaf, host)
-  );
-  plugin.registerView(GALLEY_WORKBENCH_VIEW_TYPE, (leaf) =>
-    createWorkbenchView(leaf, host, opener, editorFactory)
-  );
 }
 
 export function createDesktopActions(host: DesktopConsoleHost): DesktopGalleyActions {
@@ -119,6 +92,15 @@ export function createDesktopActions(host: DesktopConsoleHost): DesktopGalleyAct
           valid: true
         }))
       ];
+    },
+    readActiveSkill: async () => {
+      const active = await loadActiveSkillPackage(host.app, host.getSettings());
+      return {
+        id: active.skillPackage.id,
+        version: active.skillPackage.version,
+        files: [...active.skillPackage.files.keys()].sort(),
+        instructions: active.skillPackage.files.get("SKILL.md") ?? ""
+      };
     },
     importSkill: (bytes) => themeRuntime.importSkillArchive(host.app, bytes),
     activateSkill: async (version) => {
@@ -174,8 +156,9 @@ export async function generateActiveMarkdown(
   input: GenerateArticleFormInput,
   signal: AbortSignal
 ): Promise<GeneratedArticleResult> {
-  const activeFile = input.sourcePath
-    ? host.app.vault.getFileByPath(input.sourcePath)
+  const getFileByPath = host.app.vault.getFileByPath?.bind(host.app.vault);
+  const activeFile = input.sourcePath && getFileByPath
+    ? getFileByPath(input.sourcePath)
     : host.app.workspace.getActiveFile();
   const paths = await generateCurrentArticle(
     {
@@ -190,11 +173,13 @@ export async function generateActiveMarkdown(
       ...(input.themeId ? { manualThemeId: input.themeId } : {}),
       ...(input.onProgress ? { progress: input.onProgress } : {}),
       createPipeline: (settings, generationSignal) =>
-        createProductionGeneration(host.app, settings, generationSignal),
-      createRepository: (settings) =>
-        new ArtifactRepository(new ObsidianArtifactVault(host.app.vault), {
-          outputFolder: settings.outputFolder
-        }),
+        createProductionGeneration(
+          host.app,
+          settings,
+          generationSignal,
+          input.onModelEvent
+        ),
+      createRepository: () => new SingleHtmlArtifactRepository(host.app.vault),
       text: host.locale,
       notice: (message) => new Notice(message),
       openArtifact: (path) => openWorkbench(host.app, path)
@@ -204,7 +189,7 @@ export async function generateActiveMarkdown(
   return {
     status: "committed",
     htmlPath: paths.html,
-    sidecarPath: paths.sidecar
+    sidecarPath: ""
   };
 }
 
@@ -212,23 +197,6 @@ export async function runAndReportDiagnostic(host: DesktopConsoleHost): Promise<
   const result = await runDiagnostic(host, new AbortController().signal);
   new Notice(diagnosticSummary(result, host.locale));
   new ConnectionDiagnosticModal(host.app, result, host.locale).open();
-}
-
-export async function openWorkbench(app: App, path: string): Promise<void> {
-  if (!path.endsWith(".galley.html")) return;
-  const leaf = app.workspace.getLeaf("tab");
-  await leaf.setViewState({
-    type: GALLEY_WORKBENCH_VIEW_TYPE,
-    state: { path },
-    active: true
-  });
-  app.workspace.revealLeaf(leaf);
-}
-
-export async function openThemeLab(app: App): Promise<void> {
-  const leaf = app.workspace.getLeaf("tab");
-  await leaf.setViewState({ type: GALLEY_THEME_LAB_VIEW_TYPE, active: true });
-  app.workspace.revealLeaf(leaf);
 }
 
 async function listThemes(host: DesktopConsoleHost): Promise<readonly ThemeSummary[]> {
@@ -248,112 +216,6 @@ async function listThemes(host: DesktopConsoleHost): Promise<readonly ThemeSumma
     (theme) => ({ ...theme, builtIn: false })
   );
   return [...builtIns, ...custom];
-}
-
-export function createThemeLabView(
-  leaf: WorkspaceLeaf,
-  host: DesktopConsoleHost
-): ThemeLabView {
-  return new ThemeLabView(leaf, {
-    supportsVision: async () => {
-      try {
-        return await themeRuntime.supportsThemeVision(host.app, host.getSettings());
-      } catch {
-        return false;
-      }
-    },
-    generate: (input, signal) =>
-      themeRuntime.generateThemeDraft(
-        host.app,
-        host.getSettings(),
-        input,
-        signal
-      ),
-    save: (draft) =>
-      themeRuntime.saveThemeDraft(host.app, draft, host.getSettings()),
-    report: (message) => new Notice(message),
-    locale: host.locale
-  });
-}
-
-export function createWorkbenchView(
-  leaf: WorkspaceLeaf,
-  host: DesktopConsoleHost,
-  opener = new ObsidianDocumentSessionOpener(host.app.vault),
-  editorFactory = new EditorFactory()
-): GalleyWorkbenchView {
-  const resourceResolver = new EditorResourceResolver((path) => {
-    const file = host.app.vault.getFileByPath(path);
-    return file ? host.app.vault.getResourcePath(file) : path;
-  });
-  const services: GalleyWorkbenchViewServices = {
-    capabilities: host.capabilities,
-    openDocument: async (path) => asWorkbenchDocument(await opener.open(path)),
-    createVisualEditor: () => editorFactory.createVisual(host.capabilities),
-    createSourceEditor: () => editorFactory.createSource(host.capabilities),
-    openCopy: (path) => openWorkbench(host.app, path),
-    confirm: async (message) => window.confirm(message),
-    resourceResolver,
-    documentBaseUrl: () => "app://vault/",
-    exportConfigurations: host.getSettings().exportConfigurations,
-    exportDocument: async ({ session, documentPath, configuration }, signal) => {
-      const documentId = session.documentId?.();
-      const recordExport = session.recordExport?.bind(session);
-      if (!documentId || !recordExport) {
-        throw new Error("The production document session cannot record exports.");
-      }
-      const service = new ExportService({
-        profiles: [
-          new StandardWebProfile(),
-          new PortableInlineProfile(),
-          new WechatProfile()
-        ],
-        writer: new ObsidianExportArtifactWriter(host.app.vault),
-        recorder: { record: recordExport },
-        repairer: {
-          repair: async (html, repairSignal) =>
-            createProductionWechatRepairer(
-              host.app,
-              host.getSettings()
-            ).repair(html, repairSignal)
-        }
-      });
-      const result = await service.export(
-        {
-          source: {
-            htmlPath: documentPath,
-            documentId,
-            html: session.html(),
-            reservedPaths: session.exportPaths?.() ?? []
-          },
-          configuration
-        },
-        signal
-      );
-      return { path: result.path, html: result.html };
-    },
-    copyExportHtml: (html) => new RichTextClipboard().copy(html),
-    saveExportConfiguration: (configuration) =>
-      saveExportConfiguration(host, configuration),
-    reportExportOutcome: (message) => new Notice(message),
-    locale: host.locale
-  };
-  return new GalleyWorkbenchView(leaf, services);
-}
-
-function asWorkbenchDocument(
-  session: OpenedGalleyDocumentSession
-): WorkbenchDocument {
-  const recovery = session.recoveryState();
-  return {
-    session,
-    recovery: {
-      status: recovery.status,
-      quarantinedTransactionId:
-        recovery.status === "ready" ? null : recovery.transactionId
-    },
-    listHistory: async () => [...(await session.history())]
-  };
 }
 
 async function saveExportConfiguration(
@@ -377,19 +239,54 @@ async function runDiagnostic(
   host: DesktopConsoleHost,
   signal: AbortSignal
 ): Promise<ConnectionDiagnosticResult> {
+  const settings = host.getSettings();
+  if (settings.generationAgent !== "plugin") {
+    const model = generationModelLabel(settings);
+    try {
+      const agent = settings.generationAgent;
+      const client = new LocalCliChatClient({
+        agent,
+        executable: agent === "codex-cli"
+          ? settings.codexCliPath
+          : settings.claudeCliPath,
+        cwd: vaultWorkingDirectory(host.app),
+        timeoutMs: settings.timeoutMs
+      });
+      await client.checkModelAvailable(signal);
+      return { ok: true, model };
+    } catch (error) {
+      return {
+        ok: false,
+        model,
+        errorCode: safeErrorCode(error)
+      };
+    }
+  }
   return runConnectionDiagnostic(
     {
       settings: host.getSettings(),
       secretStore: new ObsidianSecretStore(host.app),
-      transport: createObsidianTransport(),
-      loadSkill: () => loadActiveSkillPackage(host.app, host.getSettings())
+      transport: createObsidianTransport()
     },
     signal
   );
 }
 
+function safeErrorCode(error: unknown): string {
+  return typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof error.code === "string" &&
+    /^[a-z0-9_]{1,64}$/u.test(error.code)
+    ? error.code
+    : "diagnostic_failed";
+}
+
 function settingsSnapshot(settings: GalleySettings): SettingsSnapshot {
   return {
+    generationAgent: settings.generationAgent,
+    codexCliPath: settings.codexCliPath,
+    claudeCliPath: settings.claudeCliPath,
     baseUrl: settings.baseUrl,
     model: settings.model,
     secretId: settings.secretId,
@@ -435,42 +332,10 @@ class ConnectionDiagnosticModal extends Modal {
       text.t(result.ok ? "diagnostic.passed" : "diagnostic.failed")
     );
     appendFact(this.contentEl, text.t("diagnostic.model"), result.model);
-    appendCapability(this.contentEl, "diagnostic.tools", result.capabilities.tools, text);
-    appendCapability(
-      this.contentEl,
-      "diagnostic.streaming",
-      result.capabilities.streaming,
-      text
-    );
-    appendCapability(this.contentEl, "diagnostic.vision", result.capabilities.vision, text);
-    appendFact(this.contentEl, text.t("diagnostic.skillVersion"), result.skillVersion);
-    appendFact(this.contentEl, text.t("diagnostic.skillLoadMode"), result.skillLoadMode);
     if (result.errorCode) {
       appendFact(this.contentEl, text.t("diagnostic.errorCode"), result.errorCode);
     }
-    const filesHeading = document.createElement("p");
-    filesHeading.textContent = text.t("diagnostic.skillFiles");
-    const files = document.createElement("ul");
-    for (const path of result.skillFiles) {
-      const item = document.createElement("li");
-      item.textContent = path;
-      files.append(item);
-    }
-    this.contentEl.append(filesHeading, files);
   }
-}
-
-function appendCapability(
-  container: HTMLElement,
-  label: MessageKey,
-  supported: boolean,
-  text: LocalizedText
-): void {
-  appendFact(
-    container,
-    text.t(label),
-    text.t(supported ? "diagnostic.supported" : "diagnostic.notObserved")
-  );
 }
 
 function appendFact(container: HTMLElement, label: string, value: string): void {
@@ -488,5 +353,12 @@ function diagnosticSummary(
       code: result.errorCode ?? "diagnostic_failed"
     });
   }
-  return text.t("diagnostic.notice.passed", { mode: result.skillLoadMode });
+  return text.t("diagnostic.notice.passed");
+}
+
+function vaultWorkingDirectory(app: App): string {
+  const adapter = app.vault.adapter as typeof app.vault.adapter & {
+    getBasePath?: () => string;
+  };
+  return adapter.getBasePath?.() ?? process.cwd();
 }

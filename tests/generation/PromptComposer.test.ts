@@ -182,6 +182,10 @@ describe("composeGenerationPrompt", () => {
     expect(prompt).toContain("return one complete HTML document");
     expect(prompt).toContain("DOCTYPE, html, head, and body");
     expect(prompt).toContain("Keep article styles inline");
+    expect(prompt).toContain(
+      "component 1 global container as the sole `body > article`"
+    );
+    expect(prompt).toContain("max-width:677px;margin:0 auto");
     expect(prompt).toContain("Scripts, event-handler attributes");
     expect(prompt).toContain("Do not return a Markdown code fence");
     expect(prompt).toContain("Do not return JSON or explanatory prose");

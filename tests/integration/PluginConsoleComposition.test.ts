@@ -10,7 +10,7 @@ import { afterEach, expect, it, vi } from "vitest";
 
 import GalleyPlugin from "../../src/main";
 import { GALLEY_CONSOLE_VIEW_TYPE } from "../../src/console/GalleyConsoleView";
-import { LAZY_WORKBENCH_VIEW_TYPE } from "../../src/platform/LazyDesktopView";
+import { GALLEY_WORKBENCH_VIEW_TYPE } from "../../src/workbench/GalleyWorkbenchView";
 import { normalizeSettings } from "../../src/settings/GalleySettings";
 import {
   OBSIDIAN_SESSION_PATHS,
@@ -41,7 +41,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-it("composes ribbon → real console action → lazy production workbench → export UI", async () => {
+it("composes ribbon → real console action → lazy production workbench → complete HTML copy", async () => {
   vi.stubGlobal("matchMedia", vi.fn((media: string) => ({
     matches: false,
     media,
@@ -52,6 +52,11 @@ it("composes ribbon → real console action → lazy production workbench → ex
     removeEventListener: vi.fn(),
     dispatchEvent: vi.fn(() => true)
   })));
+  const writeText = vi.fn(async (_html: string) => undefined);
+  Object.defineProperty(window.navigator, "clipboard", {
+    configurable: true,
+    value: { writeText }
+  });
   const fixture = await makeObsidianDocumentSessionFixture("plugin composition");
   const vault = persistentObsidianVault(fixture.backing);
   Object.assign(vault as object, {
@@ -143,45 +148,40 @@ it("composes ribbon → real console action → lazy production workbench → ex
 
   await vi.waitFor(() => {
     const lazyLeaf = leaves.find((leaf) =>
-      (leaf.state as { type?: string } | null)?.type === LAZY_WORKBENCH_VIEW_TYPE
+      (leaf.state as { type?: string } | null)?.type === GALLEY_WORKBENCH_VIEW_TYPE
     );
-    expect(lazyLeaf?.view?.getViewType()).toBe(LAZY_WORKBENCH_VIEW_TYPE);
+    expect(lazyLeaf?.view?.getViewType()).toBe(GALLEY_WORKBENCH_VIEW_TYPE);
+    expect(
+      lazyLeaf?.view?.contentEl.querySelector('[data-action="copy-html"]')
+    ).not.toBeNull();
     expect(
       lazyLeaf?.view?.contentEl.querySelector('[data-export-action="export"]')
-    ).not.toBeNull();
+    ).toBeNull();
   }, { timeout: 5_000 });
 
   const workbenchLeaf = leaves.find((leaf) =>
-    (leaf.state as { type?: string } | null)?.type === LAZY_WORKBENCH_VIEW_TYPE
+    (leaf.state as { type?: string } | null)?.type === GALLEY_WORKBENCH_VIEW_TYPE
   );
-  let exportButton: HTMLButtonElement | null | undefined;
+  expect(workbenchLeaf?.view?.contentEl.querySelector(":scope > .galley-workbench"))
+    .not.toBeNull();
+  let copyButton: HTMLButtonElement | null | undefined;
   await vi.waitFor(() => {
-    exportButton = workbenchLeaf?.view?.contentEl
-      .querySelector<HTMLButtonElement>('[data-export-action="export"]');
-    expect(exportButton).not.toBeNull();
-    expect(exportButton?.disabled).toBe(false);
+    copyButton = workbenchLeaf?.view?.contentEl
+      .querySelector<HTMLButtonElement>('[data-action="copy-html"]');
+    expect(copyButton).not.toBeNull();
+    expect(copyButton?.disabled).toBe(false);
   }, { timeout: 10_000 });
-  exportButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  copyButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
-  await vi.waitFor(() =>
+  await vi.waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+  expect(writeText.mock.calls[0]?.[0]).toMatch(/^<!DOCTYPE html>/u);
+  expect(writeText.mock.calls[0]?.[0]).toContain("plugin composition");
+  expect(revealLeaf).toHaveBeenCalled();
+  await vi.waitFor(() => {
     expect(
-      workbenchLeaf?.view?.contentEl.querySelector('[data-export-status]')?.textContent
-    ).toContain("exports/article.composition.html"),
-  { timeout: 20_000 });
-  await vi.waitFor(() =>
-    expect(consoleLeaf?.view?.contentEl.querySelector(".galley-console__status")?.textContent)
-      .toContain("Done")
-  , { timeout: 5_000 });
-  expect(fixture.backing.read("exports/article.composition.html"))
-    .toMatch(/^<!DOCTYPE html>/u);
-  const sidecar = JSON.parse(
-    fixture.backing.read(OBSIDIAN_SESSION_PATHS.sidecar) ?? "{}"
-  ) as { exports?: Array<{ profileId?: string; path?: string }> };
-  expect(sidecar.exports).toContainEqual(expect.objectContaining({
-    profileId: "standard-web",
-    path: "exports/article.composition.html"
-  }));
-  expect(revealLeaf).toHaveBeenCalledTimes(2);
+      consoleLeaf?.view?.contentEl.querySelector(".galley-console__status")?.textContent
+    ).toContain("Done");
+  }, { timeout: 5_000 });
 
   await Promise.all(leaves.map((leaf) => leaf.view?.onClose()));
   plugin.onunload();

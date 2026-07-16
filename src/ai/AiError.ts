@@ -1,5 +1,7 @@
 export type AiErrorCode =
   | "aborted"
+  | "cli_failed"
+  | "cli_not_found"
   | "http_error"
   | "invalid_base_url"
   | "invalid_response"
@@ -17,6 +19,8 @@ export interface AiErrorOptions {
 
 const MESSAGES: Readonly<Record<AiErrorCode, string>> = {
   aborted: "The AI request was cancelled.",
+  cli_failed: "The local generation CLI exited with an error.",
+  cli_not_found: "The local generation CLI executable was not found.",
   http_error: "The AI provider rejected the request.",
   invalid_base_url: "Invalid provider Base URL.",
   invalid_response: "The AI provider returned an invalid response.",

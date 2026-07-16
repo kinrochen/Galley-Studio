@@ -29,7 +29,7 @@ describe("GalleyPreviewView", () => {
     expect(frame.title).toBe("Galley 文章预览");
   });
 
-  it("opens only canonical Galley files in an empty-sandbox, no-referrer iframe", async () => {
+  it("opens the final HTML file in an empty-sandbox, no-referrer iframe", async () => {
     const openDocument = vi.fn(async () => ({ html: HTML }));
     const view = new GalleyPreviewView(new WorkspaceLeaf(), { openDocument });
 
@@ -42,10 +42,22 @@ describe("GalleyPreviewView", () => {
     expect(frame.srcdoc).toContain("Content-Security-Policy");
     expect(frame.srcdoc).not.toContain("<script");
     expect(view.contentEl.querySelector("textarea,[contenteditable=true]")).toBeNull();
-    await expect(view.openPath("notes/a.html")).rejects.toMatchObject({ code: "galley_preview_path_invalid" });
+    await expect(view.openPath("notes/a.html")).resolves.toBeUndefined();
+    await expect(view.openPath("notes/a.json")).rejects.toMatchObject({ code: "galley_preview_path_invalid" });
   });
 
-  it("opens a preview leaf without claiming an html extension", async () => {
+  it("opens the file state supplied by Obsidian extension routing", async () => {
+    const openDocument = vi.fn(async () => ({ html: HTML }));
+    const view = new GalleyPreviewView(new WorkspaceLeaf(), { openDocument });
+
+    await view.setState({ file: "notes/from-explorer.html" });
+
+    expect(openDocument).toHaveBeenCalledWith("notes/from-explorer.html");
+    expect(view.getState()).toEqual({ file: "notes/from-explorer.html" });
+    expect(view.contentEl.querySelector("iframe")).not.toBeNull();
+  });
+
+  it("opens an html file in a Galley preview leaf", async () => {
     const leaf = new WorkspaceLeaf();
     const workspace = {
       getLeaf: vi.fn(() => leaf),
@@ -62,6 +74,24 @@ describe("GalleyPreviewView", () => {
     expect(workspace.revealLeaf).toHaveBeenCalledWith(leaf);
   });
 
+  it("reuses the existing preview leaf instead of opening another tab", async () => {
+    const existing = new WorkspaceLeaf();
+    const workspace = {
+      getLeavesOfType: vi.fn(() => [existing]),
+      getLeaf: vi.fn(() => new WorkspaceLeaf()),
+      revealLeaf: vi.fn()
+    };
+
+    await openGalleyPreview(workspace, "notes/a.html");
+
+    expect(workspace.getLeaf).not.toHaveBeenCalled();
+    expect((existing as unknown as { state: unknown }).state).toMatchObject({
+      type: GALLEY_PREVIEW_VIEW_TYPE,
+      state: { path: "notes/a.html" }
+    });
+    expect(workspace.revealLeaf).toHaveBeenCalledWith(existing);
+  });
+
   it("resolves vault-relative images for srcdoc without leaking temporary markers", async () => {
     const html = HTML.replace("</p>", '<img src="images/cover.png" alt="cover"></p>');
     const view = new GalleyPreviewView(new WorkspaceLeaf(), {
@@ -74,5 +104,19 @@ describe("GalleyPreviewView", () => {
     const srcdoc = (view.contentEl.querySelector("iframe") as HTMLIFrameElement).srcdoc;
     expect(srcdoc).toContain('src="app://vault/images/cover.png"');
     expect(srcdoc).not.toContain("data-galley-original");
+  });
+
+  it("previews a generated body fragment instead of leaving the view blank", async () => {
+    const view = new GalleyPreviewView(new WorkspaceLeaf(), {
+      openDocument: async () => ({
+        html: '<section style="max-width: 677px"><p>generated fragment</p></section>'
+      })
+    });
+
+    await view.openPath("notes/generated.html");
+
+    const frame = view.contentEl.querySelector("iframe") as HTMLIFrameElement;
+    expect(frame.srcdoc).toContain("<body><section");
+    expect(frame.srcdoc).toContain("generated fragment");
   });
 });

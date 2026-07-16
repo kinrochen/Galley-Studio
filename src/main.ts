@@ -7,6 +7,7 @@ import {
   type WorkspaceLeaf
 } from "obsidian";
 import { MAX_SKILL_ARCHIVE_BYTES } from "./archive/ArchiveLimits";
+import { generationFailureMessage } from "./commands/GenerateCurrentArticle";
 import { ArticleCatalog, type ArticleCatalogVault } from "./console/ArticleCatalog";
 import {
   createGalleyActions,
@@ -21,6 +22,10 @@ import type { ConsoleRoute } from "./console/ConsoleTypes";
 import { isNormalizedVaultRelativePath } from "./documents/GalleySidecar";
 import { ObsidianDocumentSessionOpener } from "./documents/ObsidianDocumentSessionOpener";
 import { EditorResourceResolver } from "./editor/EditorResourceResolver";
+import {
+  GenerationTaskStore,
+  type GenerationTaskController
+} from "./generation/GenerationTask";
 import { LocaleStore } from "./i18n/LocaleStore";
 import {
   ENGLISH_LOCALIZED_TEXT,
@@ -30,11 +35,6 @@ import {
   derivePlatformCapabilities,
   type PlatformCapabilities
 } from "./platform/PlatformCapabilities";
-import {
-  LAZY_THEME_LAB_VIEW_TYPE,
-  LAZY_WORKBENCH_VIEW_TYPE,
-  LazyDesktopView
-} from "./platform/LazyDesktopView";
 import {
   GALLEY_PREVIEW_VIEW_TYPE,
   GalleyPreviewView,
@@ -49,12 +49,14 @@ import { GalleySettingTab } from "./settings/GalleySettingTab";
 
 export { ObsidianArtifactVault } from "./platform/ObsidianArtifactVault";
 
+const GALLEY_DESKTOP_HTML_VIEW_TYPE = "galley-workbench";
+
 export default class GalleyPlugin extends Plugin {
   settings: GalleySettings = normalizeSettings(undefined);
   readonly capabilities: PlatformCapabilities = derivePlatformCapabilities(
     Platform.isMobileApp
   );
-  readonly #generationControllers = new Set<AbortController>();
+  #generationTask: GenerationTaskController | null = null;
   #documentOpener: ObsidianDocumentSessionOpener | null = null;
   #locale: LocaleStore | null = null;
   #unsubscribeRibbonLocale: (() => void) | null = null;
@@ -80,15 +82,17 @@ export default class GalleyPlugin extends Plugin {
     let desktop: DesktopGalleyActions | undefined;
     if (this.canGenerate) {
       const host = this.#desktopHost();
-      this.registerView(
-        LAZY_THEME_LAB_VIEW_TYPE,
-        (leaf) => new LazyDesktopView(leaf, "theme-lab", host, this.localizedText)
-      );
-      this.registerView(
-        LAZY_WORKBENCH_VIEW_TYPE,
-        (leaf) => new LazyDesktopView(leaf, "workbench", host, this.localizedText)
-      );
+      const views = await this.#desktopViewRegistry();
+      views.registerDesktopViews(this, host);
       desktop = this.#lazyDesktopActions();
+      this.#generationTask = new GenerationTaskStore({
+        run: (input, signal) =>
+          this.#desktopRuntime().then((runtime) =>
+            runtime.generateActiveMarkdown(this.#desktopHost(), input, signal)
+          ),
+        failureMessage: (error, signal) =>
+          generationFailureMessage(error, signal, this.localizedText)
+      });
     }
     this.#actions = this.#createActions(desktop);
 
@@ -98,6 +102,12 @@ export default class GalleyPlugin extends Plugin {
     );
     this.registerView(GALLEY_PREVIEW_VIEW_TYPE, (leaf) =>
       this.#createPreviewView(leaf)
+    );
+    this.registerExtensions(
+      ["html"],
+      this.capabilities.canEdit
+        ? GALLEY_DESKTOP_HTML_VIEW_TYPE
+        : GALLEY_PREVIEW_VIEW_TYPE
     );
     const ribbon = this.addRibbonIcon("newspaper", this.localizedText.t("console.ribbon"), () =>
       this.openGalleyConsole()
@@ -116,8 +126,8 @@ export default class GalleyPlugin extends Plugin {
   onunload(): void {
     this.#unsubscribeRibbonLocale?.();
     this.#unsubscribeRibbonLocale = null;
-    for (const controller of this.#generationControllers) controller.abort();
-    this.#generationControllers.clear();
+    this.#generationTask?.dispose();
+    this.#generationTask = null;
     this.#articleCatalog?.dispose();
     this.#articleCatalog = null;
   }
@@ -155,7 +165,7 @@ export default class GalleyPlugin extends Plugin {
     workspace.revealLeaf(leaf);
   }
 
-  async checkModelConnectionAndSkillLoading(): Promise<void> {
+  async checkGenerationAgentAvailability(): Promise<void> {
     if (!this.canGenerate) return;
     await (await this.#desktopRuntime()).runAndReportDiagnostic(
       this.#desktopHost()
@@ -163,31 +173,22 @@ export default class GalleyPlugin extends Plugin {
   }
 
   async runGenerateCurrentArticle(): Promise<void> {
-    if (!this.canGenerate) return;
-    const controller = new AbortController();
-    this.#generationControllers.add(controller);
-    try {
-      await (await this.#desktopRuntime()).generateActiveMarkdown(
-        this.#desktopHost(),
-        {},
-        controller.signal
-      );
-    } catch {
-      // The typed generation adapter emits only allowlisted user notices.
-    } finally {
-      this.#generationControllers.delete(controller);
+    if (!this.canGenerate || !this.#generationTask) return;
+    const active = this.app.workspace.getActiveFile?.();
+    const taskId = this.#generationTask.start({
+      ...(active?.extension?.toLowerCase() === "md"
+        ? { sourcePath: active.path }
+        : {})
+    });
+    if (typeof this.app.workspace.getLeaf === "function") {
+      await this.openGalleyConsole("generation");
     }
+    await this.#generationTask.wait(taskId);
   }
 
   async openGalleyDocument(path: string): Promise<void> {
     if (!this.capabilities.canEdit || !isGalleyHtmlPath(path)) return;
-    const leaf = this.app.workspace.getLeaf("tab");
-    await leaf.setViewState({
-      type: LAZY_WORKBENCH_VIEW_TYPE,
-      state: { path },
-      active: true
-    });
-    this.app.workspace.revealLeaf(leaf);
+    await (await this.#desktopViewRegistry()).openWorkbench(this.app, path);
   }
 
   async openGalleyPreview(path: string): Promise<void> {
@@ -199,9 +200,7 @@ export default class GalleyPlugin extends Plugin {
 
   async openThemeLab(): Promise<void> {
     if (!this.canGenerate) return;
-    const leaf = this.app.workspace.getLeaf("tab");
-    await leaf.setViewState({ type: LAZY_THEME_LAB_VIEW_TYPE, active: true });
-    this.app.workspace.revealLeaf(leaf);
+    await (await this.#desktopViewRegistry()).openThemeLab(this.app);
   }
 
   async importCustomTheme(): Promise<void> {
@@ -281,9 +280,9 @@ export default class GalleyPlugin extends Plugin {
       }
     });
     this.addCommand({
-      id: "check-model-connection-and-skill-loading",
-      name: "Galley: Diagnostics / 诊断",
-      callback: () => this.checkModelConnectionAndSkillLoading()
+      id: "check-generation-agent-availability",
+      name: "Galley: Check Agent availability / 检查 Agent 可用性",
+      callback: () => this.checkGenerationAgentAvailability()
     });
     this.addCommand({
       id: "generate-current-article",
@@ -375,6 +374,11 @@ export default class GalleyPlugin extends Plugin {
         (await actions()).setThemeEnabled?.(id, enabled),
       deleteTheme: async (id) => (await actions()).deleteTheme?.(id) ?? false,
       listSkills: async () => (await actions()).listSkills?.() ?? [],
+      readActiveSkill: async () => {
+        const result = await (await actions()).readActiveSkill?.();
+        if (!result) throw new Error("Active Skill details are unavailable.");
+        return result;
+      },
       importSkill: async (bytes) => {
         const result = await (await actions()).importSkill?.(bytes);
         if (!result) throw new Error("Skill import did not return a version.");
@@ -424,7 +428,8 @@ export default class GalleyPlugin extends Plugin {
         return () => workspace.offref?.(ref);
       },
       subscribeArticles: (listener) =>
-        this.#articleCatalog?.subscribe(listener) ?? (() => undefined)
+        this.#articleCatalog?.subscribe(listener) ?? (() => undefined),
+      ...(this.#generationTask ? { generationTask: this.#generationTask } : {})
     });
   }
 
@@ -507,6 +512,10 @@ export default class GalleyPlugin extends Plugin {
     return import("./platform/DesktopConsoleRuntime");
   }
 
+  #desktopViewRegistry() {
+    return import("./platform/DesktopViewRegistry");
+  }
+
   #obsidianLocale(): string | undefined {
     const locale = (this.app as unknown as { locale?: unknown }).locale;
     return typeof locale === "string"
@@ -516,7 +525,7 @@ export default class GalleyPlugin extends Plugin {
 }
 
 function isGalleyHtmlPath(path: string): boolean {
-  return isNormalizedVaultRelativePath(path) && path.endsWith(".galley.html");
+  return isNormalizedVaultRelativePath(path) && path.endsWith(".html");
 }
 
 function isFolder(file: TAbstractFile): boolean {

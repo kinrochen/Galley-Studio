@@ -67,11 +67,13 @@ export class LazyDesktopView extends ItemView {
 
   async onOpen(): Promise<void> {
     if (this.#delegate) return;
+    this.contentEl.classList.add("galley-lazy-view-host");
     const runtime = await import("./DesktopConsoleRuntime");
     const delegate = (this.kind === "workbench"
       ? runtime.createWorkbenchView(this.leaf, this.host as never)
       : runtime.createThemeLabView(this.leaf, this.host as never)) as DelegatedDesktopView;
     this.#delegate = delegate;
+    delegate.contentEl.classList.add("galley-lazy-view-content");
     this.contentEl.replaceChildren(delegate.contentEl);
     await delegate.onOpen();
     await delegate.setState?.(this.#state, this.#stateResult);
@@ -81,5 +83,6 @@ export class LazyDesktopView extends ItemView {
     await this.#delegate?.onClose();
     this.#delegate = null;
     this.contentEl.replaceChildren();
+    this.contentEl.classList.remove("galley-lazy-view-host");
   }
 }

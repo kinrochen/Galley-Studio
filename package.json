@@ -1,6 +1,17 @@
 {
   "name": "galley-obsidian",
   "version": "0.1.0",
+  "description": "AI-driven Markdown-to-HTML publishing studio for Obsidian.",
+  "author": "Kinrochen",
+  "license": "AGPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/isjiamu/Galley.git"
+  },
+  "funding": {
+    "type": "individual",
+    "url": "https://ifdian.net/a/kinrochen"
+  },
   "private": true,
   "type": "module",
   "scripts": {
@@ -21,12 +32,19 @@
     "release": "npm run build && npm run audit:licenses && npm run audit:package && npm run audit:mobile && node tools/build-release.mjs && npm run audit:secrets"
   },
   "dependencies": {
+    "@codemirror/commands": "6.10.4",
+    "@codemirror/lang-html": "6.4.11",
+    "@codemirror/language": "6.12.4",
+    "@codemirror/view": "6.38.6",
+    "@lezer/highlight": "1.2.3",
+    "codemirror": "6.0.2",
     "dompurify": "3.4.12",
     "fflate": "0.8.3",
     "hugerte": "1.0.12",
     "mdast-util-from-markdown": "2.0.3",
     "mdast-util-gfm": "3.1.0",
     "micromark-extension-gfm": "3.0.0",
+    "prettier": "3.9.5",
     "zod": "4.4.3"
   },
   "devDependencies": {

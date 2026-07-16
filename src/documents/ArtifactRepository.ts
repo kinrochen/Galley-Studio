@@ -1,4 +1,4 @@
-import type { GeneratedDocument } from "../generation/GenerationPipeline";
+import type { GeneratedDocument } from "../generation/SkillDrivenGenerationTypes";
 import {
   buildGalleySidecarV1,
   isNormalizedVaultRelativePath,

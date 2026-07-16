@@ -1,12 +1,15 @@
 import type { GalleyLanguage } from "../i18n/LocalizedText";
-import type { GenerationStage } from "../generation/GenerationProgress";
+import type {
+  GenerationModelEvent,
+  GenerationStage
+} from "../generation/GenerationProgress";
 
 export type ConsoleRoute =
   | "home"
+  | "generation"
   | "articles"
   | "themes"
   | "skills"
-  | "exports"
   | "settings";
 
 export type MobileConsoleRoute = "home" | "articles";
@@ -76,6 +79,7 @@ export interface GenerateArticleFormInput {
   readonly themeId?: string;
   readonly sourcePath?: string;
   readonly onProgress?: (stage: GenerationStage) => void;
+  readonly onModelEvent?: (event: GenerationModelEvent) => void;
 }
 
 export interface GeneratedArticleResult {
@@ -92,7 +96,6 @@ export interface ConsoleNavigationItem {
     | "console.nav.articles"
     | "console.nav.themes"
     | "console.nav.skills"
-    | "console.nav.exports"
     | "console.nav.settings";
 }
 
@@ -102,10 +105,10 @@ export interface LanguageMutation {
 
 export const DESKTOP_CONSOLE_ROUTES: readonly ConsoleRoute[] = Object.freeze([
   "home",
+  "generation",
   "articles",
   "themes",
   "skills",
-  "exports",
   "settings"
 ]);
 

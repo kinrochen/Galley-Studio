@@ -17,7 +17,7 @@ export interface GalleySettingsPlugin extends Plugin {
   readonly localizedText?: LocalizedText;
   saveSettings(): Promise<void>;
   setLanguage(language: GalleySettings["language"]): Promise<void>;
-  checkModelConnectionAndSkillLoading(): Promise<void>;
+  checkGenerationAgentAvailability(): Promise<void>;
 }
 
 export class GalleySettingTab extends PluginSettingTab {
@@ -36,83 +36,67 @@ export class GalleySettingTab extends PluginSettingTab {
     this.#unsubscribeLocale ??= this.#text.subscribe(() => this.display());
     this.containerEl.replaceChildren();
 
-    new Setting(this.containerEl)
-      .setName(this.#text.t("console.settings.baseUrl"))
-      .setDesc(this.#text.t("settings.baseUrl.desc"))
-      .addText((component) =>
-        component.setValue(this.galley.settings.baseUrl).onChange(async (value) => {
-          this.galley.settings.baseUrl = value;
-          await this.galley.saveSettings();
-        })
-      );
+    const agentSetting = new Setting(this.containerEl)
+      .setName(this.#text.t("console.settings.agent"))
+      .setDesc(this.#text.t("console.settings.agentDescription"));
+    const agentSelect = document.createElement("select");
+    for (const [value, key] of [
+      ["plugin", "console.settings.agent.plugin"],
+      ["codex-cli", "console.settings.agent.codex"],
+      ["claude-cli", "console.settings.agent.claude"]
+    ] as const) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = this.#text.t(key);
+      agentSelect.append(option);
+    }
+    agentSelect.value = this.galley.settings.generationAgent;
+    agentSelect.addEventListener("change", () => {
+      const value = agentSelect.value;
+      if (value === "plugin" || value === "codex-cli" || value === "claude-cli") {
+        this.galley.settings.generationAgent = value;
+        void this.galley.saveSettings().then(() => this.display());
+      }
+    });
+    agentSetting.controlEl.append(agentSelect);
 
-    new Setting(this.containerEl)
-      .setName(this.#text.t("console.settings.model"))
-      .setDesc(this.#text.t("settings.model.desc"))
-      .addText((component) =>
-        component.setValue(this.galley.settings.model).onChange(async (value) => {
-          this.galley.settings.model = value;
-          await this.galley.saveSettings();
-        })
-      );
-
-    new Setting(this.containerEl)
-      .setName(this.#text.t("console.settings.secret"))
-      .setDesc(this.#text.t("settings.secret.desc"))
-      .addComponent((containerEl) =>
-        new SecretComponent(this.app, containerEl)
-          .setValue(this.galley.settings.secretId)
-          .onChange(async (secretId) => {
-            this.galley.settings.secretId = secretId;
+    if (this.galley.settings.generationAgent === "plugin") {
+      new Setting(this.containerEl)
+        .setName(this.#text.t("console.settings.baseUrl"))
+        .setDesc(this.#text.t("settings.baseUrl.desc"))
+        .addText((component) =>
+          component.setValue(this.galley.settings.baseUrl).onChange(async (value) => {
+            this.galley.settings.baseUrl = value;
             await this.galley.saveSettings();
           })
-      );
+        );
 
-    new Setting(this.containerEl)
-      .setName(this.#text.t("console.settings.temperature"))
-      .setDesc(this.#text.t("settings.temperature.desc"))
-      .addText((component) =>
-        component
-          .setValue(String(this.galley.settings.temperature))
-          .onChange(async (value) => {
-            this.galley.settings.temperature = Number(value);
+      new Setting(this.containerEl)
+        .setName(this.#text.t("console.settings.model"))
+        .setDesc(this.#text.t("settings.model.desc"))
+        .addText((component) =>
+          component.setValue(this.galley.settings.model).onChange(async (value) => {
+            this.galley.settings.model = value;
             await this.galley.saveSettings();
           })
-      );
+        );
 
-    new Setting(this.containerEl)
-      .setName(this.#text.t("console.settings.timeout"))
-      .setDesc(this.#text.t("settings.timeout.desc"))
-      .addText((component) =>
-        component
-          .setValue(String(this.galley.settings.timeoutMs))
-          .onChange(async (value) => {
-            this.galley.settings.timeoutMs = Number(value);
-            await this.galley.saveSettings();
-          })
-      );
-
-    new Setting(this.containerEl)
-      .setName(this.#text.t("console.settings.contextWindow"))
-      .setDesc(this.#text.t("settings.contextWindow.desc"))
-      .addText((component) =>
-        component
-          .setValue(String(this.galley.settings.contextWindow))
-          .onChange(async (value) => {
-            this.galley.settings.contextWindow = Number(value);
-            await this.galley.saveSettings();
-          })
-      );
-
-    new Setting(this.containerEl)
-      .setName(this.#text.t("console.settings.outputFolder"))
-      .setDesc(this.#text.t("settings.outputFolder.desc"))
-      .addText((component) =>
-        component.setValue(this.galley.settings.outputFolder).onChange(async (value) => {
-          this.galley.settings.outputFolder = value;
-          await this.galley.saveSettings();
-        })
-      );
+      new Setting(this.containerEl)
+        .setName(this.#text.t("console.settings.secret"))
+        .setDesc(this.#text.t("settings.secret.desc"))
+        .addComponent((containerEl) =>
+          new SecretComponent(this.app, containerEl)
+            .setValue(this.galley.settings.secretId)
+            .onChange(async (secretId) => {
+              this.galley.settings.secretId = secretId;
+              await this.galley.saveSettings();
+            })
+        );
+    } else {
+      new Setting(this.containerEl)
+        .setName(this.#text.t("console.settings.cliDiscovery"))
+        .setDesc(this.#text.t("console.settings.cliDiscoveryDescription"));
+    }
 
     const languageSetting = new Setting(this.containerEl)
       .setName(this.#text.t("settings.language.name"))
@@ -146,7 +130,7 @@ export class GalleySettingTab extends PluginSettingTab {
             .setButtonText(this.#text.t("console.settings.diagnostic"))
             .setCta()
             .onClick(() =>
-              this.galley.checkModelConnectionAndSkillLoading()
+              this.galley.checkGenerationAgentAvailability()
             )
         );
     }

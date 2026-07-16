@@ -9,13 +9,10 @@ import { heading } from "./ThemePage";
 import type { MessageKey } from "../i18n/Resources";
 
 type EditableSettingsKey =
+  | "generationAgent"
   | "baseUrl"
   | "model"
-  | "secretId"
-  | "temperature"
-  | "timeoutMs"
-  | "contextWindow"
-  | "outputFolder";
+  | "secretId";
 
 type EditableSettingsSnapshot = {
   -readonly [Key in EditableSettingsKey]: SettingsSnapshot[Key];
@@ -62,24 +59,39 @@ export async function renderSettingsPage(
     })
   );
   languageStatus.dataset.settingLanguage = "";
+  languageStatus.className = "galley-console__settings-language";
 
   const form = document.createElement("form");
   form.className = "galley-console__settings-form";
+  const agentSection = settingsSection(
+    options.text.t("console.settings.agent"),
+    options.text.t("console.settings.agentDescription")
+  );
   const providerSection = settingsSection(
     options.text.t("console.settings.provider"),
     options.text.t("console.settings.providerDescription")
   );
-  const generationSection = settingsSection(
-    options.text.t("console.settings.generation"),
-    options.text.t("console.settings.generationDescription")
-  );
+  const agentLabel = document.createElement("label");
+  agentLabel.textContent = options.text.t("console.settings.agent");
+  const agent = document.createElement("select");
+  agent.name = "generationAgent";
+  for (const [value, key] of [
+    ["plugin", "console.settings.agent.plugin"],
+    ["codex-cli", "console.settings.agent.codex"],
+    ["claude-cli", "console.settings.agent.claude"]
+  ] as const) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = options.text.t(key);
+    agent.append(option);
+  }
+  agent.value = options.state.generationAgent ?? "plugin";
+  agentLabel.append(agent);
+  agentSection.fields.append(agentLabel);
+
   const fields: Array<[keyof EditableSettingsSnapshot, MessageKeyLike, string]> = [
     ["baseUrl", "console.settings.baseUrl", String(options.state.baseUrl ?? "")],
-    ["model", "console.settings.model", String(options.state.model ?? "")],
-    ["temperature", "console.settings.temperature", String(options.state.temperature ?? 0.4)],
-    ["timeoutMs", "console.settings.timeout", String(options.state.timeoutMs ?? 120000)],
-    ["contextWindow", "console.settings.contextWindow", String(options.state.contextWindow ?? 128000)],
-    ["outputFolder", "console.settings.outputFolder", String(options.state.outputFolder ?? "")]
+    ["model", "console.settings.model", String(options.state.model ?? "")]
   ];
   const inputs = new Map<keyof EditableSettingsSnapshot, HTMLInputElement>();
   for (const [key, labelKey, value] of fields) {
@@ -88,24 +100,16 @@ export async function renderSettingsPage(
     const input = document.createElement("input");
     input.name = key;
     input.value = value;
-    if (key === "temperature") {
-      input.type = "number";
-      input.min = "0";
-      input.max = "2";
-      input.step = "0.1";
-    } else if (key === "timeoutMs" || key === "contextWindow") {
-      input.type = "number";
-      input.min = "1";
-      input.step = "1";
-    }
     input.addEventListener("input", () => update(options.state, key, input.value));
     inputs.set(key, input);
     label.append(input);
-    const target = key === "baseUrl" || key === "model"
-      ? providerSection.fields
-      : generationSection.fields;
-    target.append(label);
+    providerSection.fields.append(label);
   }
+  const discovery = appendText(
+    agentSection.section,
+    options.text.t("console.settings.cliDiscoveryDescription")
+  );
+  discovery.className = "galley-console__form-help";
   const secretLabel = document.createElement("label");
   secretLabel.textContent = options.text.t("console.settings.secret");
   const secret = document.createElement("select");
@@ -136,16 +140,34 @@ export async function renderSettingsPage(
   });
   secretLabel.append(secret);
   providerSection.fields.append(secretLabel);
+
+  const updateAgentVisibility = (): void => {
+    const selected = agent.value;
+    providerSection.section.hidden = selected !== "plugin";
+    discovery.hidden = selected === "plugin";
+  };
+  agent.addEventListener("change", () => {
+    const selected = agent.value;
+    if (selected === "plugin" || selected === "codex-cli" || selected === "claude-cli") {
+      options.state.generationAgent = selected;
+    }
+    updateAgentVisibility();
+  });
+  updateAgentVisibility();
   const save = button(options.text.t("common.action.save"), "settings-save");
   save.classList.add("mod-cta");
   save.type = "submit";
   const saveRow = document.createElement("div");
   saveRow.className = "galley-console__settings-save";
   saveRow.append(save);
-  form.append(providerSection.section, generationSection.section, saveRow);
+  form.append(agentSection.section, providerSection.section, saveRow);
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     for (const [key, input] of inputs) update(options.state, key, input.value);
+    const selected = agent.value;
+    if (selected === "plugin" || selected === "codex-cli" || selected === "claude-cli") {
+      options.state.generationAgent = selected;
+    }
     options.state.secretId = secret.value;
     const payload = editablePayload(options.state);
     void options.run("settings-save", async () => {
@@ -185,34 +207,23 @@ export async function renderSettingsPage(
 
 type MessageKeyLike =
   | "console.settings.baseUrl"
-  | "console.settings.model"
-  | "console.settings.secret"
-  | "console.settings.temperature"
-  | "console.settings.timeout"
-  | "console.settings.contextWindow"
-  | "console.settings.outputFolder";
+  | "console.settings.model";
 
 function update(
   state: SettingsPageState,
   key: keyof EditableSettingsSnapshot,
   value: string
 ): void {
-  if (key === "temperature" || key === "timeoutMs" || key === "contextWindow") {
-    state[key] = Number(value);
-  } else {
-    state[key] = value;
-  }
+  if (key === "generationAgent") return;
+  state[key] = value;
 }
 
 function editablePayload(state: SettingsPageState): Partial<SettingsSnapshot> {
   return {
+    generationAgent: state.generationAgent ?? "plugin",
     baseUrl: state.baseUrl ?? "",
     model: state.model ?? "",
-    secretId: state.secretId ?? "",
-    temperature: state.temperature ?? 0.4,
-    timeoutMs: state.timeoutMs ?? 120000,
-    contextWindow: state.contextWindow ?? 128000,
-    outputFolder: state.outputFolder ?? ""
+    secretId: state.secretId ?? ""
   };
 }
 
@@ -220,13 +231,10 @@ function copyEditable(
   state: SettingsPageState,
   snapshot: SettingsSnapshot
 ): void {
+  state.generationAgent = snapshot.generationAgent;
   state.baseUrl = snapshot.baseUrl;
   state.model = snapshot.model;
   state.secretId = snapshot.secretId;
-  state.temperature = snapshot.temperature;
-  state.timeoutMs = snapshot.timeoutMs;
-  state.contextWindow = snapshot.contextWindow;
-  state.outputFolder = snapshot.outputFolder;
 }
 
 function sanitizeDiagnostic(
@@ -240,10 +248,6 @@ function sanitizeDiagnostic(
   return {
     ok: result.ok,
     model: result.model,
-    capabilities: { ...result.capabilities },
-    skillVersion: result.skillVersion,
-    skillLoadMode: result.skillLoadMode,
-    skillFiles: [...result.skillFiles],
     ...(errorCode ? { errorCode } : {})
   };
 }
@@ -255,32 +259,14 @@ function renderDiagnostic(
 ): void {
   container.replaceChildren();
   if (!result) return;
-  const title = document.createElement("h2");
-  title.textContent = text.t("diagnostic.title");
-  container.append(title);
+  container.dataset.state = result.ok ? "available" : "unavailable";
   appendFact(container, text.t("diagnostic.status"), text.t(
     result.ok ? "diagnostic.passed" : "diagnostic.failed"
   ));
   appendFact(container, text.t("diagnostic.model"), result.model);
-  for (const [label, supported] of [
-    ["diagnostic.tools", result.capabilities.tools],
-    ["diagnostic.streaming", result.capabilities.streaming],
-    ["diagnostic.vision", result.capabilities.vision]
-  ] as const) {
-    appendFact(
-      container,
-      text.t(label),
-      text.t(supported ? "diagnostic.supported" : "diagnostic.notObserved")
-    );
-  }
-  appendFact(container, text.t("diagnostic.skillVersion"), result.skillVersion);
-  appendFact(container, text.t("diagnostic.skillLoadMode"), result.skillLoadMode);
   if (result.errorCode) {
     appendFact(container, text.t("diagnostic.errorCode"), result.errorCode);
   }
-  const files = document.createElement("p");
-  files.textContent = `${text.t("diagnostic.skillFiles")} ${result.skillFiles.join(", ")}`;
-  container.append(files);
 }
 
 function appendFact(container: HTMLElement, label: string, value: string): void {

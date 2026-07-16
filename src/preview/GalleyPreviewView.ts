@@ -21,7 +21,7 @@ export class GalleyPreviewPathError extends Error {
   readonly code = "galley_preview_path_invalid" as const;
 
   constructor() {
-    super("Galley preview accepts only canonical *.galley.html artifacts.");
+    super("Galley preview accepts only vault-relative HTML files.");
     this.name = "GalleyPreviewPathError";
   }
 }
@@ -49,13 +49,11 @@ export class GalleyPreviewView extends ItemView {
   }
 
   getState(): Record<string, unknown> {
-    return this.#path ? { path: this.#path } : {};
+    return this.#path ? { file: this.#path } : {};
   }
 
   async setState(state: unknown): Promise<void> {
-    const path = state && typeof state === "object" && "path" in state
-      ? (state as { path?: unknown }).path
-      : null;
+    const path = filePathFromState(state);
     if (typeof path === "string") await this.openPath(path);
   }
 
@@ -66,11 +64,15 @@ export class GalleyPreviewView extends ItemView {
     this.contentEl.classList.add("galley-preview-view");
     let html = opened.html;
     if (this.services.resourceResolver) {
-      const parsed = GalleyDocumentCodec.parse(html);
-      html = GalleyDocumentCodec.serialize({
-        ...parsed,
-        bodyHtml: this.services.resourceResolver.rewriteForDisplay(parsed.bodyHtml)
-      });
+      try {
+        const parsed = GalleyDocumentCodec.parse(html);
+        html = GalleyDocumentCodec.serialize({
+          ...parsed,
+          bodyHtml: this.services.resourceResolver.rewriteForDisplay(parsed.bodyHtml)
+        });
+      } catch {
+        html = this.services.resourceResolver.rewriteForDisplay(html);
+      }
     }
     createSafePreviewFrame(
       this.contentEl,
@@ -90,8 +92,16 @@ export class GalleyPreviewView extends ItemView {
   }
 }
 
+function filePathFromState(state: unknown): string | null {
+  if (typeof state !== "object" || state === null) return null;
+  if ("file" in state && typeof state.file === "string") return state.file;
+  if ("path" in state && typeof state.path === "string") return state.path;
+  return null;
+}
+
 export interface GalleyPreviewWorkspace {
   getLeaf(type: "tab"): WorkspaceLeaf;
+  getLeavesOfType?(type: string): WorkspaceLeaf[];
   revealLeaf?(leaf: WorkspaceLeaf): void;
 }
 
@@ -100,7 +110,9 @@ export async function openGalleyPreview(
   path: string
 ): Promise<void> {
   if (!isGalleyPreviewPath(path)) throw new GalleyPreviewPathError();
-  const leaf = workspace.getLeaf("tab");
+  const leaf =
+    workspace.getLeavesOfType?.(GALLEY_PREVIEW_VIEW_TYPE)[0] ??
+    workspace.getLeaf("tab");
   await leaf.setViewState({
     type: GALLEY_PREVIEW_VIEW_TYPE,
     state: { path },
@@ -113,7 +125,7 @@ export function isGalleyPreviewPath(path: string): boolean {
   const nameStart = path.lastIndexOf("/") + 1;
   return (
     isNormalizedVaultRelativePath(path) &&
-    path.endsWith(".galley.html") &&
-    path.length - ".galley.html".length > nameStart
+    path.endsWith(".html") &&
+    path.length - ".html".length > nameStart
   );
 }

@@ -21,8 +21,12 @@ it("contains exactly the five 0.1.0 release files when the release gate has run"
   ]);
   const manifest = JSON.parse(new TextDecoder().decode(entries["manifest.json"])) as {
     version?: string;
+    author?: string;
+    fundingUrl?: string;
   };
   expect(manifest.version).toBe("0.1.0");
+  expect(manifest.author).toBe("Kinrochen");
+  expect(manifest.fundingUrl).toBe("https://ifdian.net/a/kinrochen");
   expect(new TextDecoder().decode(entries.LICENSE)).toContain(
     "GNU AFFERO GENERAL PUBLIC LICENSE"
   );

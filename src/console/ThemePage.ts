@@ -2,6 +2,7 @@ import { MAX_THEME_ARCHIVE_BYTES } from "../archive/ArchiveLimits";
 import type { GalleyActions } from "./GalleyActions";
 import type { ConsolePageText } from "./ConsoleHome";
 import { appendText, button } from "./ConsoleHome";
+import { createThemePreview } from "./ThemePreview";
 
 export async function renderThemePage(
   container: HTMLElement,
@@ -26,6 +27,7 @@ export async function renderThemePage(
   const upload = document.createElement("input");
   upload.type = "file";
   upload.accept = ".zip,application/zip";
+  upload.className = "galley-console__file-input";
   upload.setAttribute("aria-label", options.text.t("console.themes.import"));
   upload.dataset.action = "theme-import";
   upload.addEventListener("change", () => {
@@ -38,7 +40,11 @@ export async function renderThemePage(
       await runtime.importTheme?.(new Uint8Array(await file.arrayBuffer()));
     });
   });
-  controls.append(themeLab, upload);
+  const uploadTrigger = document.createElement("label");
+  uploadTrigger.className = "galley-console__file-trigger";
+  uploadTrigger.textContent = options.text.t("console.themes.import");
+  uploadTrigger.append(upload);
+  controls.append(themeLab, uploadTrigger);
   container.append(controls);
   const themes = (await runtime.listThemes?.()) ?? [];
   if (!themes.length) {
@@ -54,6 +60,11 @@ export async function renderThemePage(
     row.dataset.themeId = theme.id;
     const details = document.createElement("div");
     details.className = "galley-console__theme-details";
+    const preview = createThemePreview(
+      theme.id,
+      theme.name,
+      options.text.t("console.themes.preview", { theme: theme.name })
+    );
     const name = document.createElement("h2");
     name.textContent = theme.name;
     const id = appendText(details, theme.id);
@@ -66,7 +77,7 @@ export async function renderThemePage(
       )
     );
     kind.className = "galley-console__theme-kind";
-    row.append(details);
+    row.append(preview, details);
     if (!theme.builtIn) {
       const actions = document.createElement("div");
       actions.className = "galley-console__row-actions";

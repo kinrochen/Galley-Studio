@@ -142,6 +142,34 @@ it("injects immediately without a request when the endpoint has no tool capabili
   expect(client.requestsWithTools()).toHaveLength(0);
 });
 
+it("lets a native local Agent read the materialized Skill without duplicating it in messages", async () => {
+  const client = new ScriptedChatClient([completed({ content: "<section>done</section>" })]);
+  const skillPackage = makeSkillPackage();
+  const session = new SkillSession({
+    client,
+    target: { baseUrl: "local://codex-cli", model: "Codex CLI" },
+    capabilities: makeProviderCapabilities({ tools: false }),
+    skillPackage,
+    vfs: new SkillVirtualFileSystem(skillPackage.files),
+    packageHash: TEST_PACKAGE_HASH,
+    nativeSkillAccess: true
+  });
+
+  await expect(session.completeScoped("format this article", signal())).resolves.toBe(
+    "<section>done</section>"
+  );
+
+  expect(session.audit()).toMatchObject({
+    loadMode: "filesystem",
+    files: ["SKILL.md", "references/theme-index.md"]
+  });
+  expect(client.requests).toHaveLength(1);
+  expect(client.requests[0]?.messages).toEqual([
+    { role: "user", content: "format this article" }
+  ]);
+  expect(client.messagesText()).not.toContain("<skill-file");
+});
+
 it("downgrades only its capability and injects without an empty retry request", async () => {
   const callerCapabilities = makeProviderCapabilities();
   const client = new ScriptedChatClient([new AiError("tools_unsupported")]);

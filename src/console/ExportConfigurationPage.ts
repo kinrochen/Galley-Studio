@@ -66,7 +66,7 @@ export async function renderExportConfigurationPage(
   for (const configuration of (await runtime.listExportConfigurations?.()) ?? []) {
     const row = document.createElement("div");
     row.className = "galley-console__management-row";
-    appendText(row, `${configuration.name} — ${profileName(configuration.profileId, options.text)}`);
+    appendText(row, `${configuration.name} - ${profileName(configuration.profileId, options.text)}`);
     const edit = button(options.text.t("common.action.edit"), "export-config-edit");
     edit.addEventListener("click", () => {
       hydrate(configuration, options.state, id, name, profile, folder, filename);

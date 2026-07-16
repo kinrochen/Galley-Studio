@@ -1,27 +1,35 @@
 import type { App } from "obsidian";
 
 import { WechatRepairService } from "../export/WechatRepairService";
-import { GenerationPipeline } from "../generation/GenerationPipeline";
+import { SkillDrivenGenerationPipeline } from "../generation/SkillDrivenGenerationPipeline";
 import type { GalleySettings } from "../settings/GalleySettings";
+import type { GenerationModelEvent } from "../generation/GenerationProgress";
 import { BuiltInThemeRepository } from "../themes/BuiltInThemeRepository";
-import { createProductionSkillContext } from "./ProductionSkillContext";
+import {
+  createProductionSkillContext,
+  generationModelLabel
+} from "./ProductionSkillContext";
 
 export async function createProductionGeneration(
   app: App,
   settings: Readonly<GalleySettings>,
-  signal: AbortSignal
-): Promise<{ model: string; pipeline: GenerationPipeline }> {
+  signal: AbortSignal,
+  onModelEvent?: (event: GenerationModelEvent) => void
+): Promise<{ model: string; pipeline: SkillDrivenGenerationPipeline }> {
   const { session, vfs } = await createProductionSkillContext(
     app,
     settings,
     signal,
-    "generation"
+    "generation",
+    false,
+    onModelEvent
   );
   return {
-    model: settings.model,
-    pipeline: new GenerationPipeline({
+    model: generationModelLabel(settings),
+    pipeline: new SkillDrivenGenerationPipeline({
       session,
-      themes: new BuiltInThemeRepository(vfs)
+      themes: new BuiltInThemeRepository(vfs),
+      ...(onModelEvent ? { onModelEvent } : {})
     })
   };
 }

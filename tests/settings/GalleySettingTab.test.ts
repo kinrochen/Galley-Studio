@@ -18,7 +18,7 @@ afterEach(() => {
   resetRequestUrlHandler();
 });
 
-it("persists each settings control as an independent immutable snapshot", async () => {
+it("persists each provider control as an independent immutable snapshot", async () => {
   const app = makeAppWithSecret("provider-key", "raw-provider-secret");
   const plugin = new GalleyPlugin(app, {} as PluginManifest);
   const harness = plugin as unknown as { savedData: unknown };
@@ -35,27 +35,15 @@ it("persists each settings control as an independent immutable snapshot", async 
   changeValue(tab.containerEl, "API key", "provider-key");
   await Promise.resolve();
   snapshots.push(harness.savedData);
-  changeValue(tab.containerEl, "Temperature", "0.7");
-  await Promise.resolve();
-  snapshots.push(harness.savedData);
-  changeValue(tab.containerEl, "Timeout (ms)", "90000");
-  await Promise.resolve();
-  snapshots.push(harness.savedData);
-  changeValue(tab.containerEl, "Context window", "64000");
-  await Promise.resolve();
-  snapshots.push(harness.savedData);
-  changeValue(tab.containerEl, "Output folder", "Galley output");
-  await Promise.resolve();
-  snapshots.push(harness.savedData);
-
   expect(snapshots).toMatchObject([
-    { baseUrl: "https://api.example.com/v1", model: "", secretId: "" },
+    {
+      generationAgent: "plugin",
+      baseUrl: "https://api.example.com/v1",
+      model: "",
+      secretId: ""
+    },
     { baseUrl: "https://api.example.com/v1", model: "model-x", secretId: "" },
-    { model: "model-x", secretId: "provider-key", temperature: 0.4 },
-    { secretId: "provider-key", temperature: 0.7, timeoutMs: 120_000 },
-    { temperature: 0.7, timeoutMs: 90_000, contextWindow: 128_000 },
-    { timeoutMs: 90_000, contextWindow: 64_000, outputFolder: "" },
-    { contextWindow: 64_000, outputFolder: "Galley output" }
+    { model: "model-x", secretId: "provider-key" }
   ]);
   expect(JSON.stringify(snapshots)).not.toContain("raw-provider-secret");
   for (const snapshot of snapshots) {
@@ -77,51 +65,42 @@ it("normalizes a trailing slash before persisting a Base URL edit", async () => 
   expect(harness.savedData).toMatchObject({ baseUrl: "https://api.example.com/v1" });
 });
 
-it("clamps finite numeric UI edits to the configured bounds before persisting", async () => {
+it("does not expose low-level generation and output controls", () => {
   const app = makeAppWithSecret("provider-key", "raw-provider-secret");
   const plugin = new GalleyPlugin(app, {} as PluginManifest);
-  const harness = plugin as unknown as { savedData: unknown };
   const tab = new GalleySettingTab(app, plugin);
   tab.display();
 
-  changeValue(tab.containerEl, "Temperature", "9");
-  changeValue(tab.containerEl, "Timeout (ms)", "1");
-  changeValue(tab.containerEl, "Context window", "3000000");
-  await Promise.resolve();
-
-  expect(plugin.settings).toMatchObject({
-    temperature: 2,
-    timeoutMs: 10_000,
-    contextWindow: 2_000_000
-  });
-  expect(harness.savedData).toMatchObject({
-    temperature: 2,
-    timeoutMs: 10_000,
-    contextWindow: 2_000_000
-  });
+  for (const name of ["Temperature", "Timeout (ms)", "Context window", "Output folder"]) {
+    expect(tab.containerEl.querySelector(`[data-setting-name="${name}"]`)).toBeNull();
+  }
 });
 
-it("uses numeric defaults for nonnumeric UI edits before persisting", async () => {
+it("switches from provider settings to automatic local CLI discovery", async () => {
   const app = makeAppWithSecret("provider-key", "raw-provider-secret");
   const plugin = new GalleyPlugin(app, {} as PluginManifest);
   const harness = plugin as unknown as { savedData: unknown };
   const tab = new GalleySettingTab(app, plugin);
   tab.display();
 
-  changeValue(tab.containerEl, "Temperature", "invalid");
-  changeValue(tab.containerEl, "Timeout (ms)", "invalid");
-  changeValue(tab.containerEl, "Context window", "invalid");
-  await Promise.resolve();
+  const agent = tab.containerEl.querySelector<HTMLSelectElement>(
+    '[data-setting-name="Generation Agent"] select'
+  );
+  if (!agent) throw new Error("missing Agent selector");
+  agent.value = "codex-cli";
+  agent.dispatchEvent(new Event("change"));
+  await vi.waitFor(() =>
+    expect(tab.containerEl.querySelector('[data-setting-name="CLI executable"]'))
+      .not.toBeNull()
+  );
+  expect(tab.containerEl.querySelector('[data-setting-name="Base URL"]')).toBeNull();
+  expect(
+    tab.containerEl.querySelector('[data-setting-name="CLI executable"] input')
+  ).toBeNull();
 
-  expect(plugin.settings).toMatchObject({
-    temperature: 0.4,
-    timeoutMs: 120_000,
-    contextWindow: 128_000
-  });
+  expect(plugin.settings.generationAgent).toBe("codex-cli");
   expect(harness.savedData).toMatchObject({
-    temperature: 0.4,
-    timeoutMs: 120_000,
-    contextWindow: 128_000
+    generationAgent: "codex-cli"
   });
 });
 
@@ -172,7 +151,7 @@ it("switches localized settings chrome after persistence without losing values",
   ).toBe("provider-key");
 });
 
-it("registers the connection and Skill diagnostic only on desktop", async () => {
+it("registers the Agent availability check only on desktop", async () => {
   const desktop = new GalleyPlugin(
     makeAppWithSecret("provider-key", "raw-provider-secret"),
     {} as PluginManifest
@@ -186,15 +165,15 @@ it("registers the connection and Skill diagnostic only on desktop", async () => 
 
   expect(desktopHarness.commands).toContainEqual(
     expect.objectContaining({
-      id: "check-model-connection-and-skill-loading",
-      name: "Galley: Diagnostics / 诊断"
+      id: "check-generation-agent-availability",
+      name: "Galley: Check Agent availability / 检查 Agent 可用性"
     })
   );
   expect(
     desktopHarness.settingTabs[0]?.containerEl.querySelector(
-      '[data-setting-name="Connection and Skill diagnostic"] button'
+      '[data-setting-name="Agent availability"] button'
     )?.textContent
-  ).toBe("Run connection and Skill diagnostic");
+  ).toBe("Check Agent availability");
 
   Platform.isMobileApp = true;
   const mobile = new GalleyPlugin(
@@ -210,35 +189,21 @@ it("registers the connection and Skill diagnostic only on desktop", async () => 
 
   expect(mobileHarness.commands).not.toContainEqual(
     expect.objectContaining({
-      id: "check-model-connection-and-skill-loading"
+      id: "check-generation-agent-availability"
     })
   );
   expect(
     mobileHarness.settingTabs[0]?.containerEl.querySelector(
-      '[data-setting-name="Connection and Skill diagnostic"]'
+      '[data-setting-name="Agent availability"]'
     )
   ).toBeNull();
 });
 
-it("shows only audited diagnostic facts in the Notice and detail modal", async () => {
+it("shows only the result of one minimal model call", async () => {
   const secret = "raw-provider-secret";
   const app = makeAppWithSecret("provider-key", secret);
   const plugin = new GalleyPlugin(app, {} as PluginManifest);
-  const providerResponses = [
-    openAiToolCall("capability", "galley_capability_echo", "{}"),
-    openAiContent("galley_stream_probe"),
-    openAiToolCall(
-      "root",
-      "read_skill_file",
-      JSON.stringify({ path: "SKILL.md" })
-    ),
-    openAiToolCall(
-      "themes",
-      "read_skill_file",
-      JSON.stringify({ path: "references/theme-index.md" })
-    ),
-    openAiContent("provider-content-must-not-be-shown")
-  ];
+  const providerResponses = [openAiContent("OK")];
   const requests: RequestUrlParam[] = [];
   setRequestUrlHandler(async (request) => {
     if (typeof request === "string") {
@@ -260,11 +225,11 @@ it("shows only audited diagnostic facts in the Notice and detail modal", async (
       commands: Array<{ id: string; callback?: () => unknown }>;
     }
   ).commands.find(
-    ({ id }) => id === "check-model-connection-and-skill-loading"
+    ({ id }) => id === "check-generation-agent-availability"
   );
   await command?.callback?.();
 
-  expect(requests).toHaveLength(5);
+  expect(requests).toHaveLength(1);
   expect(requests[0]?.headers).toMatchObject({
     Authorization: `Bearer ${secret}`
   });
@@ -274,12 +239,12 @@ it("shows only audited diagnostic facts in the Notice and detail modal", async (
     openedModals[0]?.titleEl.textContent ?? ""
   }\n${openedModals[0]?.contentEl.textContent ?? ""}`;
   expect(visibleSurface).toContain("diagnostic-model");
-  expect(visibleSurface).toContain("SKILL.md");
-  expect(visibleSurface).toContain("tool-calls");
+  expect(visibleSurface).toContain("Available");
+  expect(visibleSurface).not.toContain("SKILL.md");
+  expect(visibleSurface).not.toContain("tool-calls");
   expect(visibleSurface).not.toContain(secret);
   expect(visibleSurface).not.toContain("Authorization");
-  expect(visibleSurface).not.toContain("galley_stream_probe");
-  expect(visibleSurface).not.toContain("provider-content-must-not-be-shown");
+  expect(visibleSurface).not.toContain("OK");
 });
 
 function changeValue(containerEl: HTMLElement, settingName: string, value: string): void {
@@ -316,34 +281,6 @@ function openAiContent(content: string): { status: number; json: unknown } {
         {
           message: { role: "assistant", content },
           finish_reason: "stop"
-        }
-      ]
-    }
-  };
-}
-
-function openAiToolCall(
-  id: string,
-  name: string,
-  argumentsJson: string
-): { status: number; json: unknown } {
-  return {
-    status: 200,
-    json: {
-      choices: [
-        {
-          message: {
-            role: "assistant",
-            content: null,
-            tool_calls: [
-              {
-                id,
-                type: "function",
-                function: { name, arguments: argumentsJson }
-              }
-            ]
-          },
-          finish_reason: "tool_calls"
         }
       ]
     }

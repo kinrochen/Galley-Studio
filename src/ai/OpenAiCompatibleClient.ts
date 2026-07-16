@@ -10,10 +10,13 @@ import { validateBaseUrl } from "./BaseUrlPolicy";
 import { redactDiagnostic } from "./Redactor";
 import { SseDecoder } from "./SseDecoder";
 import type { SecretStore } from "../secrets/SecretStore";
-import type { GalleySettings } from "../settings/GalleySettings";
+import {
+  DEFAULT_GENERATION_TIMEOUT_MS,
+  type GalleySettings
+} from "../settings/GalleySettings";
+import type { GenerationModelEvent } from "../generation/GenerationProgress";
 
 const RETRY_DELAYS = [500, 1_000] as const;
-const DEFAULT_TIMEOUT_MS = 120_000;
 
 export type RetryDelay = (
   milliseconds: number,
@@ -23,6 +26,7 @@ export type RetryDelay = (
 export interface OpenAiCompatibleClientOptions {
   timeoutMs?: number;
   delay?: RetryDelay;
+  onModelEvent?: (event: GenerationModelEvent) => void;
 }
 
 interface OpenAiToolAccumulator {
@@ -34,6 +38,8 @@ interface OpenAiToolAccumulator {
 export class OpenAiCompatibleClient {
   private readonly timeoutMs: number;
   private readonly delay: RetryDelay;
+  private readonly onModelEvent: ((event: GenerationModelEvent) => void) | undefined;
+  private requestSequence = 0;
 
   constructor(
     private readonly transport: HttpTransport,
@@ -45,8 +51,9 @@ export class OpenAiCompatibleClient {
       Number.isFinite(options.timeoutMs) &&
       options.timeoutMs > 0
         ? options.timeoutMs
-        : DEFAULT_TIMEOUT_MS;
+        : DEFAULT_GENERATION_TIMEOUT_MS;
     this.delay = options.delay ?? abortableDelay;
+    this.onModelEvent = options.onModelEvent;
   }
 
   static fromSettings(
@@ -69,6 +76,13 @@ export class OpenAiCompatibleClient {
     if (signal.aborted) {
       throw new AiError("aborted");
     }
+    const requestId = ++this.requestSequence;
+    const startedAt = Date.now();
+    this.onModelEvent?.({
+      type: "request-start",
+      requestId,
+      at: startedAt
+    });
 
     let baseUrl: string;
     try {
@@ -97,9 +111,15 @@ export class OpenAiCompatibleClient {
 
     for (let attempt = 0; attempt <= RETRY_DELAYS.length; attempt += 1) {
       try {
-        return await this.runWithTimeout(signal, async (attemptSignal) => {
+        const result = await this.runWithTimeout(signal, async (attemptSignal) => {
           if (useStream) {
-            return this.readStream(url, headers, body, attemptSignal);
+            return this.readStream(
+              url,
+              headers,
+              body,
+              attemptSignal,
+              requestId
+            );
           }
           const response = await this.transport.post(
             url,
@@ -112,6 +132,21 @@ export class OpenAiCompatibleClient {
           }
           return normalizeResponse(response.json, secret);
         });
+        if (!result.streamed && result.content) {
+          this.onModelEvent?.({
+            type: "text-delta",
+            requestId,
+            text: result.content,
+            at: Date.now()
+          });
+        }
+        this.onModelEvent?.({
+          type: "request-complete",
+          requestId,
+          elapsedMs: Date.now() - startedAt,
+          at: Date.now()
+        });
+        return result;
       } catch (error) {
         const failure = normalizeFailure(error, signal, secret);
         if (!failure.retryable || attempt === RETRY_DELAYS.length) {
@@ -136,7 +171,8 @@ export class OpenAiCompatibleClient {
     url: string,
     headers: Record<string, string>,
     body: unknown,
-    signal: AbortSignal
+    signal: AbortSignal,
+    requestId: number
   ): Promise<ChatTurnResult> {
     const stream = this.transport.stream;
     if (!stream) {
@@ -159,6 +195,12 @@ export class OpenAiCompatibleClient {
         const delta = asRecord(choice.delta);
         if (delta && typeof delta.content === "string") {
           content += delta.content;
+          this.onModelEvent?.({
+            type: "text-delta",
+            requestId,
+            text: delta.content,
+            at: Date.now()
+          });
         }
         if (delta && Array.isArray(delta.tool_calls)) {
           accumulateToolCalls(delta.tool_calls, toolCalls);

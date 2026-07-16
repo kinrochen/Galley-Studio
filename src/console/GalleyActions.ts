@@ -1,5 +1,6 @@
 import type { ExportConfiguration } from "../export/ExportConfiguration";
 import type { GalleyLanguage } from "../i18n/LocalizedText";
+import type { GenerationAgent } from "../settings/GalleySettings";
 import type {
   ActiveContext,
   ArticleCatalogSnapshot,
@@ -21,7 +22,17 @@ export interface SkillSummary {
   readonly valid: boolean;
 }
 
+export interface SkillDetail {
+  readonly id: string;
+  readonly version: string;
+  readonly files: readonly string[];
+  readonly instructions: string;
+}
+
 export interface SettingsSnapshot {
+  readonly generationAgent: GenerationAgent;
+  readonly codexCliPath: string;
+  readonly claudeCliPath: string;
   readonly baseUrl: string;
   readonly model: string;
   readonly secretId: string;
@@ -36,14 +47,6 @@ export interface SettingsSnapshot {
 export interface ConnectionDiagnosticSnapshot {
   readonly ok: boolean;
   readonly model: string;
-  readonly capabilities: {
-    readonly tools: boolean;
-    readonly streaming: boolean;
-    readonly vision: boolean;
-  };
-  readonly skillVersion: string;
-  readonly skillLoadMode: "tool-calls" | "injected" | "mixed";
-  readonly skillFiles: readonly string[];
   readonly errorCode?: string;
 }
 
@@ -61,6 +64,7 @@ export interface DesktopGalleyActions {
   setThemeEnabled?(id: string, enabled: boolean): Promise<void>;
   deleteTheme?(id: string): Promise<boolean>;
   listSkills?(): Promise<readonly SkillSummary[]>;
+  readActiveSkill?(): Promise<SkillDetail>;
   importSkill?(bytes: Uint8Array): Promise<string>;
   activateSkill?(version: string): Promise<void>;
   listExportConfigurations?(): Promise<readonly ExportConfiguration[]>;

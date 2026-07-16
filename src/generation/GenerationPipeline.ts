@@ -41,11 +41,14 @@ import {
   decideTheme,
   GenerationPipelineError
 } from "./ThemeDecision";
+import { applyWechatArticleFrame } from "./WechatArticleFrame";
 
 export { GenerationPipelineError } from "./ThemeDecision";
 
 export const MANUAL_THEME_ARTICLE_TYPE = "general-article";
 export const LONG_MODE_SOURCE_BUDGET_RATIO = 0.5;
+export const DIRECT_GENERATION_SOURCE_TOKEN_LIMIT = 12_000;
+export const MAX_LONG_BATCH_SOURCE_TOKENS = 4_000;
 const COMMON_COMPONENTS_FILE = "references/common-components.md";
 const MAX_LONG_REPAIR_ROUNDS = 2;
 const MAX_DESIGN_EVIDENCE_ENTRIES = 12;
@@ -123,10 +126,13 @@ export class GenerationPipeline {
     );
     throwIfAborted(signal);
 
-    const longMode = shouldUseLongMode(
-      estimateTokens(input.markdown),
-      input.modelContextWindow
-    );
+    const estimatedSourceTokens = estimateTokens(input.markdown);
+    // A model can fit a medium source in context yet still time out while
+    // expanding the whole article into styled HTML. Bound the direct path by
+    // expected output work as well as the provider context window.
+    const longMode =
+      estimatedSourceTokens > DIRECT_GENERATION_SOURCE_TOKEN_LIMIT ||
+      shouldUseLongMode(estimatedSourceTokens, input.modelContextWindow);
     let final: CandidateEvaluation;
     if (longMode) {
       final = await this.#generateLongCandidate(
@@ -151,6 +157,11 @@ export class GenerationPipeline {
       });
     }
     throwIfAborted(signal);
+    final = {
+      ...final,
+      html: applyWechatArticleFrame(final.html)
+    };
+    assertGeneratedArticleIsNotEmpty(final.html);
 
     const diagnostics = final.validation.issues;
     return {
@@ -189,7 +200,10 @@ export class GenerationPipeline {
     // compact manifest, conversation framing, and the fragment response.
     const budget = Math.max(
       1,
-      Math.floor(contextWindow * LONG_MODE_SOURCE_BUDGET_RATIO)
+      Math.min(
+        MAX_LONG_BATCH_SOURCE_TOKENS,
+        Math.floor(contextWindow * LONG_MODE_SOURCE_BUDGET_RATIO)
+      )
     );
     let batches: DocumentBatch[];
     try {
@@ -321,7 +335,7 @@ function evaluateLongBatch(
     const candidate = evaluateBoundaryFailure(source, {
       code: "long_batch_invalid",
       severity: "error",
-      message: `Long-document batch ${batch.id} did not return its assigned source markers exactly once as top-level article blocks.`
+      message: `Long-document batch ${batch.id} did not return its assigned source markers exactly once in order.`
     });
     return {
       batch,
@@ -343,31 +357,32 @@ function parseBatchFragment(
   modelText: string,
   batch: DocumentBatch
 ): DocumentFragment {
-  const source = modelText.trim();
-  if (!source || source.includes("```")) {
-    throw new Error("Long batch output is not a direct HTML fragment");
+  let source = stripSingleHtmlFence(modelText.trim());
+  if (!source) {
+    throw new Error("Long batch output is empty");
   }
-  assertShellFreeHtmlFragment(source, "body");
+
+  if (/<!doctype\s+html|<html(?:\s|>)|<body(?:\s|>)/iu.test(source)) {
+    const parsed = new DOMParser().parseFromString(source, "text/html");
+    source =
+      parsed.querySelector("body > article")?.innerHTML ??
+      parsed.body.innerHTML;
+  }
 
   const template = document.createElement("template");
   template.innerHTML = source;
+  const rootArticle = singleElementRoot(template.content, "article");
+  if (rootArticle) {
+    template.innerHTML = rootArticle.innerHTML;
+  }
   if (template.content.querySelector("article")) {
-    throw new Error("Long batch output contains an article root");
+    throw new Error("Long batch output contains a nested article root");
   }
-  for (const node of template.content.childNodes) {
-    if (node.nodeType === Node.TEXT_NODE && node.textContent?.trim()) {
-      throw new Error("Long batch output contains top-level prose");
-    }
-  }
+  assertShellFreeHtmlFragment(template.innerHTML, "body");
 
   const markerElements = [
     ...template.content.querySelectorAll("[data-galley-source]")
   ];
-  if (
-    markerElements.some((element) => element.parentNode !== template.content)
-  ) {
-    throw new Error("Long batch source marker is not a top-level block");
-  }
   const actual = markerElements.map(
     (element) => element.getAttribute("data-galley-source") ?? ""
   );
@@ -375,6 +390,27 @@ function parseBatchFragment(
     throw new Error("Long batch source markers do not match the assignment");
   }
   return template.content.cloneNode(true) as DocumentFragment;
+}
+
+function stripSingleHtmlFence(source: string): string {
+  const fenced = source.match(/^```(?:html)?\s*\n([\s\S]*?)\n```$/iu);
+  return fenced?.[1]?.trim() ?? source;
+}
+
+function singleElementRoot(
+  fragment: DocumentFragment,
+  tagName: string
+): Element | undefined {
+  const meaningfulNodes = [...fragment.childNodes].filter(
+    (node) =>
+      node.nodeType !== Node.TEXT_NODE || Boolean(node.textContent?.trim())
+  );
+  const only = meaningfulNodes[0];
+  return meaningfulNodes.length === 1 &&
+    only instanceof Element &&
+    only.tagName.toLowerCase() === tagName
+    ? only
+    : undefined;
 }
 
 function wrapFragment(fragment: DocumentFragment): string {
@@ -605,6 +641,17 @@ function validateInput(input: GenerateArticleInput): void {
     throw new GenerationPipelineError(
       "input_invalid",
       "Generation requires a non-empty Markdown source and a positive model context window."
+    );
+  }
+}
+
+function assertGeneratedArticleIsNotEmpty(html: string): void {
+  const parsed = new DOMParser().parseFromString(html, "text/html");
+  const article = parsed.querySelector("body > article");
+  if (!article || !article.innerHTML.trim()) {
+    throw new GenerationPipelineError(
+      "generation_empty",
+      "The generation provider returned no usable article body after repair."
     );
   }
 }

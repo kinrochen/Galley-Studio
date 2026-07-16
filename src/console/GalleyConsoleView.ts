@@ -3,16 +3,14 @@ import { generationFailureMessage } from "../commands/GenerateCurrentArticle";
 import type { LocalizedText } from "../i18n/LocalizedText";
 import type { MessageKey } from "../i18n/Resources";
 import type { GenerationStage } from "../generation/GenerationProgress";
+import type { GenerationTaskController } from "../generation/GenerationTask";
 import { ArticlePage, type ArticlePageState } from "./ArticlePage";
 import {
   renderConsoleHome,
   type ConsoleHomeState
 } from "./ConsoleHome";
-import {
-  renderExportConfigurationPage,
-  type ExportConfigurationFormState
-} from "./ExportConfigurationPage";
 import type { GalleyActions } from "./GalleyActions";
+import { renderGenerationPage } from "./GenerationPage";
 import { renderSettingsPage, type SettingsPageState } from "./SettingsPage";
 import { renderSkillPage } from "./SkillPage";
 import { renderThemePage } from "./ThemePage";
@@ -32,22 +30,32 @@ export interface GalleyConsoleViewServices {
   readonly subscribeContext?: (listener: () => void) => () => void;
   readonly subscribeArticles?: (listener: () => void) => () => void;
   readonly confirm?: (message: string) => boolean;
+  readonly generationTask?: GenerationTaskController;
 }
 
 const NAV_KEYS: Readonly<Record<ConsoleRoute, MessageKey>> = {
   home: "console.nav.home",
+  generation: "console.nav.generation",
   articles: "console.nav.articles",
   themes: "console.nav.themes",
   skills: "console.nav.skills",
-  exports: "console.nav.exports",
   settings: "console.nav.settings"
 };
 
 interface ConsoleFormState {
   home: ConsoleHomeState;
   articles: ArticlePageState;
-  exports: ExportConfigurationFormState;
   settings: SettingsPageState;
+}
+
+interface ScrollPosition {
+  readonly top: number;
+  readonly followsEnd: boolean;
+}
+
+interface ConsoleScrollState {
+  readonly route: string | undefined;
+  readonly positions: ReadonlyMap<string, ScrollPosition>;
 }
 
 export class GalleyConsoleView extends ItemView {
@@ -57,13 +65,6 @@ export class GalleyConsoleView extends ItemView {
   readonly #forms: ConsoleFormState = {
     home: { themeId: "" },
     articles: { query: "" },
-    exports: {
-      id: "",
-      name: "",
-      profileId: "standard-web",
-      outputFolder: "",
-      fileNameTemplate: "{stem}.html"
-    },
     settings: {}
   };
   #route: ConsoleRoute = "home";
@@ -129,6 +130,15 @@ export class GalleyConsoleView extends ItemView {
           })
         );
       }
+      if (this.#services.generationTask) {
+        this.#unsubscribers.push(
+          this.#services.generationTask.subscribe(() => {
+            if (this.#route === "generation" || this.#route === "home") {
+              void this.#render();
+            }
+          })
+        );
+      }
     }
     await this.#render();
   }
@@ -148,6 +158,12 @@ export class GalleyConsoleView extends ItemView {
 
   async navigate(route: ConsoleRoute): Promise<void> {
     if (!this.#allowedRoutes().includes(route)) return;
+    if (
+      this.#operation.status === "success" ||
+      this.#operation.status === "partial-success"
+    ) {
+      this.#operation = { status: "idle" };
+    }
     this.#route = route;
     await this.#render();
     this.contentEl.querySelector<HTMLElement>("main h1")?.focus();
@@ -155,6 +171,7 @@ export class GalleyConsoleView extends ItemView {
 
   async #render(): Promise<void> {
     if (this.#closed) return;
+    const scrollState = captureScrollState(this.contentEl);
     const version = ++this.#renderVersion;
     const fragment = document.createDocumentFragment();
     const header = document.createElement("header");
@@ -168,21 +185,27 @@ export class GalleyConsoleView extends ItemView {
 
     const main = document.createElement("main");
     main.className = "galley-console__main";
+    main.dataset.route = this.#route;
+    main.dataset.scrollKey = "main";
+    const frame = document.createElement("div");
+    frame.className = "galley-console__frame";
     const operationRegion = this.#statusRegion();
-    main.append(operationRegion);
+    frame.append(operationRegion);
     try {
-      await this.#renderPage(main);
+      await this.#renderPage(frame);
     } catch {
       const error = document.createElement("div");
       error.setAttribute("role", "alert");
       error.tabIndex = -1;
       error.textContent = this.#services.locale.t("common.error.safe");
-      main.append(error);
+      frame.append(error);
     }
+    main.append(frame);
     this.#applyOperationState(main);
     fragment.append(main);
     if (version !== this.#renderVersion || this.#closed) return;
     this.contentEl.replaceChildren(fragment);
+    restoreScrollState(this.contentEl, scrollState, this.#route);
   }
 
   async #renderPage(main: HTMLElement): Promise<void> {
@@ -194,11 +217,37 @@ export class GalleyConsoleView extends ItemView {
         this.#run(operation, action),
       navigate: (route: ConsoleRoute) => this.navigate(route),
       reportProgress: (stage: GenerationStage) => this.#reportProgress(stage),
+      ...(this.#services.generationTask
+        ? { generationTask: this.#services.generationTask }
+        : {}),
+      startGeneration: async (input: Parameters<GalleyActions["generateActiveMarkdown"]>[0]) => {
+        if (this.#services.generationTask) {
+          this.#services.generationTask.start(input);
+          await this.navigate("generation");
+          return;
+        }
+        await this.#run("generate", (signal) =>
+          this.#services.actions.generateActiveMarkdown(
+            { ...input, onProgress: (stage) => this.#reportProgress(stage) },
+            signal
+          )
+        );
+      },
       confirm: this.#services.confirm ?? ((message: string) => window.confirm(message))
     };
     switch (this.#route) {
       case "home":
         await renderConsoleHome(main, { ...shared, state: this.#forms.home });
+        return;
+      case "generation":
+        if (this.#services.generationTask) {
+          renderGenerationPage(main, {
+            actions: this.#services.actions,
+            task: this.#services.generationTask,
+            text: this.#services.locale,
+            navigate: (route) => this.navigate(route)
+          });
+        }
         return;
       case "articles":
         await ArticlePage(main, { ...shared, state: this.#forms.articles });
@@ -208,12 +257,6 @@ export class GalleyConsoleView extends ItemView {
         return;
       case "skills":
         await renderSkillPage(main, shared);
-        return;
-      case "exports":
-        await renderExportConfigurationPage(main, {
-          ...shared,
-          state: this.#forms.exports
-        });
         return;
       case "settings":
         await renderSettingsPage(main, {
@@ -390,7 +433,6 @@ export class GalleyConsoleView extends ItemView {
       reading: "generation.status.reading",
       "loading-skill": "generation.status.loadingSkill",
       generating: "generation.status.generating",
-      validating: "generation.status.validating",
       saving: "generation.status.saving"
     };
     this.#operation = {
@@ -405,6 +447,45 @@ export class GalleyConsoleView extends ItemView {
     return this.#services.mobile
       ? (MOBILE_CONSOLE_ROUTES as readonly ConsoleRoute[])
       : DESKTOP_CONSOLE_ROUTES;
+  }
+}
+
+function captureScrollState(container: HTMLElement): ConsoleScrollState {
+  const positions = new Map<string, ScrollPosition>();
+  for (const element of container.querySelectorAll<HTMLElement>(
+    "[data-scroll-key]"
+  )) {
+    const key = element.dataset.scrollKey;
+    if (!key) continue;
+    const remaining =
+      element.scrollHeight - element.clientHeight - element.scrollTop;
+    positions.set(key, {
+      top: element.scrollTop,
+      followsEnd: remaining <= 4
+    });
+  }
+  return {
+    route: container.querySelector<HTMLElement>(".galley-console__main")
+      ?.dataset.route,
+    positions
+  };
+}
+
+function restoreScrollState(
+  container: HTMLElement,
+  state: ConsoleScrollState,
+  route: ConsoleRoute
+): void {
+  if (state.route !== route) return;
+  for (const element of container.querySelectorAll<HTMLElement>(
+    "[data-scroll-key]"
+  )) {
+    const key = element.dataset.scrollKey;
+    const position = key ? state.positions.get(key) : undefined;
+    if (!position) continue;
+    element.scrollTop = position.followsEnd
+      ? element.scrollHeight
+      : position.top;
   }
 }
 

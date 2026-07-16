@@ -1,33 +1,16 @@
 import { AiError } from "../ai/AiError";
-import type { ChatClient, HttpTransport } from "../ai/AiProtocol";
+import type { HttpTransport } from "../ai/AiProtocol";
 import { validateBaseUrl } from "../ai/BaseUrlPolicy";
-import {
-  CapabilityProbe,
-  type ProviderCapabilities
-} from "../ai/CapabilityProbe";
 import { OpenAiCompatibleClient } from "../ai/OpenAiCompatibleClient";
-import { BUNDLED_SKILL } from "../generated/bundledSkill";
 import type { SecretStore } from "../secrets/SecretStore";
 import {
   type GalleySettings,
   normalizeSettings
 } from "../settings/GalleySettings";
-import {
-  BundledSkillLoader,
-  PINNED_GZH_DESIGN_VERSION
-} from "../skill/BundledSkillLoader";
-import type { SkillLoadMode } from "../skill/SkillAudit";
-import { SkillSession } from "../skill/SkillSession";
-import { SkillVirtualFileSystem } from "../skill/SkillVirtualFileSystem";
-import type { SkillPackage } from "../skill/SkillPackage";
 
 export interface ConnectionDiagnosticResult {
   ok: boolean;
   model: string;
-  capabilities: { tools: boolean; streaming: boolean; vision: boolean };
-  skillVersion: string;
-  skillLoadMode: "tool-calls" | "injected" | "mixed";
-  skillFiles: string[];
   errorCode?: string;
 }
 
@@ -35,17 +18,7 @@ export interface ConnectionDiagnosticDeps {
   settings: Readonly<GalleySettings>;
   secretStore: SecretStore;
   transport: HttpTransport;
-  loadSkill?: () => Promise<{
-    skillPackage: SkillPackage;
-    packageHash: string;
-  }>;
 }
-
-const EMPTY_CAPABILITIES = {
-  tools: false,
-  streaming: false,
-  vision: false
-} as const;
 
 export async function runConnectionDiagnostic(
   deps: ConnectionDiagnosticDeps,
@@ -53,116 +26,58 @@ export async function runConnectionDiagnostic(
 ): Promise<ConnectionDiagnosticResult> {
   const settings = normalizeSettings(deps.settings);
   const model = settings.model;
-  let capabilities: ConnectionDiagnosticResult["capabilities"] = {
-    ...EMPTY_CAPABILITIES
-  };
 
   try {
     if (signal.aborted) {
       throw new AiError("aborted");
     }
     if (!model.trim()) {
-      return failureResult(model, "missing_model", capabilities);
+      return failureResult(model, "missing_model");
     }
     try {
       validateBaseUrl(settings.baseUrl);
     } catch {
-      return failureResult(model, "invalid_base_url", capabilities);
+      return failureResult(model, "invalid_base_url");
     }
 
     let hasSecret = false;
     try {
       hasSecret = Boolean(deps.secretStore.get(settings.secretId));
     } catch {
-      return failureResult(model, "missing_secret", capabilities);
+      return failureResult(model, "missing_secret");
     }
     if (!hasSecret) {
-      return failureResult(model, "missing_secret", capabilities);
+      return failureResult(model, "missing_secret");
     }
 
-    const providerClient = OpenAiCompatibleClient.fromSettings(
+    const client = OpenAiCompatibleClient.fromSettings(
       deps.transport,
       settings,
       deps.secretStore
     );
-    let connected = false;
-    let connectionErrorCode = "diagnostic_failed";
-    const client: ChatClient = {
-      complete: async (request, requestSignal) => {
-        try {
-          const result = await providerClient.complete(request, requestSignal);
-          connected = true;
-          return result;
-        } catch (error) {
-          connectionErrorCode = errorCode(error);
-          throw error;
-        }
-      }
-    };
-    const observed = await new CapabilityProbe(client).probe(
-      { baseUrl: settings.baseUrl, model },
-      signal,
-      { streaming: true, vision: true }
-    );
-    capabilities = selectCapabilities(observed);
-    if (!connected) {
-      return failureResult(model, connectionErrorCode, capabilities);
-    }
-
-    const activeSkill = deps.loadSkill
-      ? await deps.loadSkill()
-      : {
-          skillPackage: await new BundledSkillLoader().load(),
-          packageHash: BUNDLED_SKILL.archiveSha256
-        };
-    const skillPackage = activeSkill.skillPackage;
-    const session = new SkillSession({
-      client,
-      target: { baseUrl: settings.baseUrl, model },
-      capabilities: observed,
-      skillPackage,
-      vfs: new SkillVirtualFileSystem(skillPackage.files),
-      packageHash: activeSkill.packageHash
-    });
-    await session.bootstrap(signal);
-    const audit = session.audit();
+    const response = await client.complete({
+      baseUrl: settings.baseUrl,
+      model,
+      messages: [{ role: "user", content: "Reply with exactly OK." }]
+    }, signal);
+    if (!response.content.trim()) throw new AiError("invalid_response");
 
     return {
       ok: true,
-      model,
-      capabilities,
-      skillVersion: audit.skillVersion,
-      skillLoadMode: audit.loadMode,
-      skillFiles: audit.files
+      model
     };
   } catch (error) {
-    return failureResult(model, errorCode(error), capabilities);
+    return failureResult(model, errorCode(error));
   }
-}
-
-function selectCapabilities(
-  capabilities: ProviderCapabilities
-): ConnectionDiagnosticResult["capabilities"] {
-  return {
-    tools: capabilities.tools,
-    streaming: capabilities.streaming,
-    vision: capabilities.vision
-  };
 }
 
 function failureResult(
   model: string,
-  errorCode: string,
-  capabilities: ConnectionDiagnosticResult["capabilities"],
-  skillLoadMode: SkillLoadMode = "tool-calls"
+  errorCode: string
 ): ConnectionDiagnosticResult {
   return {
     ok: false,
     model,
-    capabilities: { ...capabilities },
-    skillVersion: PINNED_GZH_DESIGN_VERSION,
-    skillLoadMode,
-    skillFiles: [],
     errorCode
   };
 }

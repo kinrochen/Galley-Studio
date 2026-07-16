@@ -86,6 +86,20 @@ export class ArticleCatalog {
     const unavailable: UnavailableArticle[] = [];
     const pairedSidecars = new Set<string>();
 
+    for (const htmlFile of files.filter(
+      ({ path }) =>
+        path.endsWith(".html") &&
+        !path.endsWith(HTML_SUFFIX) &&
+        byPath.has(path.replace(/\.html$/iu, ".md"))
+    )) {
+      const inspected = await this.#inspectSingleHtml(htmlFile);
+      if ("reason" in inspected) {
+        unavailable.push({ path: htmlFile.path, reason: inspected.reason });
+      } else {
+        documents.push(inspected.article);
+      }
+    }
+
     for (const htmlFile of files.filter(({ path }) => path.endsWith(HTML_SUFFIX))) {
       const sidecarPath = pairPath(htmlFile.path, HTML_SUFFIX, SIDECAR_SUFFIX);
       const sidecarFile = byPath.get(sidecarPath);
@@ -170,6 +184,38 @@ export class ArticleCatalog {
         ),
         exportCount: sidecar.exports.length,
         validation: sidecar.validation.valid ? "valid" : "unverified"
+      })
+    };
+  }
+
+  async #inspectSingleHtml(
+    htmlFile: ArticleCatalogFile
+  ): Promise<
+    | { readonly article: CatalogArticle }
+    | { readonly reason: UnavailableArticleReason }
+  > {
+    let html: string;
+    try {
+      html = await this.vault.read(htmlFile);
+    } catch {
+      return { reason: "unreadable" };
+    }
+    if (!html.trim() || !/<[a-z][\s\S]*>/iu.test(html)) {
+      return { reason: "invalid_document" };
+    }
+    const modifiedAt = htmlFile.stat?.mtime ?? htmlFile.stat?.ctime ?? 0;
+    return {
+      article: Object.freeze({
+        htmlPath: htmlFile.path,
+        sidecarPath: "",
+        sourcePath: htmlFile.path.replace(/\.html$/iu, ".md"),
+        documentId: htmlFile.path,
+        themeId: "",
+        model: "",
+        generatedAt: new Date(modifiedAt || Date.now()).toISOString(),
+        modifiedAt,
+        exportCount: 0,
+        validation: "valid"
       })
     };
   }

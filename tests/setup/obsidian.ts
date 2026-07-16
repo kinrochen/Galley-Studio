@@ -102,6 +102,14 @@ export class Plugin {
     this.views.set(type, creator);
   }
 
+  registerExtensions(extensions: string[], viewType: string): void {
+    (
+      this.app as {
+        registerExtensions?: (extensions: string[], viewType: string) => void;
+      }
+    ).registerExtensions?.(extensions, viewType);
+  }
+
   unregisterView(type: string): void {
     this.views.delete(type);
   }

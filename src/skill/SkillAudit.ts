@@ -1,4 +1,4 @@
-export type SkillLoadMode = "tool-calls" | "injected" | "mixed";
+export type SkillLoadMode = "tool-calls" | "injected" | "filesystem" | "mixed";
 
 export interface SkillLoadAudit {
   skillId: string;

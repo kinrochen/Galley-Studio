@@ -18,7 +18,7 @@ it("normalizes provider settings without an apiKey field", () => {
   expect(settings.language).toBe("auto");
 });
 
-it("migrates old settings to auto without changing existing normalized fields", () => {
+it("migrates old settings to auto and the fixed 30-minute timeout", () => {
   const oldSettings = {
     baseUrl: "https://api.example.com/v1/",
     model: "existing-model",
@@ -38,6 +38,7 @@ it("migrates old settings to auto without changing existing normalized fields", 
   expect(language).toBe("auto");
   expect(explicitLanguage).toBe("auto");
   expect(withoutLanguage).toEqual(explicitWithoutLanguage);
+  expect(migrated.timeoutMs).toBe(1_800_000);
 });
 
 it.each(["auto", "zh-CN", "en"] as const)(
@@ -50,6 +51,23 @@ it.each(["auto", "zh-CN", "en"] as const)(
 it("normalizes unsupported languages to auto", () => {
   expect(normalizeSettings({ language: "de" }).language).toBe("auto");
   expect(normalizeSettings({ language: null }).language).toBe("auto");
+});
+
+it("normalizes the selected generation Agent and local executable paths", () => {
+  expect(normalizeSettings({
+    generationAgent: "codex-cli",
+    codexCliPath: "  /opt/bin/codex  ",
+    claudeCliPath: ""
+  })).toMatchObject({
+    generationAgent: "codex-cli",
+    codexCliPath: "/opt/bin/codex",
+    claudeCliPath: "claude"
+  });
+  expect(normalizeSettings({ generationAgent: "unknown" })).toMatchObject({
+    generationAgent: "plugin",
+    codexCliPath: "codex",
+    claudeCliPath: "claude"
+  });
 });
 
 it("normalizes reusable export configurations and drops unsafe persisted entries", () => {
@@ -88,6 +106,13 @@ it("uses field defaults for non-finite numeric settings", () => {
   expect(settings.timeoutMs).toBe(DEFAULT_SETTINGS.timeoutMs);
   expect(settings.contextWindow).toBe(DEFAULT_SETTINGS.contextWindow);
 });
+
+it.each([45_000, 300_000, 600_000, 3_600_000])(
+  "migrates legacy timeout %i to 30 minutes",
+  (timeoutMs) => {
+    expect(normalizeSettings({ timeoutMs }).timeoutMs).toBe(1_800_000);
+  }
+);
 
 it("loads normalized settings and saves only the normalized settings object", async () => {
   const plugin = new GalleyPlugin({} as App, {} as PluginManifest);

@@ -241,19 +241,18 @@ describe("console management pages", () => {
       .toBe("Source 副本");
   });
 
-  it("renders every desktop setting, SecretStorage choices, and explicit diagnostics", async () => {
+  it("renders only the Agent connection settings and explicit diagnostics", async () => {
     const runDiagnostic = vi.fn(async () => ({
       ok: true,
-      model: "model-x",
-      capabilities: { tools: true, streaming: true, vision: false },
-      skillVersion: "bundled",
-      skillLoadMode: "tool-calls" as const,
-      skillFiles: ["SKILL.md"]
+      model: "model-x"
     }));
     const container = document.createElement("div");
     await renderSettingsPage(container, {
       actions: baseActions({
         readSettings: async () => ({
+          generationAgent: "plugin",
+          codexCliPath: "codex",
+          claudeCliPath: "claude",
           baseUrl: "https://api.example.com/v1",
           model: "model-x",
           secretId: "provider-key",
@@ -271,7 +270,16 @@ describe("console management pages", () => {
       run: directRun
     });
 
-    expect(container.querySelectorAll("form input")).toHaveLength(6);
+    expect(container.querySelectorAll("form input")).toHaveLength(2);
+    expect(
+      [...container.querySelectorAll<HTMLSelectElement>('[name="generationAgent"] option')]
+        .map((option) => option.value)
+    ).toEqual(["plugin", "codex-cli", "claude-cli"]);
+    for (const removed of ["temperature", "timeoutMs", "contextWindow", "outputFolder"]) {
+      expect(container.querySelector(`[name="${removed}"]`)).toBeNull();
+    }
+    expect(container.querySelector('[name="codexCliPath"]')).toBeNull();
+    expect(container.querySelector('[name="claudeCliPath"]')).toBeNull();
     expect(
       [...container.querySelectorAll<HTMLSelectElement>('[name="secretId"] option')].map(
         (option) => option.value
@@ -285,6 +293,9 @@ describe("console management pages", () => {
     const locale = new LocaleStore({ language: "en", obsidianLocale: () => "en" });
     let durableLanguage: "en" | "zh-CN" = "en";
     const saveSettings = vi.fn(async (value) => ({
+      generationAgent: "plugin" as const,
+      codexCliPath: "codex",
+      claudeCliPath: "claude",
       baseUrl: "https://api.example.com/v1",
       model: String(value.model ?? "model-x"),
       secretId: "provider-key",
@@ -298,6 +309,9 @@ describe("console management pages", () => {
     const container = document.createElement("div");
     const actions = baseActions({
       readSettings: async () => ({
+        generationAgent: "plugin",
+        codexCliPath: "codex",
+        claudeCliPath: "claude",
         baseUrl: "https://api.example.com/v1",
         model: "model-x",
         secretId: "provider-key",
@@ -333,6 +347,9 @@ describe("console management pages", () => {
     const container = document.createElement("div");
     const actions = baseActions({
       readSettings: async () => ({
+        generationAgent: "plugin",
+        codexCliPath: "codex",
+        claudeCliPath: "claude",
         baseUrl: "https://api.example.com/v1",
         model: "diagnostic-model",
         secretId: "provider-key",
@@ -346,10 +363,6 @@ describe("console management pages", () => {
       runDiagnostic: async () => ({
         ok: false,
         model: "diagnostic-model",
-        capabilities: { tools: true, streaming: false, vision: true },
-        skillVersion: "2026.7",
-        skillLoadMode: "tool-calls",
-        skillFiles: ["SKILL.md", "references/theme-index.md"],
         errorCode: "invalid_response\nAuthorization: secret"
       })
     });
@@ -360,15 +373,15 @@ describe("console management pages", () => {
       expect(container.querySelector('[data-diagnostic-result]')?.textContent)
         .toContain("diagnostic-model")
     );
-    expect(container.querySelector('[data-diagnostic-result]')?.textContent).toContain("SKILL.md");
     expect(container.querySelector('[data-diagnostic-result]')?.textContent).toContain("diagnostic_failed");
     expect(container.querySelector('[data-diagnostic-result]')?.textContent).not.toContain("Authorization");
+    expect(container.querySelector('[data-diagnostic-result]')?.textContent).not.toContain("Skill");
 
     locale.configure("zh-CN");
     container.replaceChildren();
     await renderSettingsPage(container, { actions, text: locale, state, run: directRun });
-    expect(container.querySelector('[data-diagnostic-result]')?.textContent).toContain("失败");
-    expect(container.querySelector('[data-diagnostic-result]')?.textContent).toContain("技能文件");
+    expect(container.querySelector('[data-diagnostic-result]')?.textContent).toContain("不可用");
+    expect(container.querySelector('[data-diagnostic-result]')?.textContent).not.toContain("技能");
   });
 });
 

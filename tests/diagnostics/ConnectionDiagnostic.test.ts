@@ -4,51 +4,26 @@ import type { HttpTransport } from "../../src/ai/AiProtocol";
 import { runConnectionDiagnostic } from "../../src/diagnostics/ConnectionDiagnostic";
 import { MemorySecretStore } from "../../src/secrets/SecretStore";
 import type { GalleySettings } from "../../src/settings/GalleySettings";
-import { PINNED_GZH_DESIGN_VERSION } from "../../src/skill/BundledSkillLoader";
 import { makeDiagnosticDeps } from "../support/phase1Factories";
 
 const signal = (): AbortSignal => new AbortController().signal;
 
-it("reports capability and audited Skill loading without returning the secret", async () => {
-  const result = await runConnectionDiagnostic(makeDiagnosticDeps(), signal());
-
-  expect(result).toEqual({
-    ok: true,
-    model: "diagnostic-model",
-    capabilities: { tools: true, streaming: false, vision: false },
-    skillVersion: PINNED_GZH_DESIGN_VERSION,
-    skillLoadMode: "tool-calls",
-    skillFiles: ["SKILL.md", "references/theme-index.md"]
-  });
-  expect(JSON.stringify(result)).not.toContain("super-secret");
-});
-
-it("reports the real session injection audit when tools are unavailable", async () => {
+it("uses one minimal model call without loading or reporting the Skill", async () => {
   const post = vi.fn<HttpTransport["post"]>().mockResolvedValue({
     status: 200,
-    json: {
-      choices: [
-        {
-          message: { role: "assistant", content: "no tool call" },
-          finish_reason: "stop"
-        }
-      ]
-    }
+    json: { choices: [{ message: { role: "assistant", content: "OK" }, finish_reason: "stop" }] }
   });
-
   const result = await runConnectionDiagnostic(
     makeDiagnosticDeps({ transport: { post } }),
     signal()
   );
 
-  expect(result).toMatchObject({
+  expect(result).toEqual({
     ok: true,
-    capabilities: { tools: false, streaming: false, vision: false },
-    skillVersion: PINNED_GZH_DESIGN_VERSION,
-    skillLoadMode: "injected",
-    skillFiles: ["SKILL.md", "references/theme-index.md"]
+    model: "diagnostic-model"
   });
-  expect(post).toHaveBeenCalledTimes(2);
+  expect(JSON.stringify(result)).not.toContain("super-secret");
+  expect(post).toHaveBeenCalledTimes(1);
 });
 
 it("returns an allowlisted error code when the configured secret is missing", async () => {
@@ -65,10 +40,6 @@ it("returns an allowlisted error code when the configured secret is missing", as
   expect(result).toMatchObject({
     ok: false,
     model: "diagnostic-model",
-    capabilities: { tools: false, streaming: false, vision: false },
-    skillVersion: PINNED_GZH_DESIGN_VERSION,
-    skillLoadMode: "tool-calls",
-    skillFiles: [],
     errorCode: "missing_secret"
   });
   expect(post).not.toHaveBeenCalled();
@@ -94,8 +65,6 @@ it("does not report a connection success when every real probe is rejected", asy
 
   expect(result).toMatchObject({
     ok: false,
-    capabilities: { tools: false, streaming: false, vision: false },
-    skillFiles: [],
     errorCode: "http_error"
   });
   expect(post).toHaveBeenCalledTimes(1);
@@ -145,14 +114,14 @@ it("uses one normalized settings snapshot across every awaited request", async (
 
   expect(result.ok).toBe(true);
   expect(result.model).toBe("model-a");
-  expect(requests).toHaveLength(5);
-  expect(requests.map(({ url }) => url)).toEqual(
-    Array(5).fill("https://api-a.example/v1/chat/completions")
-  );
-  expect(requests.map(({ headers }) => headers.Authorization)).toEqual(
-    Array(5).fill("Bearer secret-a")
-  );
+  expect(requests).toHaveLength(1);
+  expect(requests.map(({ url }) => url)).toEqual([
+    "https://api-a.example/v1/chat/completions"
+  ]);
+  expect(requests.map(({ headers }) => headers.Authorization)).toEqual([
+    "Bearer secret-a"
+  ]);
   expect(
     requests.map(({ body }) => (body as { model?: unknown }).model)
-  ).toEqual(Array(5).fill("model-a"));
+  ).toEqual(["model-a"]);
 });

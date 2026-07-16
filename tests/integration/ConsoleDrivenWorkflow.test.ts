@@ -131,6 +131,9 @@ describe("production services behind typed console actions", () => {
         ],
         listSecrets: async () => ["recorded-key"],
         readSettings: async () => ({
+          generationAgent: "plugin",
+          codexCliPath: "codex",
+          claudeCliPath: "claude",
           baseUrl: "https://api.example/v1",
           model: "recorded-model",
           secretId: "recorded-key",
@@ -291,20 +294,15 @@ describe("production services behind typed console actions", () => {
     editorHost.remove();
     expect(documentSession.html()).toContain("visually edited through HugeRTE");
 
-    await consoleView.navigate("exports");
-    for (const configuration of managedConfigurations()) {
-      fillExportConfiguration(consoleView.contentEl, configuration);
-      consoleView.contentEl.querySelector<HTMLFormElement>("form")?.dispatchEvent(
-        new Event("submit")
-      );
-      await vi.waitFor(() =>
-        expect(
-          host
-            .getSettings()
-            .exportConfigurations.find(({ id }) => id === configuration.id)
-        ).toMatchObject(configuration)
-      );
-    }
+    expect(
+      [...consoleView.contentEl.querySelectorAll('[role="tab"]')]
+        .map((tab) => tab.textContent)
+    ).not.toContain("Export configurations");
+    host.replaceSettings({
+      ...host.getSettings(),
+      exportConfigurations: managedConfigurations()
+    });
+    await host.saveSettings();
     expect(durable.exportConfigurations).toEqual(managedConfigurations());
 
     const savedAuthoringBytes = backing.read("Galley/console.galley.html");

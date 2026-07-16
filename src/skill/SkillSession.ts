@@ -34,6 +34,8 @@ export interface SkillSessionOptions {
   skillPackage: SkillPackage;
   vfs: SkillVirtualFileSystem;
   packageHash: string;
+  /** The client can read the materialized Skill package from its local filesystem. */
+  nativeSkillAccess?: boolean;
 }
 
 interface ValidatedRead {
@@ -74,8 +76,10 @@ export class SkillSession {
   readonly #auditFiles: string[] = [];
   readonly #seenToolCallIds = new Set<string>();
   readonly #capabilities: ProviderCapabilities;
+  readonly #nativeSkillAccess: boolean;
   #usedToolCalls = false;
   #usedInjection = false;
+  #usedFilesystem = false;
 
   constructor(options: SkillSessionOptions) {
     this.#client = options.client;
@@ -85,6 +89,7 @@ export class SkillSession {
     this.#vfs = options.vfs;
     this.#packageHash = options.packageHash;
     this.#capabilities = { ...options.capabilities };
+    this.#nativeSkillAccess = options.nativeSkillAccess ?? false;
   }
 
   async bootstrap(signal: AbortSignal): Promise<void> {
@@ -103,6 +108,10 @@ export class SkillSession {
 
     let missing = required.filter((path) => !this.#loadedFiles.has(path));
     if (missing.length === 0) {
+      return;
+    }
+    if (this.#nativeSkillAccess) {
+      for (const path of missing) this.#recordLoad(path, "filesystem");
       return;
     }
     if (!this.#capabilities.tools) {
@@ -430,8 +439,10 @@ export class SkillSession {
   #recordLoad(path: string, mode: Exclude<SkillLoadMode, "mixed">): void {
     if (mode === "tool-calls") {
       this.#usedToolCalls = true;
-    } else {
+    } else if (mode === "injected") {
       this.#usedInjection = true;
+    } else {
+      this.#usedFilesystem = true;
     }
     if (!this.#loadedFiles.has(path)) {
       this.#loadedFiles.add(path);
@@ -440,9 +451,11 @@ export class SkillSession {
   }
 
   #loadMode(): SkillLoadMode {
-    if (this.#usedToolCalls && this.#usedInjection) {
+    const modes = Number(this.#usedToolCalls) + Number(this.#usedInjection) + Number(this.#usedFilesystem);
+    if (modes > 1) {
       return "mixed";
     }
+    if (this.#usedFilesystem) return "filesystem";
     return this.#usedInjection ? "injected" : "tool-calls";
   }
 

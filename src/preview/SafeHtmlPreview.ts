@@ -13,7 +13,9 @@ const PREVIEW_CSP = [
 ].join("; ");
 
 export function safePreviewHtml(html: string): string {
-  const sanitized = sanitizeAuthoringDocument(html, {
+  const parsed = new DOMParser().parseFromString(html, "text/html");
+  const normalized = `<!DOCTYPE html>${parsed.documentElement.outerHTML}`;
+  const sanitized = sanitizeAuthoringDocument(normalized, {
     additionalAttributes: ["data-galley-theme-block"]
   }).html;
   const document = new DOMParser().parseFromString(sanitized, "text/html");
@@ -28,7 +30,10 @@ export function safePreviewHtml(html: string): string {
   const referrer = document.createElement("meta");
   referrer.setAttribute("name", "referrer");
   referrer.setAttribute("content", "no-referrer");
-  document.head.prepend(csp, referrer);
+  const defaults = document.createElement("style");
+  defaults.textContent =
+    ":root{color-scheme:light;background:#fff}html,body{min-height:100%;background:#fff}body{margin:0}";
+  document.head.prepend(csp, referrer, defaults);
   return `<!DOCTYPE html>${document.documentElement.outerHTML}`;
 }
 

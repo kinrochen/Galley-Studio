@@ -38,6 +38,7 @@ export async function ArticlePage(
   search.value = options.state.query;
   search.placeholder = options.text.t("console.articles.search");
   search.setAttribute("aria-label", options.text.t("console.articles.search"));
+  search.className = "galley-console__article-search";
   container.append(search);
 
   const snapshot = await options.actions.listArticles();
@@ -79,7 +80,7 @@ export async function ArticlePage(
       row.className = "galley-console__unavailable";
       const cell = document.createElement("td");
       cell.colSpan = 2;
-      cell.textContent = `${unavailable.path} — ${options.text.t("console.unavailable", {
+      cell.textContent = `${unavailable.path} - ${options.text.t("console.unavailable", {
         reason: options.text.t(UNAVAILABLE_REASON_KEYS[unavailable.reason])
       })}`;
       row.append(cell);

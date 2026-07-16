@@ -1,5 +1,4 @@
 import type {
-  ConsoleHomeActivitySnapshot,
   GalleyActions,
   SettingsSnapshot,
   SkillSummary,
@@ -8,10 +7,13 @@ import type {
 import type {
   ActiveContext,
   ArticleCatalogSnapshot,
-  ConsoleRoute
+  ConsoleRoute,
+  GenerateArticleFormInput
 } from "./ConsoleTypes";
 import type { MessageKey } from "../i18n/Resources";
 import type { GenerationStage } from "../generation/GenerationProgress";
+import type { GenerationTaskController } from "../generation/GenerationTask";
+import { createThemePreview } from "./ThemePreview";
 
 export interface ConsolePageText {
   t(key: MessageKey, parameters?: Readonly<Record<string, string | number>>): string;
@@ -32,6 +34,8 @@ export interface ConsoleHomeEnvironment {
   ) => Promise<void>;
   readonly navigate: (route: ConsoleRoute) => Promise<void>;
   readonly reportProgress: (stage: GenerationStage) => void;
+  readonly generationTask?: GenerationTaskController;
+  readonly startGeneration: (input: GenerateArticleFormInput) => Promise<void>;
 }
 
 interface HomeManagementSnapshot {
@@ -39,7 +43,6 @@ interface HomeManagementSnapshot {
   readonly themes: readonly ThemeSummary[];
   readonly skills: readonly SkillSummary[];
   readonly secretAvailable: boolean;
-  readonly activity?: ConsoleHomeActivitySnapshot;
 }
 
 export async function renderConsoleHome(
@@ -82,22 +85,20 @@ export async function renderConsoleHome(
       ?? management.settings?.activeSkillVersion;
     const readiness = document.createElement("div");
     readiness.className = "galley-console__readiness";
+    const generationAgent = management.settings?.generationAgent ?? "plugin";
+    const agentName = generationAgent === "codex-cli"
+      ? text.t("console.settings.agent.codex")
+      : generationAgent === "claude-cli"
+        ? text.t("console.settings.agent.claude")
+        : `${text.t("console.settings.agent.plugin")}${management.settings?.model ? ` · ${management.settings.model}` : ""}`;
     readiness.append(
       readinessItem(
-        text.t("console.home.readiness.model"),
-        management.settings?.model || text.t("console.home.readiness.missing")
+        text.t("console.home.readiness.agent"),
+        agentName
       ),
       readinessItem(
         text.t("console.home.readiness.skill"),
         activeSkill || text.t("console.home.readiness.missing")
-      ),
-      readinessItem(
-        text.t("console.home.readiness.apiKey"),
-        text.t(
-          management.secretAvailable
-            ? "console.home.readiness.configured"
-            : "console.home.readiness.missing"
-        )
       ),
       readinessItem(
         text.t("console.home.readiness.themes"),
@@ -105,6 +106,21 @@ export async function renderConsoleHome(
       )
     );
     section.append(readiness);
+
+    const task = environment.generationTask?.snapshot();
+    if (task && task.status !== "idle") {
+      const taskNotice = document.createElement("button");
+      taskNotice.type = "button";
+      taskNotice.dataset.action = "view-generation";
+      taskNotice.className = "galley-console__generation-task";
+      taskNotice.textContent = task.status === "running"
+        ? text.t("console.generation.backgroundHint")
+        : text.t("console.generation.completed", {
+            path: task.result?.htmlPath ?? task.sourcePath ?? ""
+          });
+      taskNotice.addEventListener("click", () => void environment.navigate("generation"));
+      section.append(taskNotice);
+    }
 
     const form = document.createElement("form");
     form.className = "galley-console__generate-form";
@@ -123,11 +139,15 @@ export async function renderConsoleHome(
     submit.classList.add("mod-cta", "galley-console__generate");
     submit.type = "submit";
     const configured = Boolean(
-      management.settings?.model.trim() &&
-      management.secretAvailable &&
+      management.settings &&
+      (management.settings.generationAgent === "plugin"
+        ? management.settings.model.trim() && management.secretAvailable
+        : management.settings.generationAgent === "codex-cli"
+          ? management.settings.codexCliPath.trim()
+          : management.settings.claudeCliPath.trim()) &&
       enabledThemes.length
     );
-    submit.disabled = !configured;
+    submit.disabled = !configured || task?.status === "running";
     const settings = routeButton(
       environment,
       "settings",
@@ -143,16 +163,10 @@ export async function renderConsoleHome(
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       if (!configured || !state.themeId) return;
-      void environment.run("generate", (signal) =>
-        actions.generateActiveMarkdown(
-          {
-            themeId: state.themeId,
-            sourcePath: context.path,
-            onProgress: environment.reportProgress
-          },
-          signal
-        )
-      );
+      void environment.startGeneration({
+        themeId: state.themeId,
+        sourcePath: context.path
+      });
     });
     section.append(form);
   } else if (context.kind === "galley") {
@@ -248,36 +262,6 @@ export async function renderConsoleHome(
   }
   container.append(recent);
 
-  const quick = document.createElement("div");
-  quick.className = "galley-console__quick-actions";
-  const themeLab = button(text.t("console.action.openThemeLab"), "theme-lab");
-  themeLab.addEventListener("click", () =>
-    void environment.run("theme-lab", async () => actions.desktop?.openThemeLab?.())
-  );
-  quick.append(
-    themeLab,
-    routeButton(environment, "themes", text.t("console.nav.themes")),
-    routeButton(environment, "skills", text.t("console.nav.skills")),
-    routeButton(environment, "exports", text.t("console.nav.exports")),
-    routeButton(environment, "settings", text.t("console.nav.settings"))
-  );
-  container.append(quick);
-
-  if (management.activity?.pendingExport || management.activity?.unsavedThemeDraft) {
-    const activity = document.createElement("aside");
-    activity.className = "galley-console__activity";
-    if (management.activity.pendingExport) {
-      appendText(activity, text.t("console.home.activity.pendingExport", {
-        path: management.activity.pendingExport.path
-      }));
-    }
-    if (management.activity.unsavedThemeDraft) {
-      appendText(activity, text.t("console.home.activity.unsavedTheme", {
-        name: management.activity.unsavedThemeDraft.name
-      }));
-    }
-    container.append(activity);
-  }
 }
 
 function themePicker(
@@ -308,6 +292,11 @@ function themePicker(
     const label = document.createElement("label");
     label.htmlFor = input.id;
     label.dataset.themeId = theme.id;
+    label.append(createThemePreview(
+      theme.id,
+      theme.name,
+      text.t("console.themes.preview", { theme: theme.name })
+    ));
     const copy = document.createElement("span");
     const name = document.createElement("strong");
     name.textContent = theme.name;
@@ -340,12 +329,11 @@ async function safeArticles(actions: GalleyActions): Promise<ArticleCatalogSnaps
 async function safeManagement(actions: GalleyActions): Promise<HomeManagementSnapshot> {
   const runtime = actions.desktop;
   if (!runtime) return emptyManagement();
-  const [settings, themes, skills, secrets, activity] = await Promise.all([
+  const [settings, themes, skills, secrets] = await Promise.all([
     runtime.readSettings?.().catch(() => undefined),
     runtime.listThemes?.().catch(() => []),
     runtime.listSkills?.().catch(() => []),
-    runtime.listSecrets?.().catch(() => []),
-    runtime.readHomeActivity?.().catch(() => undefined)
+    runtime.listSecrets?.().catch(() => [])
   ]);
   return {
     ...(settings ? { settings } : {}),
@@ -353,8 +341,7 @@ async function safeManagement(actions: GalleyActions): Promise<HomeManagementSna
     skills: skills ?? [],
     secretAvailable: Boolean(
       settings?.secretId && (secrets ?? []).includes(settings.secretId)
-    ),
-    ...(activity ? { activity } : {})
+    )
   };
 }
 

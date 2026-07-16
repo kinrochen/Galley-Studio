@@ -9,7 +9,7 @@ import { GALLEY_WORKBENCH_VIEW_TYPE } from "../../src/workbench/GalleyWorkbenchV
 afterEach(() => { Platform.isMobileApp = false; });
 
 describe("desktop export and mobile preview registration", () => {
-  it("registers only preview access on mobile and never workbench, generation, or repair commands", async () => {
+  it("registers html preview access on mobile and never workbench, generation, or repair commands", async () => {
     Platform.isMobileApp = true;
     const harness = makeApp("notes/a.galley.html");
     const plugin = new GalleyPlugin(harness.app, {} as PluginManifest);
@@ -27,12 +27,15 @@ describe("desktop export and mobile preview registration", () => {
     expect(commandIds).toContain("open-current-galley-preview");
     expect(commandIds).not.toContain("open-current-galley-in-workbench");
     expect(commandIds).not.toContain("generate-current-article");
-    expect(commandIds).not.toContain("check-model-connection-and-skill-loading");
+    expect(commandIds).not.toContain("check-generation-agent-availability");
     expect(commandIds.some((id) => /repair|skill-import/u.test(id))).toBe(false);
-    expect(harness.registerExtensions).not.toHaveBeenCalled();
+    expect(harness.registerExtensions).toHaveBeenCalledWith(
+      ["html"],
+      GALLEY_PREVIEW_VIEW_TYPE
+    );
   });
 
-  it("registers desktop preview plus workbench/export capabilities but still does not claim ordinary html", async () => {
+  it("registers desktop html files to the reusable workbench", async () => {
     const harness = makeApp("notes/a.galley.html");
     const plugin = new GalleyPlugin(harness.app, {} as PluginManifest);
     await plugin.onload();
@@ -42,7 +45,10 @@ describe("desktop export and mobile preview registration", () => {
       GALLEY_PREVIEW_VIEW_TYPE,
       GALLEY_WORKBENCH_VIEW_TYPE
     ]));
-    expect(harness.registerExtensions).not.toHaveBeenCalled();
+    expect(harness.registerExtensions).toHaveBeenCalledWith(
+      ["html"],
+      GALLEY_WORKBENCH_VIEW_TYPE
+    );
   });
 });
 
