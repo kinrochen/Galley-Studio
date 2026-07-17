@@ -12,6 +12,7 @@ import type { DocumentSessionState, SaveReason } from "../documents/DocumentSess
 import type { DocumentRecoveryState } from "../documents/DocumentSessionOpener";
 import type { HistorySnapshot } from "../documents/HistoryRepository";
 import type { EditorResourceResolver } from "../editor/EditorResourceResolver";
+import type { PreviewResourceResolver } from "../preview/PreviewResourceResolver";
 import type { HtmlEditorAdapter } from "../editor/HtmlEditorAdapter";
 import { ThemeComponentCatalog } from "../editor/ThemeComponentCatalog";
 import { transformSelectedBlock } from "../editor/ComponentTransformer";
@@ -94,6 +95,10 @@ export interface GalleyWorkbenchViewServices {
   readonly resourceResolver?: Pick<
     EditorResourceResolver,
     "rewriteForDisplay" | "restoreForSave"
+  >;
+  readonly previewResourceResolver?: Pick<
+    PreviewResourceResolver,
+    "rewriteForPreview"
   >;
   readonly documentBaseUrl?: (path: string) => string;
   readonly exportConfigurations?: readonly ExportConfiguration[];
@@ -473,7 +478,7 @@ export class GalleyWorkbenchView extends ItemView {
       this.#catalog = ThemeComponentCatalog.fromDocument(session.bodyHtml());
       this.#adapter?.setHtml(this.#bodyForCurrentEditor());
       this.#render();
-      if (this.#state.mode === "preview") this.#renderPreview();
+      if (this.#state.mode === "preview") await this.#renderPreview();
       return;
     }
     await this.#save("overwrite");
@@ -492,7 +497,7 @@ export class GalleyWorkbenchView extends ItemView {
     this.#syncStateFromSession(true);
     this.#adapter?.setHtml(this.#bodyForCurrentEditor());
     this.#render();
-    if (this.#state.mode === "preview") this.#renderPreview();
+    if (this.#state.mode === "preview") await this.#renderPreview();
   }
 
   #ensureShell(): void {
@@ -636,7 +641,7 @@ export class GalleyWorkbenchView extends ItemView {
     if (!session || this.#closed || generation !== this.#mountGeneration) return;
     this.#canvas.replaceChildren();
     if (mode === "preview") {
-      this.#renderPreview();
+      await this.#renderPreview();
       return;
     }
     const adapter = mode === "visual"
@@ -681,21 +686,41 @@ export class GalleyWorkbenchView extends ItemView {
     }
   }
 
-  #renderPreview(): void {
+  async #renderPreview(): Promise<void> {
     const session = this.#document?.session;
     if (!session) return;
     let previewHtml = session.html();
-    if (this.#services.resourceResolver) {
+    if (this.#services.previewResourceResolver) {
+      try {
+        const parsed = GalleyDocumentCodec.parse(previewHtml);
+        previewHtml = GalleyDocumentCodec.serialize({
+          ...parsed,
+          bodyHtml: await this.#services.previewResourceResolver.rewriteForPreview(
+            parsed.bodyHtml,
+            this.#state.documentPath ?? ""
+          )
+        });
+      } catch {
+        previewHtml = await this.#services.previewResourceResolver.rewriteForPreview(
+          previewHtml,
+          this.#state.documentPath ?? ""
+        );
+      }
+    } else if (this.#services.resourceResolver) {
       try {
         const parsed = GalleyDocumentCodec.parse(previewHtml);
         previewHtml = GalleyDocumentCodec.serialize({
           ...parsed,
           bodyHtml: this.#services.resourceResolver.rewriteForDisplay(
-            parsed.bodyHtml
+            parsed.bodyHtml,
+            this.#state.documentPath ?? ""
           )
         });
       } catch {
-        previewHtml = this.#services.resourceResolver.rewriteForDisplay(previewHtml);
+        previewHtml = this.#services.resourceResolver.rewriteForDisplay(
+          previewHtml,
+          this.#state.documentPath ?? ""
+        );
       }
     }
     createSafePreviewFrame(
@@ -734,7 +759,10 @@ export class GalleyWorkbenchView extends ItemView {
     if (this.#closed || this.#adapter !== adapter || !this.#document) return;
     try {
       const body = this.#state.mode === "visual"
-        ? this.#services.resourceResolver?.restoreForSave(displayHtml) ?? displayHtml
+        ? this.#services.resourceResolver?.restoreForSave(
+          displayHtml,
+          this.#state.documentPath ?? ""
+        ) ?? displayHtml
         : displayHtml;
       this.#document.session.updateBody(body);
       this.#syncStateFromSession(true);
@@ -756,7 +784,10 @@ export class GalleyWorkbenchView extends ItemView {
     try {
       const displayHtml = adapter.getHtml();
       const body = this.#state.mode === "visual"
-        ? this.#services.resourceResolver?.restoreForSave(displayHtml) ?? displayHtml
+        ? this.#services.resourceResolver?.restoreForSave(
+          displayHtml,
+          this.#state.documentPath ?? ""
+        ) ?? displayHtml
         : displayHtml;
       session.updateBody(body);
       this.#syncStateFromSession(session.state().dirty);
@@ -768,7 +799,10 @@ export class GalleyWorkbenchView extends ItemView {
   #bodyForCurrentEditor(): string {
     const body = this.#document?.session.bodyHtml() ?? "";
     return this.#state.mode === "visual"
-      ? this.#services.resourceResolver?.rewriteForDisplay(body) ?? body
+      ? this.#services.resourceResolver?.rewriteForDisplay(
+        body,
+        this.#state.documentPath ?? ""
+      ) ?? body
       : body;
   }
 

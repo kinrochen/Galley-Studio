@@ -40,6 +40,7 @@ import {
   isGalleyPreviewPath,
   openGalleyPreview
 } from "./preview/GalleyPreviewView";
+import { PreviewResourceResolver } from "./preview/PreviewResourceResolver";
 import {
   normalizeSettings,
   type GalleySettings
@@ -411,12 +412,17 @@ export default class GalleyPlugin extends Plugin {
       const file = this.app.vault.getFileByPath(path);
       return file ? this.app.vault.getResourcePath(file) : path;
     });
+    const previewResourceResolver = new PreviewResourceResolver(async (path) => {
+      const file = this.app.vault.getFileByPath(path);
+      return file ? this.app.vault.readBinary(file) : null;
+    });
     return new GalleyPreviewView(leaf, {
       openDocument: async (path) => {
         const session = await this.#opener().open(path);
         return { html: session.html() };
       },
       resourceResolver,
+      previewResourceResolver,
       locale: this.localizedText
     });
   }

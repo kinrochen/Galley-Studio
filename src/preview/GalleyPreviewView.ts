@@ -4,6 +4,7 @@ import { isNormalizedVaultRelativePath } from "../documents/GalleySidecar";
 import { GalleyDocumentCodec } from "../documents/GalleyDocumentCodec";
 import type { EditorResourceResolver } from "../editor/EditorResourceResolver";
 import { createSafePreviewFrame } from "./SafeHtmlPreview";
+import type { PreviewResourceResolver } from "./PreviewResourceResolver";
 import {
   ENGLISH_LOCALIZED_TEXT,
   type LocalizedText
@@ -14,6 +15,10 @@ export const GALLEY_PREVIEW_VIEW_TYPE = "galley-studio-preview";
 export interface GalleyPreviewViewServices {
   readonly openDocument: (path: string) => Promise<{ readonly html: string }>;
   readonly resourceResolver?: Pick<EditorResourceResolver, "rewriteForDisplay">;
+  readonly previewResourceResolver?: Pick<
+    PreviewResourceResolver,
+    "rewriteForPreview"
+  >;
   readonly locale?: LocalizedText;
 }
 
@@ -63,15 +68,34 @@ export class GalleyPreviewView extends ItemView {
     this.#path = path;
     this.contentEl.classList.add("galley-preview-view");
     let html = opened.html;
-    if (this.services.resourceResolver) {
+    if (this.services.previewResourceResolver) {
       try {
         const parsed = GalleyDocumentCodec.parse(html);
         html = GalleyDocumentCodec.serialize({
           ...parsed,
-          bodyHtml: this.services.resourceResolver.rewriteForDisplay(parsed.bodyHtml)
+          bodyHtml: await this.services.previewResourceResolver.rewriteForPreview(
+            parsed.bodyHtml,
+            path
+          )
         });
       } catch {
-        html = this.services.resourceResolver.rewriteForDisplay(html);
+        html = await this.services.previewResourceResolver.rewriteForPreview(
+          html,
+          path
+        );
+      }
+    } else if (this.services.resourceResolver) {
+      try {
+        const parsed = GalleyDocumentCodec.parse(html);
+        html = GalleyDocumentCodec.serialize({
+          ...parsed,
+          bodyHtml: this.services.resourceResolver.rewriteForDisplay(
+            parsed.bodyHtml,
+            path
+          )
+        });
+      } catch {
+        html = this.services.resourceResolver.rewriteForDisplay(html, path);
       }
     }
     createSafePreviewFrame(

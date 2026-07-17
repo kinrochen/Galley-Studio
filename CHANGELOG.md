@@ -2,6 +2,30 @@
 
 All notable changes to Galley Studio are documented here.
 
+## 0.2.5 — 2026-07-17
+
+### 中文
+
+- 修复仓库相对图片路径在可视化编辑器中无法显示的问题，并在保存时保留
+  HTML 原始相对路径。
+- 修复本地图片在严格沙箱预览中无法加载的问题；预览阶段会读取并校验
+  PNG、JPEG 与 WebP 图片，再安全地嵌入内存预览副本。
+- 保持预览空沙箱、内容安全策略和移动端边界不变，单张图片读取失败时不影响
+  其余文章内容与图片。
+- 为 Galley Studio 宣传博客增加控制台、生成对话、文章库、主题库和可视化
+  编辑器截图。
+
+### English
+
+- Fix vault-relative images in the visual editor while preserving their original
+  relative paths when the HTML document is saved.
+- Fix local images in the strict sandbox preview by validating and embedding PNG,
+  JPEG, and WebP data only in the in-memory preview copy.
+- Preserve the empty sandbox, content security policy, and mobile boundary while
+  allowing individual image read failures to degrade without breaking the article.
+- Add console, generation conversation, article library, theme library, and visual
+  editor screenshots to the Galley Studio launch article.
+
 ## 0.2.4 — 2026-07-17
 
 ### 中文

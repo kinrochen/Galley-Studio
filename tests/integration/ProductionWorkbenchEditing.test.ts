@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ObsidianDocumentSessionOpener } from "../../src/documents/ObsidianDocumentSessionOpener";
 import type { OpenedGalleyDocumentSession } from "../../src/documents/DocumentSessionOpener";
 import { EditorResourceResolver } from "../../src/editor/EditorResourceResolver";
+import { PreviewResourceResolver } from "../../src/preview/PreviewResourceResolver";
 import type {
   HtmlEditorAdapter,
   HtmlEditorMountOptions
@@ -28,13 +29,13 @@ describe("production Galley Studio workbench editing", () => {
     const firstView = makeView(firstOpener, firstEditor);
 
     await firstView.openPath(OBSIDIAN_SESSION_PATHS.html);
-    expect(firstEditor.html).toContain('src="app://local/images/cover.png"');
+    expect(firstEditor.html).toContain('src="app://local/notes/images/cover.png"');
     expect(firstEditor.html).toContain(
       'data-galley-original-src="images/cover.png"'
     );
 
     firstEditor.emit(
-      '<article data-galley-article="true"><p>edited</p><img src="app://local/images/cover.png" data-galley-original-src="images/cover.png" alt="cover"></article>'
+      '<article data-galley-article="true"><p>edited</p><img src="app://local/notes/images/cover.png" data-galley-original-src="images/cover.png" alt="cover"></article>'
     );
     await firstView.saveExplicit();
 
@@ -54,7 +55,7 @@ describe("production Galley Studio workbench editing", () => {
     const preview = reopenedView.contentEl.querySelector(
       "iframe"
     ) as HTMLIFrameElement;
-    expect(preview.srcdoc).toContain('src="app://local/images/cover.png"');
+    expect(preview.srcdoc).toContain('src="data:image/png;base64,');
     expect(preview.srcdoc).not.toContain("data-galley-original");
     await reopenedView.selectMode("visual");
     const reopened = await restartedOpener.open(OBSIDIAN_SESSION_PATHS.html);
@@ -163,6 +164,9 @@ function makeView(
     openCopy: vi.fn(async () => undefined),
     confirm: vi.fn(async () => true),
     resourceResolver: resolver,
+    previewResourceResolver: new PreviewResourceResolver(async () => new Uint8Array([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a
+    ])),
     documentBaseUrl: () => "app://local/"
   });
 }

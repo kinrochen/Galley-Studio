@@ -19,64 +19,79 @@ const SYSTEM_OR_RUNTIME_URL = /^(?:file:|app:|\/|~\/|[a-z]:[\\/])/iu;
 export class EditorResourceResolver {
   constructor(private readonly resourceUrl: VaultResourceUrl) {}
 
-  rewriteForDisplay(bodyHtml: string): string {
+  rewriteForDisplay(bodyHtml: string, documentPath = ""): string {
     const fragment = parseFragment(bodyHtml);
     for (const element of fragment.querySelectorAll<HTMLElement>(
       "[src], [href], [data-galley-original-src], [data-galley-original-href]"
     )) {
       for (const attribute of ["src", "href"] as const) {
-        this.#rewriteAttribute(element, attribute);
+        this.#rewriteAttribute(element, attribute, documentPath);
       }
     }
     return serializeFragment(fragment);
   }
 
-  restoreForSave(displayHtml: string): string {
+  restoreForSave(displayHtml: string, documentPath = ""): string {
     const fragment = parseFragment(displayHtml);
     for (const element of fragment.querySelectorAll<HTMLElement>(
       "[src], [href], [data-galley-original-src], [data-galley-original-href]"
     )) {
       for (const attribute of ["src", "href"] as const) {
-        this.#restoreAttribute(element, attribute);
+        this.#restoreAttribute(element, attribute, documentPath);
       }
     }
     return serializeFragment(fragment);
   }
 
-  #rewriteAttribute(element: HTMLElement, attribute: "src" | "href"): void {
+  #rewriteAttribute(
+    element: HTMLElement,
+    attribute: "src" | "href",
+    documentPath: string
+  ): void {
     const marker = ORIGINAL_ATTRIBUTE[attribute];
     const existingOriginal = element.getAttribute(marker);
     const current = element.getAttribute(attribute);
 
     if (existingOriginal !== null) {
+      const existingVaultPath = resolveVaultResourcePath(
+        existingOriginal,
+        documentPath
+      );
       if (
-        isCanonicalVaultResource(existingOriginal) &&
-        current === this.resourceUrl(existingOriginal)
+        existingVaultPath !== null &&
+        current === this.resourceUrl(existingVaultPath)
       ) {
         return;
       }
       element.removeAttribute(marker);
     }
-    if (current === null || !isCanonicalVaultResource(current)) return;
+    if (current === null) return;
+    const vaultPath = resolveVaultResourcePath(current, documentPath);
+    if (vaultPath === null) return;
 
     element.setAttribute(marker, current);
-    element.setAttribute(attribute, this.resourceUrl(current));
+    element.setAttribute(attribute, this.resourceUrl(vaultPath));
   }
 
-  #restoreAttribute(element: HTMLElement, attribute: "src" | "href"): void {
+  #restoreAttribute(
+    element: HTMLElement,
+    attribute: "src" | "href",
+    documentPath: string
+  ): void {
     const marker = ORIGINAL_ATTRIBUTE[attribute];
     const original = element.getAttribute(marker);
     const current = element.getAttribute(attribute);
 
     if (original !== null) {
+      const originalVaultPath = resolveVaultResourcePath(original, documentPath);
       const exactDisplay =
-        isCanonicalVaultResource(original) &&
-        current === this.resourceUrl(original);
+        originalVaultPath !== null &&
+        current === this.resourceUrl(originalVaultPath);
       if (exactDisplay) {
         element.setAttribute(attribute, original);
       } else if (
         current === null ||
-        !isAllowedAuthoringUrl(element, attribute, current)
+        !isAllowedAuthoringUrl(element, attribute, current, documentPath)
       ) {
         element.removeAttribute(attribute);
       }
@@ -90,13 +105,43 @@ export class EditorResourceResolver {
   }
 }
 
-function isCanonicalVaultResource(value: string): boolean {
-  return (
-    value === value.trim() &&
-    !value.includes("?") &&
-    !value.includes("#") &&
-    isNormalizedVaultRelativePath(value)
-  );
+export function resolveVaultResourcePath(
+  value: string,
+  documentPath: string
+): string | null {
+  if (
+    value !== value.trim() ||
+    !value ||
+    value.includes("\\") ||
+    value.includes("?") ||
+    value.includes("#") ||
+    value.startsWith("//") ||
+    hasAsciiControl(value) ||
+    isSystemOrRuntimeUrl(value)
+  ) {
+    return null;
+  }
+  const base = documentFolderSegments(documentPath);
+  if (base === null) return null;
+  const resolved = [...base];
+  for (const segment of value.split("/")) {
+    if (segment === ".") continue;
+    if (!segment) return null;
+    if (segment === "..") {
+      if (resolved.length === 0) return null;
+      resolved.pop();
+      continue;
+    }
+    resolved.push(segment);
+  }
+  const path = resolved.join("/");
+  return isNormalizedVaultRelativePath(path) ? path : null;
+}
+
+function documentFolderSegments(documentPath: string): string[] | null {
+  if (!documentPath) return [];
+  if (!isNormalizedVaultRelativePath(documentPath)) return null;
+  return documentPath.split("/").slice(0, -1);
 }
 
 function isSystemOrRuntimeUrl(value: string): boolean {
@@ -106,7 +151,8 @@ function isSystemOrRuntimeUrl(value: string): boolean {
 function isAllowedAuthoringUrl(
   element: HTMLElement,
   attribute: "src" | "href",
-  value: string
+  value: string,
+  documentPath: string
 ): boolean {
   if (
     value !== value.trim() ||
@@ -118,10 +164,10 @@ function isAllowedAuthoringUrl(
   ) {
     return false;
   }
-  if (isCanonicalVaultResource(value)) return true;
+  if (resolveVaultResourcePath(value, documentPath) !== null) return true;
   if (
     attribute === "href" &&
-    (value.startsWith("#") || isCanonicalVaultReference(value))
+    (value.startsWith("#") || isVaultReference(value, documentPath))
   ) {
     return true;
   }
@@ -138,9 +184,12 @@ function isAllowedAuthoringUrl(
   );
 }
 
-function isCanonicalVaultReference(value: string): boolean {
+function isVaultReference(value: string, documentPath: string): boolean {
   const suffixStart = value.search(/[?#]/u);
-  return suffixStart > 0 && isCanonicalVaultResource(value.slice(0, suffixStart));
+  return (
+    suffixStart > 0 &&
+    resolveVaultResourcePath(value.slice(0, suffixStart), documentPath) !== null
+  );
 }
 
 function parseFragment(html: string): DocumentFragment {

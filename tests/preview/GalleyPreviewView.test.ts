@@ -7,6 +7,7 @@ import {
   openGalleyPreview
 } from "../../src/preview/GalleyPreviewView";
 import { EditorResourceResolver } from "../../src/editor/EditorResourceResolver";
+import { PreviewResourceResolver } from "../../src/preview/PreviewResourceResolver";
 import { LocaleStore } from "../../src/i18n/LocaleStore";
 
 const HTML = '<!DOCTYPE html><html lang="zh-CN"><head><title>x</title></head><body><article><p>safe preview</p><script>alert(1)</script></article></body></html>';
@@ -93,16 +94,19 @@ describe("GalleyPreviewView", () => {
   });
 
   it("resolves vault-relative images for srcdoc without leaking temporary markers", async () => {
-    const html = HTML.replace("</p>", '<img src="images/cover.png" alt="cover"></p>');
+    const html = HTML.replace("</p>", '<img src="./images/cover.png" alt="cover"></p>');
     const view = new GalleyPreviewView(new WorkspaceLeaf(), {
       openDocument: async () => ({ html }),
-      resourceResolver: new EditorResourceResolver((path) => `app://vault/${path}`)
+      resourceResolver: new EditorResourceResolver((path) => `app://vault/${path}`),
+      previewResourceResolver: new PreviewResourceResolver(async () => new Uint8Array([
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a
+      ]))
     });
 
     await view.openPath("notes/a.galley.html");
 
     const srcdoc = (view.contentEl.querySelector("iframe") as HTMLIFrameElement).srcdoc;
-    expect(srcdoc).toContain('src="app://vault/images/cover.png"');
+    expect(srcdoc).toContain('src="data:image/png;base64,');
     expect(srcdoc).not.toContain("data-galley-original");
   });
 

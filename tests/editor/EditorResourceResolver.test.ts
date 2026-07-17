@@ -23,6 +23,45 @@ describe("EditorResourceResolver", () => {
     expect(resolver.restoreForSave(display)).toBe(authoring);
   });
 
+  it("resolves dot-relative resources against the HTML document folder", () => {
+    const resourceUrl = vi.fn((path: string) => `app://vault/${encodeURI(path)}`);
+    const resolver = new EditorResourceResolver(resourceUrl);
+    const authoring = [
+      '<img src="./images/本地图片.png" alt="local">',
+      '<img src="../shared/cover.png" alt="shared">'
+    ].join("");
+
+    const display = resolver.rewriteForDisplay(
+      authoring,
+      "个人知识库/文章/Galley Studio.html"
+    );
+
+    expect(display).toContain(
+      'src="app://vault/%E4%B8%AA%E4%BA%BA%E7%9F%A5%E8%AF%86%E5%BA%93/%E6%96%87%E7%AB%A0/images/%E6%9C%AC%E5%9C%B0%E5%9B%BE%E7%89%87.png"'
+    );
+    expect(display).toContain(
+      'data-galley-original-src="./images/本地图片.png"'
+    );
+    expect(display).toContain(
+      'src="app://vault/%E4%B8%AA%E4%BA%BA%E7%9F%A5%E8%AF%86%E5%BA%93/shared/cover.png"'
+    );
+    expect(resolver.restoreForSave(
+      display,
+      "个人知识库/文章/Galley Studio.html"
+    )).toBe(authoring);
+  });
+
+  it("rejects a relative resource that escapes above the vault root", () => {
+    const resourceUrl = vi.fn((path: string) => `app://vault/${path}`);
+    const resolver = new EditorResourceResolver(resourceUrl);
+    const authoring = '<img src="../../private.png">';
+
+    expect(resolver.rewriteForDisplay(authoring, "notes/article.html")).toBe(
+      authoring
+    );
+    expect(resourceUrl).not.toHaveBeenCalled();
+  });
+
   it("never trusts pre-existing markers or writes absolute system paths", () => {
     const resolver = new EditorResourceResolver((path) => `app://vault/${path}`);
     const hostile = [

@@ -12,7 +12,7 @@ Markdown 文章交给 OpenAI-compatible 模型、Codex CLI 或 Claude CLI，
 中完成预览、可视化编辑、源码编辑和复制导出。
 
 - 作者：**Kinrochen**
-- 当前版本：**0.2.4**
+- 当前版本：**0.2.5**
 - 最低 Obsidian 版本：**1.11.4**
 - 许可证：**AGPL-3.0-or-later**
 - 项目地址：<https://github.com/kinrochen/Galley-Studio>
@@ -187,7 +187,7 @@ document can be previewed, visually edited, source-edited, saved, and copied
 without leaving Obsidian.
 
 - Author: **Kinrochen**
-- Current version: **0.2.4**
+- Current version: **0.2.5**
 - Minimum Obsidian version: **1.11.4**
 - License: **AGPL-3.0-or-later**
 - Repository: <https://github.com/kinrochen/Galley-Studio>

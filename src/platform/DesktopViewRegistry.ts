@@ -8,6 +8,7 @@ import type { OpenedGalleyDocumentSession } from "../documents/DocumentSessionOp
 import { ObsidianDocumentSessionOpener } from "../documents/ObsidianDocumentSessionOpener";
 import { EditorFactory } from "../editor/EditorFactory";
 import { EditorResourceResolver } from "../editor/EditorResourceResolver";
+import { PreviewResourceResolver } from "../preview/PreviewResourceResolver";
 import type { LocalizedText } from "../i18n/LocalizedText";
 import type { GalleySettings } from "../settings/GalleySettings";
 import {
@@ -110,6 +111,10 @@ export function createWorkbenchView(
     const file = host.app.vault.getFileByPath(path);
     return file ? host.app.vault.getResourcePath(file) : path;
   });
+  const previewResourceResolver = new PreviewResourceResolver(async (path) => {
+    const file = host.app.vault.getFileByPath(path);
+    return file ? host.app.vault.readBinary(file) : null;
+  });
   const services: GalleyWorkbenchViewServices = {
     capabilities: host.capabilities,
     openDocument: async (path) => asWorkbenchDocument(await opener.open(path)),
@@ -118,6 +123,7 @@ export function createWorkbenchView(
     openCopy: (path) => openWorkbench(host.app, path),
     confirm: (message) => requestConfirmation(host.app, message),
     resourceResolver,
+    previewResourceResolver,
     documentBaseUrl: () => "app://vault/",
     copyHtml: (html) => navigator.clipboard.writeText(html),
     reportCopyOutcome: (message) => new Notice(message),
