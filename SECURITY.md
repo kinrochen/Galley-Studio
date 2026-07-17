@@ -26,7 +26,7 @@ encryption, missing files, and configured archive/entry/extracted-size limits.
 The UI rejects oversized `File.size` values before allocating an `ArrayBuffer`;
 extraction then reconciles local and central headers and streams actual output
 through length, aggregate-limit, and CRC checks. Python, shell, and other
-scripts are read-only reference text and are never executed. Galley Studio 0.2.3 does
+scripts are read-only reference text and are never executed. Galley Studio 0.2.4 does
 not expose Skill import or activation in the UI; its bundled Skill is pinned to
 an audited upstream commit.
 

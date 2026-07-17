@@ -2,6 +2,24 @@
 
 All notable changes to Galley Studio are documented here.
 
+## 0.2.4 — 2026-07-17
+
+### 中文
+
+- 修复 Obsidian 桌面端将 Node.js 动态导入解析为 `app://` 请求而导致的
+  CORS 错误，恢复控制台、设置页和本地 CLI Agent。
+- 增加仅桌面端可用的 Node 模块加载桥，并继续保持移动端预览边界。
+- 增加发布回归测试，阻止原生 Node 动态导入重新进入生产包。
+- 重写中英文项目介绍和 Galley Studio 宣传博客。
+
+### English
+
+- Fix Obsidian desktop CORS failures caused by resolving Node.js dynamic imports
+  as `app://` requests, restoring the console, settings, and local CLI agents.
+- Add a Desktop-only Node module bridge while preserving the mobile preview boundary.
+- Add release regression coverage that rejects native Node dynamic imports in the bundle.
+- Refresh the bilingual project introduction and Galley Studio launch article.
+
 ## 0.2.3 — 2026-07-16
 
 - Remove HugeRTE's unused runtime script loader from the production bundle.

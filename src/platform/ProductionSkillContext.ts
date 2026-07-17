@@ -26,6 +26,7 @@ import { BuiltInThemeRepository } from "../themes/BuiltInThemeRepository";
 import { CustomThemeRepository } from "../themes/CustomThemeRepository";
 import { MergedThemeRepository } from "../themes/MergedThemeRepository";
 import { ObsidianCustomThemeStore } from "../themes/ObsidianCustomThemeStore";
+import { loadDesktopNodeModule } from "./DesktopNodeModuleLoader";
 
 export type ProductionSkillProfile = "generation" | "theme" | "wechat";
 
@@ -189,7 +190,7 @@ async function generationClient(
       const executable = agent === "codex-cli"
         ? settings.codexCliPath
         : settings.claudeCliPath;
-      const path = await import("node:path");
+      const path = loadDesktopNodeModule("node:path");
       return {
         client: new LocalCliChatClient({
           agent,
@@ -247,12 +248,9 @@ async function materializeLocalCliSkill(
   packageHash: string
 ): Promise<string> {
   if (Platform.isDesktop) {
-    const [filesystem, operatingSystem, pathModule] =
-      await Promise.all([
-        import("node:fs/promises"),
-        import("node:os"),
-        import("node:path")
-      ]);
+    const filesystem = loadDesktopNodeModule("node:fs/promises");
+    const operatingSystem = loadDesktopNodeModule("node:os");
+    const pathModule = loadDesktopNodeModule("node:path");
     const root = pathModule.join(
       operatingSystem.tmpdir(),
       "galley-skills",

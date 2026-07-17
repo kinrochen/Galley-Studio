@@ -9,6 +9,7 @@ import type {
 } from "./AiProtocol";
 import type { GenerationAgent } from "../settings/GalleySettings";
 import type { GenerationModelEvent } from "../generation/GenerationProgress";
+import { loadDesktopNodeModule } from "../platform/DesktopNodeModuleLoader";
 
 export type LocalCliAgent = Exclude<GenerationAgent, "plugin">;
 
@@ -90,11 +91,11 @@ export class LocalCliChatClient implements ChatClient {
         ]
       | undefined;
     if (Platform.isDesktop) {
-      desktopModules = await Promise.all([
-        import("node:child_process"),
-        import("node:fs"),
-        import("node:process")
-      ]);
+      desktopModules = [
+        loadDesktopNodeModule("node:child_process"),
+        loadDesktopNodeModule("node:fs"),
+        loadDesktopNodeModule("node:process")
+      ];
     }
     if (!desktopModules) throw new AiError("cli_not_found");
     const [childProcess, filesystem, processModule] = desktopModules;

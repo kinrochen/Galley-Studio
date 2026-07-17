@@ -12,11 +12,11 @@ Markdown 文章交给 OpenAI-compatible 模型、Codex CLI 或 Claude CLI，
 中完成预览、可视化编辑、源码编辑和复制导出。
 
 - 作者：**Kinrochen**
-- 当前版本：**0.2.3**
+- 当前版本：**0.2.4**
 - 最低 Obsidian 版本：**1.11.4**
 - 许可证：**AGPL-3.0-or-later**
 - 项目地址：<https://github.com/kinrochen/Galley-Studio>
-- 宣传文章：[Galley Studio：把 Obsidian 里的 Markdown，变成真正可编辑的公众号 HTML](docs/blog/galley-studio-obsidian-ai-publishing-studio.md)
+- 宣传文章：[写在 Obsidian，发布到公众号：Galley Studio 把 AI 排版变成一条完整工作流](docs/blog/galley-studio-obsidian-ai-publishing-studio.md)
 - 支持项目：<https://ifdian.net/a/kinrochen>
 
 ### 功能
@@ -187,11 +187,11 @@ document can be previewed, visually edited, source-edited, saved, and copied
 without leaving Obsidian.
 
 - Author: **Kinrochen**
-- Current version: **0.2.3**
+- Current version: **0.2.4**
 - Minimum Obsidian version: **1.11.4**
 - License: **AGPL-3.0-or-later**
 - Repository: <https://github.com/kinrochen/Galley-Studio>
-- Launch article (Chinese): [Galley Studio: turn Obsidian Markdown into editable publishing HTML](docs/blog/galley-studio-obsidian-ai-publishing-studio.md)
+- Launch article (Chinese): [Write in Obsidian, publish to WeChat: Galley Studio turns AI formatting into a complete workflow](docs/blog/galley-studio-obsidian-ai-publishing-studio.md)
 - Support the project: <https://ifdian.net/a/kinrochen>
 
 ### Features

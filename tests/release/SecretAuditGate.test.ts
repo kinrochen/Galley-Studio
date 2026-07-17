@@ -49,7 +49,7 @@ function writeRelease(root: string, main: string): void {
   const release = join(root, "release");
   requireDirectory(release);
   writeFileSync(
-    join(release, "galley-studio-0.2.3.zip"),
+    join(release, "galley-studio-0.2.4.zip"),
     zipSync({
       "main.js": strToU8(main),
       "manifest.json": strToU8("{}"),
