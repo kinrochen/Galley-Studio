@@ -3,8 +3,8 @@ import { resolve } from "node:path";
 import { unzipSync } from "fflate";
 import { expect, it } from "vitest";
 
-it("contains exactly the five 0.2.5 release files when the release gate has run", () => {
-  const path = resolve("release/galley-studio-0.2.5.zip");
+it("contains exactly the five 0.2.6 release files when the release gate has run", () => {
+  const path = resolve("release/galley-studio-0.2.6.zip");
   if (!existsSync(path)) {
     // `npm test` intentionally runs before the release gate in CI. The final
     // `npm test -- tests/release` run exercises the archive branch below.
@@ -26,7 +26,7 @@ it("contains exactly the five 0.2.5 release files when the release gate has run"
     author?: string;
     fundingUrl?: string;
   };
-  expect(manifest.version).toBe("0.2.5");
+  expect(manifest.version).toBe("0.2.6");
   expect(manifest.id).toBe("galley-studio");
   expect(manifest.name).toBe("Galley Studio");
   expect(manifest.author).toBe("Kinrochen");

@@ -111,7 +111,8 @@ export interface GalleyWorkbenchViewServices {
     signal: AbortSignal
   ) => Promise<{ readonly path: string; readonly html: string }>;
   readonly copyExportHtml?: (html: string) => Promise<void>;
-  readonly copyHtml?: (html: string) => Promise<void>;
+  readonly copyWechatRichText?: (html: string) => Promise<void>;
+  readonly copySourceHtml?: (html: string) => Promise<void>;
   readonly saveExportConfiguration?: (
     configuration: ExportConfiguration
   ) => Promise<readonly ExportConfiguration[]>;
@@ -335,19 +336,41 @@ export class GalleyWorkbenchView extends ItemView {
 
   async copyCurrentHtml(): Promise<void> {
     const session = this.#document?.session;
-    const copy = this.#services.copyHtml;
+    const copy = this.#services.copyWechatRichText;
     if (!session || !copy) {
-      throw new Error("Galley Studio HTML copy is unavailable.");
+      throw new Error("Galley Studio WeChat rich-text copy is unavailable.");
     }
     this.#captureAdapterBody();
     try {
       await copy(session.html());
       this.#services.reportCopyOutcome?.(
-        this.#text.t("workbench.copyHtml.success")
+        this.#text.t("workbench.copyWechat.success")
       );
     } catch (error) {
       this.#services.reportCopyOutcome?.(
-        this.#text.t("workbench.copyHtml.failed")
+        this.#text.t("workbench.copyWechat.failed", {
+          reason: copyFailureReason(error)
+        })
+      );
+      throw error;
+    }
+  }
+
+  async copyCurrentSourceHtml(): Promise<void> {
+    const session = this.#document?.session;
+    const copy = this.#services.copySourceHtml;
+    if (!session || !copy) {
+      throw new Error("Galley Studio source HTML copy is unavailable.");
+    }
+    this.#captureAdapterBody();
+    try {
+      await copy(session.html());
+      this.#services.reportCopyOutcome?.(
+        this.#text.t("workbench.copySource.success")
+      );
+    } catch (error) {
+      this.#services.reportCopyOutcome?.(
+        this.#text.t("workbench.copySource.failed")
       );
       throw error;
     }
@@ -540,7 +563,8 @@ export class GalleyWorkbenchView extends ItemView {
     if (workflow) workflow.textContent = this.#text.t("workbench.workflow");
     renderWorkbenchToolbar(this.#toolbar, this.#state, {
       onMode: (mode) => this.selectMode(mode),
-      onCopy: () => this.copyCurrentHtml(),
+      onCopyWechat: () => this.copyCurrentHtml(),
+      onCopySource: () => this.copyCurrentSourceHtml(),
       onSave: () => this.saveExplicit()
     }, this.#text);
     if (this.#state.conflict) {
@@ -932,6 +956,12 @@ export class GalleyWorkbenchView extends ItemView {
 
 export function isGalleyHtmlPath(path: string): boolean {
   return isNormalizedVaultRelativePath(path) && path.endsWith(".html");
+}
+
+function copyFailureReason(error: unknown): string {
+  return error instanceof Error && error.message.trim()
+    ? error.message.trim()
+    : "Clipboard access was rejected.";
 }
 
 function filePathFromState(state: unknown): string | null {

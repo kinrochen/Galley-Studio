@@ -1,6 +1,11 @@
 import { Platform } from "obsidian";
 
 interface DesktopNodeModuleMap {
+  readonly electron: {
+    readonly clipboard: {
+      write(data: { readonly html: string; readonly text: string }): void;
+    };
+  };
   readonly "node:child_process": typeof import("node:child_process");
   readonly "node:fs": typeof import("node:fs");
   readonly "node:fs/promises": typeof import("node:fs/promises");
@@ -14,7 +19,7 @@ type DesktopWindow = Window & {
 };
 
 /**
- * Loads an allowlisted Node module through Obsidian's desktop Electron bridge.
+ * Loads an allowlisted desktop module through Obsidian's Electron bridge.
  * Native ESM imports resolve as app:// requests in the renderer and must not be
  * used here. The Platform guard keeps this bridge unreachable on mobile.
  */

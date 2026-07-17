@@ -103,20 +103,37 @@ describe("GalleyWorkbenchView", () => {
     expect(fixture.visual.destroyCalls).toBe(1);
   });
 
-  it("copies the complete current HTML document instead of only the editor body", async () => {
-    const copyHtml = vi.fn(async (_html: string) => undefined);
+  it("sends the complete current document to the WeChat rich-text copier", async () => {
+    const copyWechatRichText = vi.fn(async (_html: string) => undefined);
     const reportCopyOutcome = vi.fn();
-    const fixture = makeFixture({ copyHtml, reportCopyOutcome });
+    const fixture = makeFixture({ copyWechatRichText, reportCopyOutcome });
     await fixture.view.openPath("a.galley.html");
     fixture.visual.emit("<article><p>current unsaved edit</p></article>");
 
     await fixture.view.copyCurrentHtml();
 
-    expect(copyHtml).toHaveBeenCalledTimes(1);
-    expect(copyHtml.mock.calls[0]?.[0]).toMatch(/^<!DOCTYPE html>/u);
-    expect(copyHtml.mock.calls[0]?.[0]).toContain("current unsaved edit");
+    expect(copyWechatRichText).toHaveBeenCalledTimes(1);
+    expect(copyWechatRichText.mock.calls[0]?.[0]).toMatch(/^<!DOCTYPE html>/u);
+    expect(copyWechatRichText.mock.calls[0]?.[0]).toContain("current unsaved edit");
     expect(reportCopyOutcome).toHaveBeenCalledWith(
-      "Copied the complete HTML document."
+      "Copied WeChat-compatible rich text."
+    );
+  });
+
+  it("copies the complete current document as source HTML on request", async () => {
+    const copySourceHtml = vi.fn(async (_html: string) => undefined);
+    const reportCopyOutcome = vi.fn();
+    const fixture = makeFixture({ copySourceHtml, reportCopyOutcome });
+    await fixture.view.openPath("a.galley.html");
+    fixture.visual.emit("<article><p>current source edit</p></article>");
+
+    await fixture.view.copyCurrentSourceHtml();
+
+    expect(copySourceHtml).toHaveBeenCalledTimes(1);
+    expect(copySourceHtml.mock.calls[0]?.[0]).toMatch(/^<!DOCTYPE html>/u);
+    expect(copySourceHtml.mock.calls[0]?.[0]).toContain("current source edit");
+    expect(reportCopyOutcome).toHaveBeenCalledWith(
+      "Copied the complete HTML source."
     );
   });
 
@@ -418,7 +435,8 @@ function makeFixture(options: {
   history?: HistorySnapshot[];
   canEdit?: boolean;
   locale?: LocalizedText;
-  copyHtml?: (html: string) => Promise<void>;
+  copyWechatRichText?: (html: string) => Promise<void>;
+  copySourceHtml?: (html: string) => Promise<void>;
   reportCopyOutcome?: (message: string) => void;
 } = {}) {
   const session = new FakeSession(options.conflictOnAuto);
@@ -443,7 +461,12 @@ function makeFixture(options: {
     createSourceEditor: () => source,
     openCopy,
     confirm: async () => true
-    ,...(options.copyHtml ? { copyHtml: options.copyHtml } : {})
+    ,...(options.copyWechatRichText
+      ? { copyWechatRichText: options.copyWechatRichText }
+      : {})
+    ,...(options.copySourceHtml
+      ? { copySourceHtml: options.copySourceHtml }
+      : {})
     ,...(options.reportCopyOutcome
       ? { reportCopyOutcome: options.reportCopyOutcome }
       : {})

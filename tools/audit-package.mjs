@@ -4,8 +4,8 @@ const packageJson = JSON.parse(await readFile("package.json", "utf8"));
 const lock = JSON.parse(await readFile("package-lock.json", "utf8"));
 const manifest = JSON.parse(await readFile("manifest.json", "utf8"));
 const failures = [];
-if (packageJson.version !== "0.2.5" || lock.version !== "0.2.5" || manifest.version !== "0.2.5") {
-  failures.push("package, lockfile, and manifest versions must all be 0.2.5");
+if (packageJson.version !== "0.2.6" || lock.version !== "0.2.6" || manifest.version !== "0.2.6") {
+  failures.push("package, lockfile, and manifest versions must all be 0.2.6");
 }
 if (
   packageJson.name !== "galley-studio-obsidian" ||

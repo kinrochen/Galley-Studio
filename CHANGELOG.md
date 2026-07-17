@@ -2,6 +2,28 @@
 
 All notable changes to Galley Studio are documented here.
 
+## 0.2.6 — 2026-07-17
+
+### 中文
+
+- 修复“复制到公众号”仅写入纯文本、导致保存草稿或发布后样式丢失的问题；
+  桌面端现在优先通过 Electron 原生剪贴板同时写入 HTML 与纯文本。
+- 保留生成结果中的公众号 HTML 片段，不再在复制前进行会改变排版结构的二次重写。
+- 将“复制到公众号”和“复制源码”拆分为两个明确操作，并补充复制失败原因。
+- 增加公众号片段、原生剪贴板桥接及工具栏行为的回归测试。
+
+### English
+
+- Fix WeChat copy operations that only exposed plain text and therefore lost
+  formatting after saving a draft or publishing; desktop builds now write both
+  HTML and plain text through Electron's native clipboard first.
+- Preserve generated WeChat HTML fragments instead of rewriting their layout
+  structure immediately before copying.
+- Split “Copy for WeChat” and “Copy source” into explicit actions and surface
+  the underlying reason when rich-text copy fails.
+- Add regression coverage for WeChat fragments, the native clipboard bridge,
+  and toolbar behavior.
+
 ## 0.2.5 — 2026-07-17
 
 ### 中文

@@ -8,6 +8,8 @@ import type { OpenedGalleyDocumentSession } from "../documents/DocumentSessionOp
 import { ObsidianDocumentSessionOpener } from "../documents/ObsidianDocumentSessionOpener";
 import { EditorFactory } from "../editor/EditorFactory";
 import { EditorResourceResolver } from "../editor/EditorResourceResolver";
+import { RichTextClipboard } from "../export/RichTextClipboard";
+import { prepareWechatClipboardContent } from "../export/WechatClipboardContent";
 import { PreviewResourceResolver } from "../preview/PreviewResourceResolver";
 import type { LocalizedText } from "../i18n/LocalizedText";
 import type { GalleySettings } from "../settings/GalleySettings";
@@ -22,6 +24,7 @@ import {
   type WorkbenchDocument
 } from "../workbench/GalleyWorkbenchView";
 import { requestConfirmation } from "./ConfirmationModal";
+import { loadDesktopNodeModule } from "./DesktopNodeModuleLoader";
 import type { PlatformCapabilities } from "./PlatformCapabilities";
 
 export interface DesktopViewHost {
@@ -125,11 +128,29 @@ export function createWorkbenchView(
     resourceResolver,
     previewResourceResolver,
     documentBaseUrl: () => "app://vault/",
-    copyHtml: (html) => navigator.clipboard.writeText(html),
+    copyWechatRichText: async (html) => {
+      const richTextClipboard = new RichTextClipboard({
+        document: view.contentEl.ownerDocument,
+        nativeWrite: ({ html: clipboardHtml, text }) => {
+          loadDesktopNodeModule("electron").clipboard.write({
+            html: clipboardHtml,
+            text
+          });
+        }
+      });
+      await richTextClipboard.copy(prepareWechatClipboardContent(html));
+    },
+    copySourceHtml: (html) => {
+      const clipboard = view.contentEl.ownerDocument.defaultView?.navigator.clipboard;
+      return clipboard?.writeText
+        ? clipboard.writeText(html)
+        : Promise.reject(new Error("Clipboard API is unavailable."));
+    },
     reportCopyOutcome: (message) => new Notice(message),
     locale: host.locale
   };
-  return new GalleyWorkbenchView(leaf, services);
+  const view = new GalleyWorkbenchView(leaf, services);
+  return view;
 }
 
 function asWorkbenchDocument(

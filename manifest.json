@@ -1,7 +1,7 @@
 {
   "id": "galley-studio",
   "name": "Galley Studio",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "minAppVersion": "1.11.4",
   "description": "AI-driven Markdown-to-HTML publishing studio.",
   "author": "Kinrochen",

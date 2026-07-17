@@ -2588,8 +2588,8 @@
   position: fixed;
   top: 0;
   left: -10000px;
-  opacity: 0;
   pointer-events: none;
+  user-select: text;
 }
 
 .galley-confirmation-modal__actions {

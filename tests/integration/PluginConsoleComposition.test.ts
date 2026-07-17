@@ -41,7 +41,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-it("composes ribbon → real console action → lazy production workbench → complete HTML copy", async () => {
+it("composes ribbon → real console action → lazy production workbench → rich and source copy", async () => {
   vi.stubGlobal("matchMedia", vi.fn((media: string) => ({
     matches: false,
     media,
@@ -52,10 +52,18 @@ it("composes ribbon → real console action → lazy production workbench → co
     removeEventListener: vi.fn(),
     dispatchEvent: vi.fn(() => true)
   })));
+  const copiedItems: Array<Record<string, Blob>> = [];
+  class ClipboardItem {
+    constructor(readonly data: Record<string, Blob>) {
+      copiedItems.push(data);
+    }
+  }
+  vi.stubGlobal("ClipboardItem", ClipboardItem);
+  const write = vi.fn(async (_items: readonly unknown[]) => undefined);
   const writeText = vi.fn(async (_html: string) => undefined);
   Object.defineProperty(window.navigator, "clipboard", {
     configurable: true,
-    value: { writeText }
+    value: { write, writeText }
   });
   const fixture = await makeObsidianDocumentSessionFixture("plugin composition");
   const vault = persistentObsidianVault(fixture.backing);
@@ -152,7 +160,7 @@ it("composes ribbon → real console action → lazy production workbench → co
     );
     expect(lazyLeaf?.view?.getViewType()).toBe(GALLEY_WORKBENCH_VIEW_TYPE);
     expect(
-      lazyLeaf?.view?.contentEl.querySelector('[data-action="copy-html"]')
+      lazyLeaf?.view?.contentEl.querySelector('[data-action="copy-wechat"]')
     ).not.toBeNull();
     expect(
       lazyLeaf?.view?.contentEl.querySelector('[data-export-action="export"]')
@@ -167,12 +175,21 @@ it("composes ribbon → real console action → lazy production workbench → co
   let copyButton: HTMLButtonElement | null | undefined;
   await vi.waitFor(() => {
     copyButton = workbenchLeaf?.view?.contentEl
-      .querySelector<HTMLButtonElement>('[data-action="copy-html"]');
+      .querySelector<HTMLButtonElement>('[data-action="copy-wechat"]');
     expect(copyButton).not.toBeNull();
     expect(copyButton?.disabled).toBe(false);
   }, { timeout: 10_000 });
   copyButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
+  await vi.waitFor(() => expect(write).toHaveBeenCalledTimes(1));
+  expect(Object.keys(copiedItems[0] ?? {}).sort()).toEqual([
+    "text/html",
+    "text/plain"
+  ]);
+
+  const sourceButton = workbenchLeaf?.view?.contentEl
+    .querySelector<HTMLButtonElement>('[data-action="copy-source"]');
+  sourceButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
   await vi.waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
   expect(writeText.mock.calls[0]?.[0]).toMatch(/^<!DOCTYPE html>/u);
   expect(writeText.mock.calls[0]?.[0]).toContain("plugin composition");

@@ -1,3 +1,7 @@
+import {
+  assertShellFreeHtmlFragment,
+  containsDocumentShellToken
+} from "../../documents/HtmlShellScanner";
 import { sanitizeAuthoringDocument } from "../../security/AuthoringSanitizer";
 import { sanitizeInlineStyle } from "../../security/InlineStyleSanitizer";
 import type { ExportProfile, ExportProfileInput, ExportProfileOutput } from "../ExportProfile";
@@ -10,7 +14,9 @@ export class WechatProfile implements ExportProfile {
   readonly label = "WeChat editor";
 
   async transform(input: Readonly<ExportProfileInput>): Promise<Readonly<ExportProfileOutput>> {
-    const sanitized = sanitizeAuthoringDocument(input.html).html;
+    const sanitized = sanitizeAuthoringDocument(
+      normalizeAuthoringInput(input.html)
+    ).html;
     const source = new DOMParser().parseFromString(sanitized, "text/html");
     const article = source.body.querySelector(":scope > article") ?? source.body.firstElementChild;
     const target = document.implementation.createHTMLDocument("wechat");
@@ -39,6 +45,19 @@ export class WechatProfile implements ExportProfile {
       mediaType: "text/html" as const
     });
   }
+}
+
+function normalizeAuthoringInput(html: string): string {
+  const source = html.trim();
+  if (containsDocumentShellToken(source)) return source;
+  assertShellFreeHtmlFragment(source, "body");
+  return [
+    '<!DOCTYPE html><html lang="zh-CN"><head>',
+    '<meta charset="utf-8"><title>Galley Studio</title>',
+    "</head><body>",
+    source,
+    "</body></html>"
+  ].join("");
 }
 
 function hasDisplayDeclaration(style: string): boolean {

@@ -6,7 +6,8 @@ import {
 
 export interface WorkbenchToolbarActions {
   readonly onMode: (mode: WorkbenchMode) => void | Promise<void>;
-  readonly onCopy: () => void | Promise<void>;
+  readonly onCopyWechat: () => void | Promise<void>;
+  readonly onCopySource: () => void | Promise<void>;
   readonly onSave: () => void | Promise<void>;
 }
 
@@ -63,13 +64,21 @@ export function renderWorkbenchToolbar(
     fragment.append(source);
   }
 
-  const copy = document.createElement("button");
-  copy.type = "button";
-  copy.dataset.action = "copy-html";
-  copy.textContent = text.t("workbench.copyHtml");
-  copy.disabled = !state.documentPath || state.recovery !== "ready";
-  copy.addEventListener("click", () => void actions.onCopy());
-  fragment.append(copy);
+  const copyWechat = document.createElement("button");
+  copyWechat.type = "button";
+  copyWechat.dataset.action = "copy-wechat";
+  copyWechat.textContent = text.t("workbench.copyWechat");
+  copyWechat.disabled = !state.documentPath || state.recovery !== "ready";
+  copyWechat.addEventListener("click", () => void actions.onCopyWechat());
+  fragment.append(copyWechat);
+
+  const copySource = document.createElement("button");
+  copySource.type = "button";
+  copySource.dataset.action = "copy-source";
+  copySource.textContent = text.t("workbench.copySource");
+  copySource.disabled = !state.documentPath || state.recovery !== "ready";
+  copySource.addEventListener("click", () => void actions.onCopySource());
+  fragment.append(copySource);
 
   const save = document.createElement("button");
   save.type = "button";

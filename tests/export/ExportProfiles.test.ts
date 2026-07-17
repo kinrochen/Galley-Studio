@@ -71,6 +71,29 @@ describe("export profiles", () => {
     expect(validateWechatHtml(output.html).valid).toBe(true);
   });
 
+  it("accepts a shell-free single-file article fragment", async () => {
+    const output = await new WechatProfile().transform({
+      ...INPUT,
+      html: '<section style="max-width:677px;margin:0 auto;color:#334155"><p>片段正文 <strong>重点</strong></p></section>'
+    });
+    const template = document.createElement("template");
+    template.innerHTML = output.html;
+    const root = template.content.firstElementChild;
+
+    expect(root?.localName).toBe("section");
+    expect(root?.getAttribute("style")).toContain("max-width: 677px");
+    expect(root?.getAttribute("style")).toContain("color: #334155");
+    expect(root?.textContent).toContain("片段正文 重点");
+    expect(validateWechatHtml(output.html).valid).toBe(true);
+  });
+
+  it("does not reinterpret a partial document shell as an article fragment", async () => {
+    await expect(new WechatProfile().transform({
+      ...INPUT,
+      html: "<section>正文</section></body>"
+    })).rejects.toThrow(/document|shell|body/iu);
+  });
+
   it("migrates sanitized article-root theme styles onto the WeChat root", async () => {
     const output = await new WechatProfile().transform({
       ...INPUT,

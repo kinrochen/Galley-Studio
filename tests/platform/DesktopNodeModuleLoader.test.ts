@@ -36,4 +36,17 @@ describe("DesktopNodeModuleLoader", () => {
     expect(loadDesktopNodeModule("node:path")).toBe(pathModule);
     expect(loader).toHaveBeenCalledWith("node:path");
   });
+
+  it("loads the Electron clipboard through the same desktop guard", () => {
+    Object.defineProperty(Platform, "isDesktop", {
+      configurable: true,
+      value: true
+    });
+    const electron = { clipboard: { write: vi.fn() } };
+    const loader = vi.fn(() => electron);
+    (window as MutableDesktopWindow).require = loader;
+
+    expect(loadDesktopNodeModule("electron")).toBe(electron);
+    expect(loader).toHaveBeenCalledWith("electron");
+  });
 });
